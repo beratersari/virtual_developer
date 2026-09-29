@@ -480,6 +480,82 @@ def test_multi_repo_folder_stays_until_every_review_is_done(
     assert "multi_abc123def456" in deleted
 
 
+def test_first_merged_review_keeps_the_plan_until_every_review_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    """Merging one of two reviews must not delete the plan or the local issue.
+
+    The shared folder stays until every recorded review is done. The plan
+    and the task have to stay with it. A single-repo merge still removes both.
+    """
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        delete_clones_for_merge_request,
+        reset_delete_jobs,
+        reset_mr_state_cache,
+    )
+    from src.state.job_store import job_store
+    from src.state.manager import JiraStateManager
+
+    reset_delete_jobs()
+    reset_mr_state_cache()
+    data = tmp_path / "yaver"
+    data.mkdir()
+    monkeypatch.setenv("YAVER_DATA_DIR", str(data))
+    plans = data / "plans"
+    plans.mkdir()
+    base = tmp_path / "t"
+    root = base / "multi_abc123def456"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    plan = plans / "KAN-12.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    sm = JiraStateManager()
+    assert data in sm.state_dir.parents
+    sm.create_state("KAN-12", "multi", "d")
+    job = job_store.create_job(issue_key="KAN-12", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(root),
+        status="completed",
+        repository_url="https://gitlab.example/group/two.git",
+        merge_request_url=two,
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+            },
+        ],
+    )
+
+    def _state(url: str) -> str:
+        if url.rstrip("/").endswith("/2"):
+            return "opened"
+        return "merged"
+
+    monkeypatch.setattr("src.dashboard.temp_storage._lookup_review_state", _state)
+    deleted = delete_clones_for_merge_request(
+        mr_url=one,
+        mr_iid=1,
+        issue_key="KAN-12",
+        repository_url="https://gitlab.example/group/one.git",
+    )
+    assert "multi_abc123def456" not in deleted
+    assert root.is_dir()
+    removed = []
+    if not plan.is_file():
+        removed.append("plan")
+    if sm.get_state("KAN-12") is None:
+        removed.append("issue state")
+    assert removed == []
+
+
 def test_age_purge_deletes_an_unchanged_multi_repo_folder(tmp_path: Path):
     """The day limit removes multi_* even while a review is still open."""
     import os

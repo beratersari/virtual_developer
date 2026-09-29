@@ -1624,6 +1624,7 @@ def delete_clones_for_merge_request(
     deleted: List[str] = []
     live = _live_git_paths()
     any_live = False
+    waiting_on_review = False
     resolved_names: List[tuple] = []
     for name in names:
         if name not in exist:
@@ -1643,9 +1644,10 @@ def delete_clones_for_merge_request(
             any_live = True
             continue
         if not multi_workspace_ready_to_delete(name, known_done_url=mr_url):
+            waiting_on_review = True
             continue
         resolved_names.append((name, resolved))
-    if not any_live:
+    if not any_live and not waiting_on_review:
         _purge_merged_review_artifacts(mr_url=mr_url, issue_key=issue_key)
     for name, resolved in resolved_names:
         _forget_binds_for_clone(resolved)
