@@ -1,20 +1,28 @@
 """Session continue proofs.
 
-A later plan revise, review comment, or MR follow-up must stay on the
-same chat and must still carry that instruction. These assert the safe
-outcome. A failure here is the bug.
+A later plan revise, review comment, MR follow-up, or plan-job recovery
+must stay on the same chat and must still carry that instruction. These
+assert the safe outcome. A failure here is the bug.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
 from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
-from src.orchestrator.agent_runner import AgentTask
+from src.opencode_serve import (
+    DEFAULT_CONTINUE_PROMPT,
+    DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT,
+    ServeOrchestrator,
+)
+from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.processor import JobProcessor
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
+from tests.test_opencode_serve_e2e import FakeServeBackend, FakeServeClient
 
 REPO = "https://gitlab.example.com/acme/app.git"
 BRANCH = "feature/KAN-9"
@@ -254,6 +262,34 @@ def test_codex_build_requeue_still_uses_the_short_continue(
     assert task.prompt == DEFAULT_CODEX_RESUME_PROMPT
 
 
+def test_claude_plan_timeout_keeps_the_plan_instruction(tmp_path):
+    runner = AgentRunner(working_directory=tmp_path)
+    task = AgentTask(
+        description="plan",
+        prompt=_plan_prompt(),
+        agent="derman-plan",
+        issue_key="KAN-9",
+        backend="claude",
+    )
+    runner._resume_opencode_session_for_retry(task, CLAUDE_ID, why="timeout")
+    assert task.session_id == CLAUDE_ID
+    _assert_plan_instruction(task.prompt)
+
+
+def test_codex_plan_timeout_keeps_the_plan_instruction(tmp_path):
+    runner = AgentRunner(working_directory=tmp_path)
+    task = AgentTask(
+        description="plan",
+        prompt=_plan_prompt(),
+        agent="derman-plan",
+        issue_key="KAN-9",
+        backend="codex",
+    )
+    runner._resume_opencode_session_for_retry(task, CODEX_ID, why="timeout")
+    assert task.session_id == CODEX_ID
+    _assert_plan_instruction(task.prompt)
+
+
 def test_opencode_review_followup_keeps_the_new_comment(
     tmp_path, monkeypatch, isolate_jira_agent_artifacts
 ):
@@ -277,3 +313,47 @@ def test_opencode_review_followup_keeps_the_new_comment(
     )
     assert chosen == OPENCODE_ID
     _assert_review_instruction(task.prompt)
+
+
+def test_plan_timeout_retry_does_not_say_implement(tmp_path):
+    runner = AgentRunner(working_directory=tmp_path)
+    task = AgentTask(
+        description="plan",
+        prompt=_plan_prompt(),
+        agent="derman-plan",
+        issue_key="KAN-9",
+        backend="opencode",
+    )
+    runner._resume_opencode_session_for_retry(
+        task, OPENCODE_ID, why="timeout"
+    )
+    assert task.session_id == OPENCODE_ID
+    assert task.prompt != DEFAULT_CONTINUE_PROMPT
+    _assert_plan_instruction(task.prompt)
+
+
+@pytest.mark.asyncio
+async def test_plan_idle_continue_does_not_tell_the_planner_to_implement():
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = False
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=8.0,
+        compact_poll_seconds=0.02,
+        compact_settle_seconds=0.02,
+    )
+    result = await orch.run(
+        prompt=_plan_prompt(),
+        title="KAN-9",
+        agent="derman-plan",
+    )
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls >= 2
+    continued = [p for p in backend.prompts if REVISE not in (p or "")]
+    assert continued, backend.prompts
+    for prompt in continued:
+        assert prompt != DEFAULT_CONTINUE_PROMPT
+        lowered = (prompt or "").lower()
+        assert "resume implementation" not in lowered
+        assert "commit steps" not in lowered
+        assert "plan file" in lowered or prompt == DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT

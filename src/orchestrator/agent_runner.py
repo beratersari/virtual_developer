@@ -736,6 +736,9 @@ class AgentRunner:
         """
         sid = (session_id or "").strip()
         from src.backends.base import BACKEND_CLAUDE, normalize_backend_name
+        from src.opencode_serve import is_plan_agent
+
+        plan_job = is_plan_agent(getattr(task, "agent", None))
 
         if normalize_backend_name(getattr(task, "backend", None)) == BACKEND_CLAUDE:
             from src.backends.base import is_claude_session_id
@@ -743,7 +746,10 @@ class AgentRunner:
 
             if sid and is_claude_session_id(sid):
                 task.session_id = sid
-                task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
+                # A plan retry must keep the plan instruction. The build
+                # continue line tells the model to implement.
+                if not plan_job:
+                    task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
                 task.abort_busy_session = False
                 logger.warning(f"Retry after {why}: resume Claude session {sid}")
                 return
@@ -761,7 +767,8 @@ class AgentRunner:
                 )
                 return
             task.session_id = sid
-            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            if not plan_job:
+                task.prompt = DEFAULT_CODEX_RESUME_PROMPT
             task.abort_busy_session = False
             logger.warning(
                 f"Retry after {why}: resume Codex thread {sid}"
@@ -809,6 +816,15 @@ class AgentRunner:
             )
             return
         task.session_id = sid
+        if plan_job:
+            # Keep the plan instruction. DEFAULT_CONTINUE_PROMPT says
+            # "resume implementation ... and commit".
+            task.abort_busy_session = False
+            logger.warning(
+                f"Retry after {why}: resume plan session {sid} "
+                "with the plan instruction"
+            )
+            return
         if why == "incomplete_session":
             from src.opencode_serve import DEFAULT_FINISH_TODOS_PROMPT
 

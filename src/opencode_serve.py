@@ -407,7 +407,8 @@ def format_serve_error(
     msg = str(exc).strip() or repr(exc)
     return f"{type(exc).__name__}: {msg}"
 
-# Used only for timeout/error resume — never injected because of auto-compact.
+# Build timeout/error resume — never injected because of auto-compact.
+# Plan retries keep the plan instruction instead of this line.
 DEFAULT_CONTINUE_PROMPT = (
     "Continue the previous OpenCode session. The last turn stopped early "
     "(timeout or error). Finish all remaining todos and complete the original "
@@ -424,6 +425,16 @@ DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT = (
     "the current files and conversation. Do not restart from scratch. "
     "Do not ask clarifying questions. Do not git push or open a merge "
     "request — the orchestrator delivers the branch after you stop."
+)
+
+# Plan compact-loop continue. The build line above tells the model to
+# finish work and hand a branch to the orchestrator (KAN-7 class).
+DEFAULT_PLAN_COMPACT_LOOP_CONTINUE_PROMPT = (
+    "Auto-compact looped and was aborted. Stay in this session. "
+    "Do not start another compaction cycle. Finish the plan file only. "
+    "Do not implement product code, install tools, compile, or commit. "
+    "Do not restart from scratch. Do not ask clarifying questions. "
+    "Do not git push or open a merge request."
 )
 
 # Incomplete (open todos) resume — short nudge, not the original BUILD kit.
@@ -483,6 +494,20 @@ def unattended_nudge_prompt(agent: Optional[str] = None) -> str:
     if is_plan_agent(agent):
         return DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
     return DEFAULT_UNATTENDED_NUDGE_PROMPT
+
+
+def idle_continue_prompt(agent: Optional[str] = None) -> str:
+    """Continue after idle-compact. Plan jobs stay on the plan file."""
+    if is_plan_agent(agent):
+        return DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+    return DEFAULT_CONTINUE_PROMPT
+
+
+def compact_loop_continue_prompt(agent: Optional[str] = None) -> str:
+    """Continue after an aborted compact loop. Plan jobs stay on the plan file."""
+    if is_plan_agent(agent):
+        return DEFAULT_PLAN_COMPACT_LOOP_CONTINUE_PROMPT
+    return DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT
 
 # How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
 # Do not POST a user "Continue" while compact is running — that pollutes chat
@@ -1989,7 +2014,7 @@ class ServeOrchestrator:
                 "[serve] OpenCode idle after compact — sending Continue "
                 f"on the same session {sid} (not an error)",
             )
-            current_prompt = DEFAULT_CONTINUE_PROMPT
+            current_prompt = idle_continue_prompt(agent)
             idle_stuck_used += 1
             continue_count += 1
             turn_idx += 1
@@ -2021,7 +2046,7 @@ class ServeOrchestrator:
                 f"[serve] compact loop — aborted in-flight turn; "
                 f"continuing same session {sid}",
             )
-            current_prompt = DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT
+            current_prompt = compact_loop_continue_prompt(agent)
             compact_loop_used += 1
             continue_count += 1
             turn_idx += 1
