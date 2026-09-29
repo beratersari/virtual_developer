@@ -180,3 +180,34 @@ def test_import_keeps_saved_rows_and_adds_token_repos(monkeypatch):
     assert result["added"] == 1
     assert result["gitlab"] == 1
     assert result["azure"] == 1
+
+
+def test_settings_save_accepts_the_imported_project_list():
+    """Reload from tokens can store every visible repo. Save must accept that list.
+
+    Import allows 500 rows. The settings update currently stops at 40, so a
+    later edit of a label or target does not persist.
+    """
+    from pydantic import ValidationError
+
+    from src.dashboard.project_repos import MAX_PROJECT_REPOS
+    from src.dashboard.schemas import SettingsUpdate
+
+    rows = [
+        {
+            "label": f"repo-{i}",
+            "url": f"https://gitlab.example/acme/repo-{i}.git",
+            "target_branch": "main",
+            "source_branch": "",
+        }
+        for i in range(41)
+    ]
+    assert len(rows) <= MAX_PROJECT_REPOS
+    try:
+        updated = SettingsUpdate(project_repositories=rows)
+    except ValidationError as exc:
+        raise AssertionError(
+            "Settings save rejects a project list the token import is allowed to store"
+        ) from exc
+    assert updated.project_repositories is not None
+    assert len(updated.project_repositories) == 41
