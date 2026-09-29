@@ -23,6 +23,8 @@ import type {
   SchedulePrPreview,
   SchedulePreview,
   SchedulesPayload,
+  ImportedProjects,
+  ProjectRepository,
   SettingsPatch,
   SettingsPayload,
   StorageDeletesPayload,
@@ -452,6 +454,22 @@ export function patchSettings(body: SettingsPatch) {
   return request<SettingsPayload>('/api/settings', {
     method: 'PATCH',
     body: JSON.stringify(body),
+  })
+}
+
+export function importAccessibleProjects(project_repositories: ProjectRepository[]) {
+  return request<ImportedProjects>('/api/settings/projects/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_repositories: project_repositories
+        .filter((row) => row.url.trim())
+        .map((row) => ({
+          label: row.label,
+          url: row.url.trim(),
+          target_branch: (row.target_branch || '').trim(),
+          source_branch: (row.source_branch || '').trim(),
+        })),
+    }),
   })
 }
 

@@ -162,6 +162,15 @@ export type ProjectRepository = {
   source_branch?: string
 }
 
+export type ImportedProjects = {
+  ok: boolean
+  added: number
+  gitlab: number
+  azure: number
+  errors: string[]
+  project_repositories: ProjectRepository[]
+}
+
 export type WorkMode = {
   name: string
   behavior: 'plan' | 'build' | 'test' | string

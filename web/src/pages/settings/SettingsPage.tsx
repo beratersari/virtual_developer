@@ -1,7 +1,8 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   fetchSettings,
+  importAccessibleProjects,
   patchSettings,
   testAzureConnection,
   testGitlabConnection,
@@ -27,6 +28,7 @@ import {
   type SettingsSection,
 } from './settingsSectionUrl'
 import { ModelField } from '../../ui/ModelField'
+import { ProjectSearchField, projectMatchesQuery } from '../../ui/ProjectSelect'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
@@ -198,6 +200,7 @@ function RepoSetList({
   onChangeEditor,
   onSave,
   onRemove,
+  onRemoveAt,
 }: {
   sets: RepositorySet[]
   projects: ProjectRepository[]
@@ -211,7 +214,14 @@ function RepoSetList({
   ) => void
   onSave: () => void
   onRemove: () => void
+  onRemoveAt: (index: number) => void
 }) {
+  const addRef = useRef<HTMLButtonElement>(null)
+  const [repoQuery, setRepoQuery] = useState('')
+  const editorToken = editor == null ? '' : editor.index == null ? 'new' : String(editor.index)
+  useEffect(() => {
+    setRepoQuery('')
+  }, [editorToken])
   const saved = projects
     .map((row) => ({ url: row.url.trim(), label: (row.label || '').trim() }))
     .filter((row) => row.url)
@@ -223,11 +233,12 @@ function RepoSetList({
       .filter((url) => url && !known.has(url))
       .map((url) => ({ url, label: '' })),
   ]
+  const visibleChoices = choices.filter((row) => projectMatchesQuery(row, repoQuery))
   const canSave = Boolean(
     editor && editor.name.trim() && editor.repositories.filter(Boolean).length >= 2,
   )
   return (
-    <div className="mt-6 rounded-xl border border-border p-3">
+    <div className="rounded-xl border border-border p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-text">Repo sets</div>
@@ -237,8 +248,9 @@ function RepoSetList({
           </p>
         </div>
         <button
+          ref={addRef}
           type="button"
-          className="vd-btn vd-btn-secondary"
+          className="vd-btn vd-btn-secondary shrink-0"
           aria-label="Add repo set"
           onClick={onOpenNew}
         >
@@ -248,20 +260,24 @@ function RepoSetList({
       {sets.length === 0 ? (
         <p className="mt-3 text-xs text-text-muted">No repo sets yet.</p>
       ) : (
-        <ul className="mt-3 divide-y divide-border">
-          {sets.map((row, idx) => (
-            <li key={`${row.name}-${idx}`} className="flex items-center justify-between gap-3 py-2">
-              <span className="text-sm text-text">{row.name || 'Untitled set'}</span>
-              <button
-                type="button"
-                className="vd-btn-ghost"
-                aria-label={`Edit ${row.name || 'repo set'}`}
-                onClick={() => onOpenEdit(idx)}
-              >
-                <PencilIcon />
-              </button>
-            </li>
-          ))}
+        <ul className="mt-3 divide-y divide-border" aria-label="Repo sets">
+          {sets.map((row, idx) => {
+            const title = row.name || 'Untitled set'
+            return (
+              <li key={`${row.name}-${idx}`} className="flex items-center justify-between gap-3 py-2">
+                <span className="min-w-0 truncate text-sm text-text">{title}</span>
+                <RowActions
+                  editLabel={`Edit ${title}`}
+                  removeLabel={`Remove ${title}`}
+                  onEdit={() => onOpenEdit(idx)}
+                  onRemove={() => {
+                    onRemoveAt(idx)
+                    window.setTimeout(() => addRef.current?.focus(), 0)
+                  }}
+                />
+              </li>
+            )
+          })}
         </ul>
       )}
       {editor ? (
@@ -295,11 +311,16 @@ function RepoSetList({
                 required
               />
             </label>
-            <div className="mt-3 flex flex-col gap-2">
+            {choices.length > 0 ? (
+              <ProjectSearchField value={repoQuery} onChange={setRepoQuery} />
+            ) : null}
+            <div className="mt-3 flex max-h-60 flex-col gap-2 overflow-y-auto">
               {choices.length === 0 ? (
                 <p className="text-xs text-text-muted">Add a project first.</p>
+              ) : visibleChoices.length === 0 ? (
+                <p className="text-xs text-text-muted">No matching projects.</p>
               ) : (
-                choices.map((row) => (
+                visibleChoices.map((row) => (
                   <label key={row.url} className="flex items-center gap-2 text-xs">
                     <input
                       type="checkbox"
@@ -311,7 +332,7 @@ function RepoSetList({
                         onChangeEditor({ ...editor, repositories })
                       }}
                     />
-                    <span className="font-mono">{row.label || row.url}</span>
+                    <span className="min-w-0 break-all font-mono">{row.label || row.url}</span>
                   </label>
                 ))
               )}
@@ -337,6 +358,39 @@ function RepoSetList({
   )
 }
 
+function RowActions({
+  editLabel,
+  removeLabel,
+  onEdit,
+  onRemove,
+}: {
+  editLabel: string
+  removeLabel: string
+  onEdit: (current: HTMLButtonElement) => void
+  onRemove: () => void
+}) {
+  return (
+    <span className="flex shrink-0 items-center gap-3">
+      <button
+        type="button"
+        className="vd-btn-ghost"
+        aria-label={editLabel}
+        onClick={(event) => onEdit(event.currentTarget)}
+      >
+        <PencilIcon />
+      </button>
+      <button
+        type="button"
+        className="vd-btn-ghost bad"
+        aria-label={removeLabel}
+        onClick={onRemove}
+      >
+        <TrashIcon />
+      </button>
+    </span>
+  )
+}
+
 function PencilIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
@@ -347,6 +401,213 @@ function PencilIcon() {
         strokeLinejoin="round"
       />
     </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
+      <path
+        d="M3.2 4.5h9.6M6.4 4.5V3.4a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.1M4.6 4.5l.55 8a1 1 0 0 0 1 .9h3.7a1 1 0 0 0 1-.9l.55-8"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+type ProjectEditorState = {
+  index: number | null
+  label: string
+  url: string
+  target_branch: string
+  source_branch: string
+}
+
+function ProjectRepoList({
+  projects,
+  editor,
+  titleId,
+  status,
+  reloadDisabled,
+  onReload,
+  onOpenNew,
+  onOpenEdit,
+  onClose,
+  onChangeEditor,
+  onSave,
+  onRemoveAt,
+}: {
+  projects: ProjectRepository[]
+  editor: ProjectEditorState | null
+  titleId: string
+  status: ReactNode
+  reloadDisabled: boolean
+  onReload: () => void
+  onOpenNew: () => void
+  onOpenEdit: (index: number) => void
+  onClose: () => void
+  onChangeEditor: (next: ProjectEditorState) => void
+  onSave: () => void
+  onRemoveAt: (index: number) => void
+}) {
+  const addRef = useRef<HTMLButtonElement>(null)
+  const labelRef = useRef<HTMLInputElement>(null)
+  const returnFocus = useRef<HTMLElement | null>(null)
+  const wasOpen = useRef(false)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const open = editor != null
+  useEffect(() => {
+    if (!open) {
+      if (!wasOpen.current) return
+      wasOpen.current = false
+      const back = returnFocus.current
+      const timer = window.setTimeout(() => back?.focus(), 0)
+      return () => window.clearTimeout(timer)
+    }
+    wasOpen.current = true
+    labelRef.current?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCloseRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+  const canSave = Boolean(editor && editor.url.trim())
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-text">Saved projects</div>
+          <p className="mt-1 text-xs text-text-muted">
+            Named remotes for Scheduled → New issue.
+          </p>
+        </div>
+        <button
+          ref={addRef}
+          type="button"
+          className="vd-btn vd-btn-secondary shrink-0"
+          aria-label="Add project"
+          onClick={() => {
+            returnFocus.current = addRef.current
+            onOpenNew()
+          }}
+        >
+          +
+        </button>
+      </div>
+      {status}
+      <p className="actions">
+        <button type="button" disabled={reloadDisabled} onClick={onReload}>
+          Reload from tokens
+        </button>
+      </p>
+      {projects.length === 0 ? (
+        <p className="mt-3 text-xs text-text-muted">No saved projects yet.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-border" aria-label="Saved projects">
+          {projects.map((row, idx) => {
+            const title = row.label.trim() || row.url.trim() || 'Untitled project'
+            return (
+              <li key={`${row.url}-${idx}`} className="flex items-center justify-between gap-3 py-2">
+                <span className="min-w-0 truncate text-sm text-text">{title}</span>
+                <RowActions
+                  editLabel={`Edit ${title}`}
+                  removeLabel={`Remove ${title}`}
+                  onEdit={(current) => {
+                    returnFocus.current = current
+                    onOpenEdit(idx)
+                  }}
+                  onRemove={() => {
+                    onRemoveAt(idx)
+                    window.setTimeout(() => addRef.current?.focus(), 0)
+                  }}
+                />
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {editor ? (
+        <div
+          className="vd-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose()
+          }}
+        >
+          <form
+            className="vd-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (canSave) onSave()
+            }}
+          >
+            <h3 id={titleId} className="vd-modal-title">
+              {editor.index == null ? 'Add project' : 'Edit project'}
+            </h3>
+            <label className="field">
+              <span>Label</span>
+              <input
+                ref={labelRef}
+                value={editor.label}
+                placeholder="demo"
+                onChange={(e) => onChangeEditor({ ...editor, label: e.target.value })}
+              />
+            </label>
+            <label className="field">
+              <span>Git URL</span>
+              <input
+                value={editor.url}
+                placeholder="https://gitlab.com/group/repo.git"
+                spellCheck={false}
+                required
+                onChange={(e) => onChangeEditor({ ...editor, url: e.target.value })}
+              />
+            </label>
+            <label className="field">
+              <span>Default target</span>
+              <input
+                value={editor.target_branch}
+                placeholder="develop"
+                spellCheck={false}
+                onChange={(e) =>
+                  onChangeEditor({ ...editor, target_branch: e.target.value })
+                }
+              />
+            </label>
+            <div className="vd-modal-actions">
+              {editor.index != null ? (
+                <button
+                  type="button"
+                  className="vd-btn vd-btn-danger mr-auto"
+                  onClick={() => {
+                    const index = editor.index
+                    if (index == null) return
+                    returnFocus.current = addRef.current
+                    onRemoveAt(index)
+                  }}
+                >
+                  Remove
+                </button>
+              ) : null}
+              <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
+                Cancel
+              </button>
+              <button type="submit" className="vd-btn vd-btn-primary" disabled={!canSave}>
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -365,9 +626,27 @@ export function SettingsPage() {
     repositories: string[]
   } | null>(null)
   const repoSetTitleId = useId()
+  const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
+  const projectTitleId = useId()
   const [draft, setDraft] = useState<Draft | null>(() =>
     live.settings ? fromSettings(live.settings) : null,
   )
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+  const projectsLoaded = useRef(false)
+  const [projectImport, setProjectImport] = useState<
+    | { state: 'idle' | 'loading' }
+    | {
+        state: 'done'
+        added: number
+        gitlab: number
+        azure: number
+        errors: string[]
+      }
+    | { state: 'error'; message: string }
+  >({ state: 'idle' })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
@@ -413,10 +692,53 @@ export function SettingsPage() {
     void fetchSettings()
       .then((s) => {
         setSettings(s)
-        if (!dirtyRef.current) setDraft(fromSettings(s))
+        if (!dirtyRef.current && !projectsLoaded.current) setDraft(fromSettings(s))
       })
       .catch((e: Error) => setError(e.message))
   }, [])
+
+  const loadProjects = useCallback(async () => {
+    const rows =
+      draftRef.current?.project_repositories ??
+      settingsRef.current?.project_repositories ??
+      []
+    setProjectImport({ state: 'loading' })
+    try {
+      const result = await importAccessibleProjects(rows)
+      const repositories = result.project_repositories ?? []
+      setDraft((d) => (d ? { ...d, project_repositories: repositories } : d))
+      setSettings((s) => (s ? { ...s, project_repositories: repositories } : s))
+      const current = settingsRef.current
+      if (current) {
+        pushSettings({ ...current, project_repositories: repositories })
+      }
+      setProjectImport({
+        state: 'done',
+        added: result.added,
+        gitlab: result.gitlab,
+        azure: result.azure,
+        errors: result.errors ?? [],
+      })
+    } catch (e) {
+      setProjectImport({
+        state: 'error',
+        message: e instanceof Error ? e.message : 'Could not load repositories',
+      })
+    }
+  }, [pushSettings])
+
+  useEffect(() => {
+    if (section !== 'projects' || !settings) return
+    if (projectsLoaded.current) return
+    projectsLoaded.current = true
+    void loadProjects()
+  }, [section, settings, loadProjects])
+
+  useEffect(() => {
+    if (section === 'projects') return
+    setProjectEditor(null)
+    setRepoSetEditor(null)
+  }, [section])
 
   const onSave = async () => {
     if (!draft || modelsLoading) return
@@ -1160,111 +1482,95 @@ export function SettingsPage() {
 
       {section === 'projects' && (
       <div key="projects" className="vd-fade space-y-5">
-        <div>
-          <div className="text-sm font-semibold text-text">Saved projects</div>
-          <p className="mt-1 text-xs text-text-muted">
-            Named remotes for Scheduled → New issue.
-          </p>
-        </div>
-        <div className="grid items-start gap-5 lg:grid-cols-2">
-        {draft.project_repositories.map((row, idx) => (
-          <div key={idx} className="vd-panel space-y-2 p-5">
-            <label className="field">
-              <span>Label</span>
-              <input
-                value={row.label}
-                placeholder="demo"
-                onChange={(e) => {
-                  const label = e.target.value
-                  touch('project_repositories')
-                  setDraft((d) => {
-                    if (!d) return d
-                    const next = d.project_repositories.slice()
-                    next[idx] = { ...next[idx], label }
-                    return { ...d, project_repositories: next }
-                  })
-                }}
-              />
-            </label>
-            <label className="field">
-              <span>Git URL</span>
-              <input
-                value={row.url}
-                placeholder="https://gitlab.com/group/repo.git"
-                onChange={(e) => {
-                  const url = e.target.value
-                  touch('project_repositories')
-                  setDraft((d) => {
-                    if (!d) return d
-                    const next = d.project_repositories.slice()
-                    next[idx] = { ...next[idx], url }
-                    return { ...d, project_repositories: next }
-                  })
-                }}
-              />
-            </label>
-            <label className="field">
-              <span>Default target</span>
-              <input
-                value={row.target_branch || ''}
-                placeholder="develop"
-                onChange={(e) => {
-                  const target_branch = e.target.value
-                  touch('project_repositories')
-                  setDraft((d) => {
-                    if (!d) return d
-                    const next = d.project_repositories.slice()
-                    next[idx] = { ...next[idx], target_branch }
-                    return { ...d, project_repositories: next }
-                  })
-                }}
-              />
-            </label>
-            <p className="actions">
-              <button
-                type="button"
-                className="vd-btn-ghost text-danger-text"
-                onClick={() => {
-                  touch('project_repositories')
-                  setDraft((d) =>
-                    d
-                      ? {
-                          ...d,
-                          project_repositories: d.project_repositories.filter(
-                            (_, i) => i !== idx,
-                          ),
-                        }
-                      : d,
-                  )
-                }}
-              >
-                Remove
-              </button>
-            </p>
-          </div>
-        ))}
-        </div>
-        <p className="actions">
-          <button
-            type="button"
-            onClick={() => {
-              touch('project_repositories')
-              setDraft((d) =>
-                d
-                  ? {
-                      ...d,
-                      project_repositories: [
-                        ...d.project_repositories,
-                        { label: '', url: '', target_branch: 'develop' },
-                      ],
-                    }
-                  : d,
-              )
-            }}
-          >
-            Add project
-          </button>
-        </p>
+        <ProjectRepoList
+          projects={draft.project_repositories}
+          editor={projectEditor}
+          titleId={projectTitleId}
+          reloadDisabled={projectImport.state === 'loading'}
+          onReload={() => {
+            setProjectEditor(null)
+            void loadProjects()
+          }}
+          status={
+            <>
+              {projectImport.state === 'loading' ? (
+                <p className="mt-2 flex items-center gap-2 text-xs text-text-muted">
+                  <Spinner /> Loading repositories…
+                </p>
+              ) : null}
+              {projectImport.state === 'done' ? (
+                <p className="mt-2 text-xs text-text-muted">
+                  {projectImport.gitlab} GitLab and {projectImport.azure} Azure
+                  repositories. Added {projectImport.added} to saved projects.
+                  {projectImport.errors.length
+                    ? ` ${projectImport.errors.join(' ')}`
+                    : ''}
+                </p>
+              ) : null}
+              {projectImport.state === 'error' ? (
+                <p className="mt-2 text-xs text-danger-text">{projectImport.message}</p>
+              ) : null}
+            </>
+          }
+          onOpenNew={() =>
+            setProjectEditor({
+              index: null,
+              label: '',
+              url: '',
+              target_branch: 'develop',
+              source_branch: '',
+            })
+          }
+          onOpenEdit={(index) => {
+            const row = draft.project_repositories[index]
+            if (!row) return
+            setProjectEditor({
+              index,
+              label: row.label,
+              url: row.url,
+              target_branch: row.target_branch || '',
+              source_branch: row.source_branch || '',
+            })
+          }}
+          onClose={() => setProjectEditor(null)}
+          onChangeEditor={setProjectEditor}
+          onSave={() => {
+            if (!projectEditor || !projectEditor.url.trim()) return
+            const row: ProjectRepository = {
+              label: projectEditor.label.trim(),
+              url: projectEditor.url.trim(),
+              target_branch: projectEditor.target_branch.trim(),
+              source_branch: (projectEditor.source_branch || '').trim(),
+            }
+            const index = projectEditor.index
+            touch('project_repositories')
+            setDraft((d) => {
+              if (!d) return d
+              const next = d.project_repositories.slice()
+              if (index == null) next.push(row)
+              else next[index] = row
+              return { ...d, project_repositories: next }
+            })
+            setProjectEditor(null)
+          }}
+          onRemoveAt={(index) => {
+            touch('project_repositories')
+            setDraft((d) =>
+              d
+                ? {
+                    ...d,
+                    project_repositories: d.project_repositories.filter((_, i) => i !== index),
+                  }
+                : d,
+            )
+            setProjectEditor((ed) => {
+              if (!ed || ed.index == null) return ed
+              if (ed.index === index) return null
+              if (ed.index > index) return { ...ed, index: ed.index - 1 }
+              return ed
+            })
+          }}
+        />
         <RepoSetList
           sets={draft.repository_sets}
           projects={draft.project_repositories}
@@ -1313,6 +1619,23 @@ export function SettingsPage() {
                 : d,
             )
             setRepoSetEditor(null)
+          }}
+          onRemoveAt={(index) => {
+            touch('repository_sets')
+            setDraft((d) =>
+              d
+                ? {
+                    ...d,
+                    repository_sets: d.repository_sets.filter((_, i) => i !== index),
+                  }
+                : d,
+            )
+            setRepoSetEditor((ed) => {
+              if (!ed || ed.index == null) return ed
+              if (ed.index === index) return null
+              if (ed.index > index) return { ...ed, index: ed.index - 1 }
+              return ed
+            })
           }}
         />
       </div>
