@@ -21,6 +21,14 @@ import { useLive } from '../../app/live'
 import { azureCollectionProblem } from './azureCollection'
 import { ModesPanel } from './ModesPanel'
 import {
+  editorIndexAfterRemoval,
+  filterSavedProjects,
+  savedProjectKey,
+  toggleVisibleSelection,
+  visibleSelectionState,
+  withoutSelectedProjects,
+} from './savedProjects'
+import {
   canonicalSettingsPath,
   settingsHere,
   settingsSectionFromParam,
@@ -199,7 +207,6 @@ function RepoSetList({
   onClose,
   onChangeEditor,
   onSave,
-  onRemove,
   onRemoveAt,
 }: {
   sets: RepositorySet[]
@@ -213,7 +220,6 @@ function RepoSetList({
     next: { index: number | null; name: string; repositories: string[] } | null,
   ) => void
   onSave: () => void
-  onRemove: () => void
   onRemoveAt: (index: number) => void
 }) {
   const addRef = useRef<HTMLButtonElement>(null)
@@ -318,6 +324,7 @@ function RepoSetList({
                       <button
                         type="button"
                         className="vd-btn-ghost bad"
+                        aria-label={`Remove ${row?.label || url} from this set`}
                         onClick={() =>
                           onChangeEditor({
                             ...editor,
@@ -325,7 +332,7 @@ function RepoSetList({
                           })
                         }
                       >
-                        Remove
+                        <TrashIcon />
                       </button>
                     </li>
                   )
@@ -348,11 +355,6 @@ function RepoSetList({
             )}
             <p className="mt-2 text-xs text-text-muted">Select at least two projects.</p>
             <div className="vd-modal-actions">
-              {editor.index != null ? (
-                <button type="button" className="vd-btn vd-btn-danger mr-auto" onClick={onRemove}>
-                  Remove
-                </button>
-              ) : null}
               <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
                 Cancel
               </button>
@@ -448,6 +450,7 @@ function ProjectRepoList({
   onChangeEditor,
   onSave,
   onRemoveAt,
+  onRemoveSelected,
 }: {
   projects: ProjectRepository[]
   editor: ProjectEditorState | null
@@ -461,14 +464,40 @@ function ProjectRepoList({
   onChangeEditor: (next: ProjectEditorState) => void
   onSave: () => void
   onRemoveAt: (index: number) => void
+  onRemoveSelected: (selected: ReadonlySet<string>) => void
 }) {
   const addRef = useRef<HTMLButtonElement>(null)
   const labelRef = useRef<HTMLInputElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const selectAllRef = useRef<HTMLInputElement>(null)
+  const deleteRef = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef<HTMLElement | null>(null)
   const wasOpen = useRef(false)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  const searchId = useId()
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const visible = filterSavedProjects(projects, query)
+  const visibleKeys = visible.map((row) => row.key)
+  const selection = visibleSelectionState(visibleKeys, selected)
   const open = editor != null
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selection === 'some'
+  }, [selection])
+  useEffect(() => {
+    const live = new Set(projects.map((project, index) => savedProjectKey(project, index)))
+    setSelected((prev) => {
+      let changed = false
+      const next = new Set<string>()
+      prev.forEach((key) => {
+        if (live.has(key)) next.add(key)
+        else changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [projects])
   useEffect(() => {
     if (!open) {
       if (!wasOpen.current) return
@@ -517,29 +546,123 @@ function ProjectRepoList({
       {projects.length === 0 ? (
         <p className="mt-3 text-xs text-text-muted">No saved projects yet.</p>
       ) : (
-        <ul className="mt-3 divide-y divide-border" aria-label="Saved projects">
-          {projects.map((row, idx) => {
-            const title = row.label.trim() || row.url.trim() || 'Untitled project'
-            return (
-              <li key={`${row.url}-${idx}`} className="flex items-center justify-between gap-3 py-2">
-                <span className="min-w-0 truncate text-sm text-text">{title}</span>
-                <RowActions
-                  editLabel={`Edit ${title}`}
-                  removeLabel={`Remove ${title}`}
-                  onEdit={(current) => {
-                    returnFocus.current = current
-                    onOpenEdit(idx)
-                  }}
-                  onRemove={() => {
-                    onRemoveAt(idx)
-                    window.setTimeout(() => addRef.current?.focus(), 0)
-                  }}
-                />
-              </li>
-            )
-          })}
-        </ul>
+        <>
+          <label className="field mt-3" htmlFor={searchId}>
+            <span>Search</span>
+            <input
+              ref={searchRef}
+              id={searchId}
+              type="search"
+              placeholder="Name"
+              value={query}
+              autoComplete="off"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="field-check text-sm text-text">
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                className="vd-checkbox"
+                aria-label="Select all saved projects"
+                checked={selection === 'all'}
+                disabled={visible.length === 0}
+                onChange={() => {
+                  setSelected((prev) =>
+                    toggleVisibleSelection(visibleKeys, prev, selection !== 'all'),
+                  )
+                }}
+              />
+              <span>Select all</span>
+            </label>
+            {selected.size > 0 ? (
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-text-muted">
+                  {selected.size} selected
+                </span>
+                <button
+                  type="button"
+                  className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
+                  onClick={() => setSelected(new Set())}
+                >
+                  Clear
+                </button>
+                <button
+                  ref={deleteRef}
+                  type="button"
+                  className="vd-btn vd-btn-danger px-3 py-1 text-xs"
+                  onClick={() => setConfirmDelete(true)}
+                >
+                  Delete selected
+                </button>
+              </span>
+            ) : null}
+          </div>
+          {visible.length === 0 ? (
+            <p className="mt-3 text-xs text-text-muted">No projects match that name.</p>
+          ) : (
+            <ul className="mt-3 divide-y divide-border" aria-label="Saved projects">
+              {visible.map((row) => (
+                <li
+                  key={`${row.key}-${row.index}`}
+                  className="flex items-center gap-3 py-2"
+                >
+                  <label className="flex min-w-0 flex-1 items-center gap-3 text-sm text-text">
+                    <input
+                      type="checkbox"
+                      className="vd-checkbox shrink-0"
+                      aria-label={`Select ${row.name}`}
+                      checked={selected.has(row.key)}
+                      onChange={() => {
+                        setSelected((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(row.key)) next.delete(row.key)
+                          else next.add(row.key)
+                          return next
+                        })
+                      }}
+                    />
+                    <span className="min-w-0 truncate">{row.name}</span>
+                  </label>
+                  <RowActions
+                    editLabel={`Edit ${row.name}`}
+                    removeLabel={`Remove ${row.name}`}
+                    onEdit={(current) => {
+                      returnFocus.current = current
+                      onOpenEdit(row.index)
+                    }}
+                    onRemove={() => {
+                      onRemoveAt(row.index)
+                      window.setTimeout(() => addRef.current?.focus(), 0)
+                    }}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${selected.size} saved ${selected.size === 1 ? 'project' : 'projects'}?`}
+        body="They leave Saved projects. Press Save at the top of Settings to store this change."
+        confirmLabel="Delete"
+        danger
+        onCancel={() => {
+          setConfirmDelete(false)
+          window.setTimeout(() => deleteRef.current?.focus(), 0)
+        }}
+        onConfirm={() => {
+          onRemoveSelected(selected)
+          setSelected(new Set())
+          setConfirmDelete(false)
+          window.setTimeout(() => {
+            if (searchRef.current) searchRef.current.focus()
+            else addRef.current?.focus()
+          }, 0)
+        }}
+      />
       {editor ? (
         <div
           className="vd-modal-backdrop"
@@ -592,20 +715,6 @@ function ProjectRepoList({
               />
             </label>
             <div className="vd-modal-actions">
-              {editor.index != null ? (
-                <button
-                  type="button"
-                  className="vd-btn vd-btn-danger mr-auto"
-                  onClick={() => {
-                    const index = editor.index
-                    if (index == null) return
-                    returnFocus.current = addRef.current
-                    onRemoveAt(index)
-                  }}
-                >
-                  Remove
-                </button>
-              ) : null}
               <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
                 Cancel
               </button>
@@ -1573,6 +1682,28 @@ export function SettingsPage() {
               return ed
             })
           }}
+          onRemoveSelected={(keys) => {
+            const current = draft.project_repositories
+            touch('project_repositories')
+            setDraft((d) =>
+              d
+                ? {
+                    ...d,
+                    project_repositories: withoutSelectedProjects(
+                      d.project_repositories,
+                      keys,
+                    ),
+                  }
+                : d,
+            )
+            setProjectEditor((ed) => {
+              if (!ed || ed.index == null) return ed
+              const next = editorIndexAfterRemoval(ed.index, current, keys)
+              if (next == null) return null
+              if (next === ed.index) return ed
+              return { ...ed, index: next }
+            })
+          }}
         />
         <RepoSetList
           sets={draft.repository_sets}
@@ -1607,20 +1738,6 @@ export function SettingsPage() {
               else next[repoSetEditor.index] = row
               return { ...d, repository_sets: next }
             })
-            setRepoSetEditor(null)
-          }}
-          onRemove={() => {
-            if (!repoSetEditor || repoSetEditor.index == null) return
-            const index = repoSetEditor.index
-            touch('repository_sets')
-            setDraft((d) =>
-              d
-                ? {
-                    ...d,
-                    repository_sets: d.repository_sets.filter((_, i) => i !== index),
-                  }
-                : d,
-            )
             setRepoSetEditor(null)
           }}
           onRemoveAt={(index) => {
