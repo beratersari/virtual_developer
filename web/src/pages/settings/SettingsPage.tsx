@@ -702,6 +702,7 @@ export function SettingsPage() {
       draftRef.current?.project_repositories ??
       settingsRef.current?.project_repositories ??
       []
+    projectsLoaded.current = true
     setProjectImport({ state: 'loading' })
     try {
       const result = await importAccessibleProjects(rows)
@@ -726,13 +727,6 @@ export function SettingsPage() {
       })
     }
   }, [pushSettings])
-
-  useEffect(() => {
-    if (section !== 'projects' || !settings) return
-    if (projectsLoaded.current) return
-    projectsLoaded.current = true
-    void loadProjects()
-  }, [section, settings, loadProjects])
 
   useEffect(() => {
     if (section === 'projects') return
