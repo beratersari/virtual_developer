@@ -29,6 +29,7 @@ import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
+import { ProjectSelect } from '../../ui/ProjectSelect'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
 import {
@@ -502,30 +503,22 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={(e) => void submit(e)}>
       {projects.length > 0 && (
-        <label className="field">
-          <span>Project</span>
-          <select
-            value={repoPick}
-            onChange={(e) => {
-              const v = e.target.value
-              setRepoPick(v)
-              setPreview(null)
-              if (v === CUSTOM_REPO) {
-                setRepo('')
-                return
-              }
-              const hit = projects.find((p) => p.url === v)
-              if (hit) setRepo(hit.url)
-            }}
-          >
-            {projects.map((p) => (
-              <option key={p.url} value={p.url}>
-                {p.label || p.url}
-              </option>
-            ))}
-            <option value={CUSTOM_REPO}>Other URL…</option>
-          </select>
-        </label>
+        <ProjectSelect
+          label="Project"
+          projects={projects}
+          value={repoPick}
+          onChange={(v) => {
+            setRepoPick(v)
+            setPreview(null)
+            if (v === CUSTOM_REPO) {
+              setRepo('')
+              return
+            }
+            const hit = projects.find((p) => p.url === v)
+            if (hit) setRepo(hit.url)
+          }}
+          trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
+        />
       )}
       {(isCustom || projects.length === 0) && (
         <label className="field">
@@ -729,30 +722,22 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={(e) => void submit(e)}>
       {projects.length > 0 && (
-        <label className="field">
-          <span>Project</span>
-          <select
-            value={repoPick}
-            onChange={(e) => {
-              const v = e.target.value
-              setRepoPick(v)
-              setPreview(null)
-              if (v === CUSTOM_REPO) {
-                setRepo('')
-                return
-              }
-              const hit = projects.find((p) => p.url === v)
-              if (hit) setRepo(hit.url)
-            }}
-          >
-            {projects.map((p) => (
-              <option key={p.url} value={p.url}>
-                {p.label || p.url}
-              </option>
-            ))}
-            <option value={CUSTOM_REPO}>Other URL…</option>
-          </select>
-        </label>
+        <ProjectSelect
+          label="Project"
+          projects={projects}
+          value={repoPick}
+          onChange={(v) => {
+            setRepoPick(v)
+            setPreview(null)
+            if (v === CUSTOM_REPO) {
+              setRepo('')
+              return
+            }
+            const hit = projects.find((p) => p.url === v)
+            if (hit) setRepo(hit.url)
+          }}
+          trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
+        />
       )}
       {(isCustom || projects.length === 0) && (
         <label className="field">

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProjectRepository, RepositorySet } from '../../api/types'
+import { ProjectSelect } from '../../ui/ProjectSelect'
 
 export type RepoRow = {
   url: string
@@ -180,16 +181,17 @@ function RepositoryRow({
 }) {
   const known = projects.some((p) => p.url === row.url)
   const pick = row.url && known ? row.url : row.url ? CUSTOM_REPO : ''
+  const showUrl = projects.length === 0 || pick === CUSTOM_REPO || (!known && Boolean(row.url))
   return (
     <div className="space-y-2">
       <div className="flex items-start justify-between gap-2">
-        <label className="field flex-1">
-          <span>Repository</span>
+        <div className="min-w-0 flex-1">
           {projects.length > 0 ? (
-            <select
+            <ProjectSelect
+              label="Repository"
+              projects={projects}
               value={pick}
-              onChange={(e) => {
-                const value = e.target.value
+              onChange={(value) => {
                 if (value === CUSTOM_REPO) {
                   onChange({ url: '' })
                   return
@@ -197,25 +199,22 @@ function RepositoryRow({
                 const saved = projects.find((p) => p.url === value)
                 if (saved) onChange(rowFromProject(saved))
               }}
-            >
-              <option value="">Select a repository</option>
-              {projects.map((p) => (
-                <option key={p.url} value={p.url}>
-                  {p.label || p.url}
-                </option>
-              ))}
-              <option value={CUSTOM_REPO}>Other URL…</option>
-            </select>
-          ) : null}
-          {(projects.length === 0 || pick === CUSTOM_REPO || (!known && row.url)) && (
-            <input
-              value={row.url}
-              onChange={(e) => onChange({ url: e.target.value })}
-              placeholder="https://gitlab.com/group/repo.git"
-              required
+              emptyOption="Select a repository"
+              trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
             />
-          )}
-        </label>
+          ) : null}
+          {showUrl ? (
+            <label className="field">
+              {projects.length === 0 ? <span>Repository</span> : <span>Git URL</span>}
+              <input
+                value={row.url}
+                onChange={(e) => onChange({ url: e.target.value })}
+                placeholder="https://gitlab.com/group/repo.git"
+                required
+              />
+            </label>
+          ) : null}
+        </div>
         {canRemove ? (
           <button type="button" className="vd-btn-ghost mt-6 text-danger-text" onClick={onRemove}>
             Remove
@@ -274,31 +273,33 @@ function AddRepository({
 }) {
   const [addRepo, setAddRepo] = useState('')
   const [addRepoUrl, setAddRepoUrl] = useState('')
+  const available = projects.filter((project) => project.url && !used.includes(project.url))
   return (
     <div className="mt-3 space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <select value={addRepo} onChange={(e) => setAddRepo(e.target.value)}>
-          <option value="">Add a saved repository</option>
-          {projects
-            .filter((p) => p.url && !used.includes(p.url))
-            .map((p) => (
-              <option key={p.url} value={p.url}>
-                {p.label || p.url}
-              </option>
-            ))}
-        </select>
-        <button
-          type="button"
-          className="vd-btn vd-btn-secondary"
-          disabled={!addRepo}
-          onClick={() => {
-            onAdd(addRepo)
-            setAddRepo('')
-          }}
-        >
-          Add
-        </button>
-      </div>
+      {available.length > 0 ? (
+        <>
+          <ProjectSelect
+            label="Saved repository"
+            projects={available}
+            value={addRepo}
+            onChange={setAddRepo}
+            emptyOption="Add a saved repository"
+          />
+          <p className="actions">
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={!addRepo}
+              onClick={() => {
+                onAdd(addRepo)
+                setAddRepo('')
+              }}
+            >
+              Add
+            </button>
+          </p>
+        </>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <input
           value={addRepoUrl}
