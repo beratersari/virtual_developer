@@ -5506,6 +5506,9 @@ class JobProcessor:
                 child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
                 if child_lock and child_lock not in lock_keys:
                     lock_keys.append(child_lock)
+        # An overlap with a running multi-repo job stays queued. claim_next
+        # waits on these lock keys, then starts this job. A later run fetches
+        # the remote, so an open review is not a reason to refuse.
         rec = self.queue_store.enqueue(
             source="jira",
             issue_key=key,

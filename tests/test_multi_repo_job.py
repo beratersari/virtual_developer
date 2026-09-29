@@ -484,3 +484,109 @@ async def test_board_rework_locks_every_repository_in_the_description(
         assert proc.queue_store.claim_next(max_running=6) is None
     finally:
         release.set()
+
+
+def _branch_event(key: str, repos: list[tuple[str, str, str]]) -> dict:
+    lines = ["{params}"]
+    for url, src, tgt in repos:
+        lines.extend(
+            [
+                f"Repository: {url}",
+                f"Source branch: {src}",
+                f"Target branch: {tgt}",
+            ]
+        )
+    lines.extend(["Mode: build", "{params}"])
+    return {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": key,
+            "fields": {
+                "summary": key,
+                "description": "\n".join(lines) + "\n",
+                "status": {"name": "To Do"},
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_single_repo_job_waits_for_the_running_multi_repo_job(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """Same repo, source, and target on another ticket waits, then runs.
+
+    An open review is not an error. The queue holds the later job only
+    while the multi-repo job is still executing.
+    """
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "max_concurrent_jobs", 4)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.jira_client = fake_jira
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.job_store = isolate_jira_agent_artifacts["job_store"]
+    opened = proc.job_store.create_job(issue_key="KAN-605", summary="already open")
+    proc.job_store.update_job(
+        opened["job_id"],
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example.com/acme/api.git",
+                "feature_branch": "feature/shared",
+                "target_branch": "main",
+                "merge_request_url": "https://gitlab.example.com/acme/api/-/merge_requests/7",
+                "merge_request_state": "opened",
+            }
+        ],
+    )
+
+    started: list[str] = []
+    multi_held = asyncio.Event()
+    release_multi = asyncio.Event()
+    single_started = asyncio.Event()
+    other_started = asyncio.Event()
+
+    async def fake_process(event):
+        key = event["issue"]["key"]
+        started.append(key)
+        if key == "KAN-30":
+            multi_held.set()
+            await release_multi.wait()
+        if key == "KAN-31":
+            single_started.set()
+        if key == "KAN-32":
+            other_started.set()
+        return {"ok": True, "work_started": True}
+
+    proc.process_event = fake_process  # type: ignore[method-assign]
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    multi = await proc.enqueue_jira_event(
+        _branch_event(
+            "KAN-30",
+            [(api, "feature/shared", "main"), (web, "feature/web-side", "develop")],
+        )
+    )
+    await asyncio.wait_for(multi_held.wait(), timeout=2)
+    assert multi["ok"] is True
+    single = await proc.enqueue_jira_event(
+        _branch_event("KAN-31", [(api, "feature/shared", "main")])
+    )
+    other = await proc.enqueue_jira_event(
+        _branch_event("KAN-32", [(api, "feature/shared", "develop")])
+    )
+    await asyncio.wait_for(other_started.wait(), timeout=2)
+    assert single["ok"] is True
+    assert single["queued"] is True
+    assert single["started"] is False
+    assert other["ok"] is True
+    assert "KAN-31" not in started
+    assert "KAN-32" in started
+    waiting = proc.queue_store.list_items(status="queued", limit=20)
+    assert [row.get("issue_key") for row in waiting] == ["KAN-31"]
+    release_multi.set()
+    await asyncio.wait_for(single_started.wait(), timeout=2)
+    assert started.index("KAN-30") < started.index("KAN-31")
