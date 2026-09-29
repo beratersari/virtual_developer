@@ -198,19 +198,30 @@ def resolve_mr_issue_key(
 ) -> str:
     """Bind an MR comment to a ticket, then fall back to ``GL-…``.
 
-    Same order as Azure PRs, with Jira always first:
-    1. Jira key in the title when ``JIRA_PROJECTS`` matches
-    2. ``WIT-{PROJECT}-{id}`` in the title
-    3. Azure ``#42`` in the title (scoped by collection when known)
-    4. Closes/Fixes Jira key in the description
-    5. ``WIT-…`` in the description
-    6. ``#42`` / ``Fixes #42`` in the description
-    7. Local work item with the same repo + source + target
-    8. Stable ``GL-{project}-{iid}`` key
+    Same order as Azure PRs. A merge request this daemon already opened
+    wins, so a follow-up keeps that job's session and folder even when the
+    title has no issue key:
+    1. Saved MR id on a job (every delivery, not only the latest)
+    2. Jira key in the title when ``JIRA_PROJECTS`` matches
+    3. ``WIT-{PROJECT}-{id}`` in the title
+    4. Azure ``#42`` in the title (scoped by collection when known)
+    5. Closes/Fixes Jira key in the description
+    6. ``WIT-…`` in the description
+    7. ``#42`` / ``Fixes #42`` in the description
+    8. Local work item with the same repo + source + target
+    9. Stable ``GL-{project}-{iid}`` key
     """
     from src.azure.keys import work_item_id_from_hash_mention, work_item_key_from_text
     from src.azure.workitems import find_work_item_key_by_id
+    from src.dashboard.temp_storage import issue_key_for_recorded_review
 
+    recorded = issue_key_for_recorded_review(
+        repository_url=repository_url,
+        project_path=project_path,
+        review_id=mr_iid,
+    )
+    if recorded:
+        return recorded
     found = jira_key_from_mr_title(mr_title, project_keys)
     if found:
         return found

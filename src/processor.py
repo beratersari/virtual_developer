@@ -154,6 +154,26 @@ class _JobSlotLimiter:
             self._cond.notify_all()
 
 
+def _remember_review_id(delivery: Dict[str, Any], url: Optional[str]) -> None:
+    """Store the GitLab MR iid or Azure PR id on one delivery row."""
+    raw = str(url or "").strip()
+    if not raw:
+        return
+    try:
+        from src.azure.webhook import parse_pull_request_url
+        from src.gitlab.client import parse_merge_request_url
+    except Exception:
+        return
+    gitlab = parse_merge_request_url(raw)
+    if gitlab:
+        delivery["gitlab_project"] = gitlab[1]
+        delivery["gitlab_mr_iid"] = int(gitlab[2])
+        return
+    azure = parse_pull_request_url(raw)
+    if azure:
+        delivery["azure_pr_id"] = int(azure[2])
+
+
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
 
@@ -6110,6 +6130,18 @@ class JobProcessor:
                 ):
                     continue
                 patch: Dict[str, Any] = {"merge_request_state": state}
+                deliveries = []
+                for row in job.get("deliveries") or []:
+                    if not isinstance(row, dict):
+                        deliveries.append(row)
+                        continue
+                    row_url = str(row.get("merge_request_url") or "").rstrip("/")
+                    if url and row_url == url:
+                        row = dict(row)
+                        row["merge_request_state"] = state
+                    deliveries.append(row)
+                if deliveries:
+                    patch["deliveries"] = deliveries
                 if url:
                     patch["merge_request_url"] = url
                 if path:
@@ -9468,6 +9500,7 @@ class JobProcessor:
             commit_subject=commit_subject,
             commit_url=commit_url,
             repository_url=str(getattr(git, "remote_url", "") or "").strip() or None,
+            target_branch=target_branch,
         )
 
         if reuse_mr:
@@ -9527,6 +9560,7 @@ class JobProcessor:
         commit_subject: Optional[str] = None,
         commit_url: Optional[str] = None,
         repository_url: Optional[str] = None,
+        target_branch: Optional[str] = None,
     ) -> None:
         """Store push/MR/commit on the active job and append issue delivery history.
 
@@ -9544,8 +9578,12 @@ class JobProcessor:
             "commit_subject": commit_subject or None,
             "commit_url": commit_url or None,
             "repository_url": repository_url or None,
+            "target_branch": (target_branch or None),
             "created_at": now,
         }
+        if merge_request_url:
+            delivery["merge_request_state"] = "opened"
+        _remember_review_id(delivery, merge_request_url)
 
         if job_id:
             try:
@@ -9568,11 +9606,11 @@ class JobProcessor:
                 patch["deliveries"] = rows
                 if merge_request_url:
                     patch["merge_request_state"] = "opened"
-                    m = re.search(
-                        r"/merge_requests/(\d+)", str(merge_request_url), re.I
-                    )
-                    if m:
-                        patch["gitlab_mr_iid"] = int(m.group(1))
+                    if delivery.get("gitlab_mr_iid"):
+                        patch["gitlab_mr_iid"] = delivery["gitlab_mr_iid"]
+                        patch["gitlab_project"] = delivery.get("gitlab_project")
+                    if delivery.get("azure_pr_id"):
+                        patch["azure_pr_id"] = delivery["azure_pr_id"]
                 self.job_store.update_job(job_id, **patch)
             except Exception as e:
                 logger.warning(
@@ -9600,9 +9638,10 @@ class JobProcessor:
         if merge_request_url:
             meta_patch["merge_request_url"] = merge_request_url
             meta_patch.setdefault("merge_request_state", "opened")
-            m = re.search(r"/merge_requests/(\d+)", str(merge_request_url), re.I)
-            if m:
-                meta_patch.setdefault("gitlab_mr_iid", int(m.group(1)))
+            if delivery.get("gitlab_mr_iid"):
+                meta_patch.setdefault("gitlab_mr_iid", delivery["gitlab_mr_iid"])
+            if delivery.get("azure_pr_id"):
+                meta_patch.setdefault("azure_pr_id", delivery["azure_pr_id"])
         if commit_sha:
             meta_patch["last_commit_sha"] = commit_sha
         if commit_url:

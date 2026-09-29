@@ -131,19 +131,32 @@ def resolve_pr_issue_key(
 ) -> str:
     """Bind a PR comment to a ticket, then fall back to ``AZ-…``.
 
-    Order:
-    1. Jira key in the title (``feat(KAN-12):``) when ``JIRA_PROJECTS`` matches
-    2. ``WIT-{PROJECT}-{id}`` in the title
-    3. Azure ``#42`` in the title (scoped to this PR's collection)
-    4. Closes/Fixes Jira key in the description
-    5. ``WIT-…`` in the description
-    6. ``#42`` / ``Fixes #42`` in the description (same collection scope)
-    7. Local work item with the same repo + source + target
-    8. Stable ``AZ-{project}-{pr}`` key
+    A pull request this daemon already opened wins, so a follow-up keeps
+    that job's session and folder. The title is the fallback:
+    1. Saved PR id on a job (every delivery, not only the latest)
+    2. Jira key in the title (``feat(KAN-12):``) when ``JIRA_PROJECTS`` matches
+    3. ``WIT-{PROJECT}-{id}`` in the title
+    4. Azure ``#42`` in the title (scoped to this PR's collection)
+    5. Closes/Fixes Jira key in the description
+    6. ``WIT-…`` in the description
+    7. ``#42`` / ``Fixes #42`` in the description (same collection scope)
+    8. Local work item with the same repo + source + target
+    9. Stable ``AZ-{project}-{pr}`` key
     """
     from src.azure.log import azure_info
     from src.azure.workitems import find_work_item_key_by_id
+    from src.dashboard.temp_storage import issue_key_for_recorded_review
 
+    recorded = issue_key_for_recorded_review(
+        repository_url=repository_url,
+        project_path=project_path,
+        review_id=pr_id,
+    )
+    if recorded:
+        azure_info(
+            f"issue-key from recorded PR {recorded} pr={project_path}!{pr_id}"
+        )
+        return recorded
     found = jira_key_from_mr_title(pr_title, project_keys)
     if found:
         azure_info(f"issue-key from PR title {found} pr={project_path}!{pr_id}")

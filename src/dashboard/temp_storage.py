@@ -1271,6 +1271,141 @@ def _remote_matches_review(remote_url: str, review_url: str) -> bool:
 _DONE_REVIEW_STATES = frozenset({"merged", "closed", "completed", "abandoned"})
 
 
+def issue_key_for_recorded_review(
+    *,
+    repository_url: str = "",
+    project_path: str = "",
+    review_id: int = 0,
+) -> str:
+    """Issue key of the job that already opened this merge request or pull request.
+
+    Empty when no stored delivery has this id. The earliest job wins when
+    more than one recorded the same review.
+    """
+    try:
+        iid = int(review_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if iid <= 0:
+        return ""
+    try:
+        from src.state.job_store import job_store
+
+        count = int(job_store.count_jobs() or 0)
+        jobs = job_store.list_jobs(limit=max(count, 1))
+    except Exception as exc:
+        logger.debug(f"Recorded review lookup failed: {exc}")
+        return ""
+    best_key = ""
+    best_stamp: Optional[str] = None
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if not _job_opened_review(
+            job,
+            repository_url=repository_url,
+            project_path=project_path,
+            review_id=iid,
+        ):
+            continue
+        key = str(job.get("issue_key") or "").strip()
+        if not key:
+            continue
+        stamp = str(
+            job.get("started_at")
+            or job.get("created_at")
+            or job.get("updated_at")
+            or ""
+        )
+        if best_stamp is None or stamp < best_stamp:
+            best_stamp = stamp
+            best_key = key
+    return best_key
+
+
+def _job_opened_review(
+    job: Dict[str, Any],
+    *,
+    repository_url: str,
+    project_path: str,
+    review_id: int,
+) -> bool:
+    """True when this job recorded *review_id* for the same repository."""
+    from src.azure.webhook import parse_pull_request_url
+    from src.gitlab.client import parse_merge_request_url
+
+    want_project = (project_path or "").strip().strip("/").lower()
+    if want_project.endswith(".git"):
+        want_project = want_project[:-4]
+    for url in _job_review_urls(job):
+        gitlab = parse_merge_request_url(url)
+        if gitlab and int(gitlab[2]) == review_id:
+            if _recorded_gitlab_matches(
+                gitlab, url, repository_url=repository_url, project=want_project
+            ):
+                return True
+        azure = parse_pull_request_url(url)
+        if azure and int(azure[2]) == review_id:
+            if _recorded_azure_matches(
+                azure, url, repository_url=repository_url, project=want_project
+            ):
+                return True
+    try:
+        saved_iid = int(job.get("gitlab_mr_iid") or 0)
+    except (TypeError, ValueError):
+        saved_iid = 0
+    saved_project = str(job.get("gitlab_project") or "").strip().strip("/").lower()
+    if saved_iid == review_id and want_project and saved_project == want_project:
+        return True
+    try:
+        saved_pr = int(job.get("azure_pr_id") or 0)
+    except (TypeError, ValueError):
+        saved_pr = 0
+    if saved_pr == review_id and repository_url:
+        remote = str(job.get("repository_url") or "")
+        if remote and _remote_matches_review(repository_url, remote):
+            return True
+    return False
+
+
+def _recorded_gitlab_matches(
+    parsed: tuple,
+    url: str,
+    *,
+    repository_url: str,
+    project: str,
+) -> bool:
+    host, path, _iid = parsed
+    path = str(path or "").strip().strip("/").lower()
+    if path.endswith(".git"):
+        path = path[:-4]
+    if repository_url and _remote_matches_review(repository_url, url):
+        incoming = ""
+        try:
+            from src.gitlab.keys import _host_from_repository_url
+
+            incoming = _host_from_repository_url(repository_url)
+        except Exception:
+            incoming = ""
+        if incoming and host and incoming != str(host).lower():
+            return False
+        return True
+    return bool(project and path == project)
+
+
+def _recorded_azure_matches(
+    parsed: tuple,
+    url: str,
+    *,
+    repository_url: str,
+    project: str,
+) -> bool:
+    if repository_url and _remote_matches_review(repository_url, url):
+        return True
+    path = str(parsed[1] or "").strip().strip("/").lower()
+    return bool(project and (path == project or path.endswith("/" + project)))
+
+
 def _job_review_urls(job: Dict[str, Any]) -> List[str]:
     """Every merge-request URL stored on this job, including each delivery."""
     urls: List[str] = []

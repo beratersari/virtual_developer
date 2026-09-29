@@ -873,6 +873,9 @@ def preview_mr_followup(
         project_path=project,
         mr_iid=iid,
         project_keys=keys,
+        repository_url=repo_url,
+        source_branch=src,
+        target_branch=tgt,
     )
     state = str(mr.get("state") or "opened").strip().lower()
     return {
@@ -1061,6 +1064,10 @@ def preview_pr_followup(
         project_path=project_path or f"{project}/{repo_name}",
         pr_id=iid,
         project_keys=keys,
+        repository_url=repo_url,
+        source_branch=src,
+        target_branch=tgt,
+        collection_url=collection,
     )
     state = str(pr.get("status") or "active").strip().lower()
     try:

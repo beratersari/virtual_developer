@@ -17,6 +17,70 @@ _TGT = "develop"
 _GL = gitlab_issue_key(_PATH, 4, host="gitlab.example.com")
 
 
+def test_recorded_mr_id_binds_before_the_title(tmp_path, monkeypatch):
+    """A follow-up on an MR this job opened keeps that issue.
+
+    The title is only the fallback. A title with no key, and a title that
+    names a different ticket, still return the job that recorded the MR.
+    """
+    from src.state.job_store import JobStore
+
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    monkeypatch.setattr("src.state.job_store.job_store", store)
+    job = store.create_job(issue_key="KAN-605", summary="multi")
+    store.update_job(
+        job["job_id"],
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.com/beratersari0/yaver-multi-01.git",
+                "merge_request_url": (
+                    "https://gitlab.com/beratersari0/yaver-multi-01"
+                    "/-/merge_requests/7"
+                ),
+                "gitlab_mr_iid": 7,
+            },
+            {
+                "repository_url": "https://gitlab.com/beratersari0/yaver-multi-02.git",
+                "merge_request_url": (
+                    "https://gitlab.com/beratersari0/yaver-multi-02"
+                    "/-/merge_requests/5"
+                ),
+                "gitlab_mr_iid": 5,
+            },
+        ],
+    )
+    assert (
+        resolve_mr_issue_key(
+            mr_title="chore: note multi-repo live check",
+            project_path="beratersari0/yaver-multi-01",
+            mr_iid=7,
+            project_keys=_KEYS,
+            repository_url="https://gitlab.com/beratersari0/yaver-multi-01.git",
+        )
+        == "KAN-605"
+    )
+    assert (
+        resolve_mr_issue_key(
+            mr_title="feat(KAN-1): something else",
+            project_path="beratersari0/yaver-multi-02",
+            mr_iid=5,
+            project_keys=_KEYS,
+            repository_url="https://gitlab.com/beratersari0/yaver-multi-02.git",
+        )
+        == "KAN-605"
+    )
+    assert (
+        resolve_mr_issue_key(
+            mr_title="feat(KAN-12): x",
+            project_path="acme/demo",
+            mr_iid=99,
+            project_keys=_KEYS,
+            repository_url="https://gitlab.example.com/acme/demo.git",
+        )
+        == "KAN-12"
+    )
+
+
 def _resolve(**kwargs):
     base = dict(
         project_path=_PATH,
