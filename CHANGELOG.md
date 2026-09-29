@@ -8,6 +8,32 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.64] — 2026-09-29
+
+A dashboard job can work in several repositories at once. Each one keeps its own branch, commit, and merge request. Settings lists the Git repositories your GitLab and Azure tokens can read.
+
+### Added
+
+- A saved repo set, or extra repositories on a schedule, clones each repository, pushes it, and opens its own merge request. The job and issue pages show each repository's commit and merge request.
+- Each repository on a schedule has its own source and target. The issue description lists every repository.
+- Schedule forms put the repositories and the worker together. One repository runs as a single job. Two or more run as one multi-repo job. Mode, backend, and model sit in that same form.
+- Repo sets and saved projects are lists. Plus adds a row, the pencil edits it in a popup, and the trash icon removes it.
+- Settings → Projects loads every Git repository the saved GitLab and Azure tokens can read. A project you already saved keeps its label and branches. Azure DevOps Server is asked with API 7.1, then 7.0, 6.1, and 6.0. A server without a collection-wide list is read one team project at a time.
+- The repo-set popup and the schedule repository pickers filter saved projects by name or URL.
+
+### Fixed
+
+- A failed build still pushes and opens a merge request when this run moved that repository's HEAD. Each clone is compared with its own start.
+- Delivery counts each repository on its own work branch, including branches named in the issue description.
+- The queue locks every repository in the set, so a job on a later repository does not start on the same branch.
+- A multi-repo folder stays until every recorded review is merged or closed. The hourly age purge still deletes an unchanged folder after the configured number of days.
+- Cancelling a finished multi-repo folder keeps it. A child that never finished cloning still deletes the set.
+- A later single-repo job does not resume or replace the multi-repo chat on the first repository.
+- A rejected push names the repository that failed.
+- A second push to the same merge request keeps the new commit.
+
+[0.9.64]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.64
+
 ## [0.9.63] — 2026-09-28
 
 The Completed total on Analytics opens a jobs list that includes a finished plan. Back to Analytics returns to the same period, including a custom range.
