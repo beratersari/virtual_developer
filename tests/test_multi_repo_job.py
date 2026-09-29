@@ -44,6 +44,19 @@ def test_running_multi_repo_row_blocks_each_repository(tmp_path):
     assert store.claim_next() is None
 
 
+def test_workspace_root_push_is_not_a_successful_delivery(monkeypatch):
+    """Pushing the multi-repo root must not report that the commit is on the remote."""
+    git = GitManager(issue_key=None)
+    git.repo_checkouts = [object()]
+    git.remote_enabled = True
+    git.remote_url = "https://gitlab.example/acme/api.git"
+    git.work_branch = "feature/KAN-20"
+    git.target_branch = "main"
+    monkeypatch.setattr(git, "_pat_for_remote", lambda _url: "secret")
+    monkeypatch.setattr(git, "_with_auth_remote", lambda: None)
+    assert git.push("feature/KAN-20") is False
+
+
 def test_workspace_root_does_not_run_git(monkeypatch):
     ran = []
 

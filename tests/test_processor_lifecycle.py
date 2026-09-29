@@ -385,6 +385,100 @@ def test_unparsed_description_keeps_the_stored_repository_set(
     assert web in [str(url) for url in (meta.get("repository_urls") or [])]
 
 
+def test_comment_on_one_mr_still_pushes_that_clone(processor, state_manager):
+    """A follow-up on one merge request pushes that clone only.
+
+    The workspace root is not a git repo. Reusing the review URL must not
+    skip the matching clone, and it must not push the other clone or open
+    a new merge request for it.
+    """
+    state_manager.create_state("KAN-20", "span", "d")
+    api = _Repo("https://gitlab.example/api.git", "aaa111", 1)
+    api.push_ok = True
+    web = _Repo("https://gitlab.example/web.git", "bbb111", 1)
+    web.push_ok = True
+
+    class _Root(_Multi):
+        def __init__(self, children: list) -> None:
+            super().__init__(children)
+            self.remote_enabled = True
+            self.remote_url = children[0].remote_url
+            self.pushed = False
+            self.mr_opened = False
+
+        def push(self, branch_name: str) -> bool:
+            self.pushed = True
+            return True
+
+        def commits_ahead_of_target(self, branch: str) -> int:
+            return 1
+
+        def get_current_branch(self) -> str:
+            return self.work_branch or ""
+
+        def get_last_commit_subject(self) -> str:
+            return "feat(KAN-20): touch"
+
+        def get_last_commit_message(self) -> str:
+            return "feat(KAN-20): touch"
+
+        def get_last_commit_sha(self, short: bool = False) -> str:
+            return "abc123"
+
+        def build_commit_url(self, sha: str) -> str:
+            return f"https://gitlab.example/commit/{sha}"
+
+        def create_merge_request(self, **kwargs) -> str:
+            self.mr_opened = True
+            return "https://gitlab.example/api/-/merge_requests/1"
+
+        def head_is_on_remote(self, branch_name: str) -> bool:
+            return False
+
+    root = _Root([api, web])
+    processor._contexts["KAN-20"] = {"git": root}
+    state = state_manager.get_state("KAN-20")
+    delivered = asyncio.run(
+        processor._push_and_create_mr(
+            state,
+            existing_mr_url="https://gitlab.example/api/-/merge_requests/1",
+            open_mr=True,
+        )
+    )
+    assert delivered is True
+    assert api.pushed
+    assert not api.mr_opened
+    assert not web.pushed
+    assert not web.mr_opened
+    assert root.pushed is False
+
+
+def test_comment_on_an_unknown_review_does_not_push_other_clones(
+    processor, state_manager
+):
+    """A review URL that matches no clone must not open merge requests for the set."""
+    state_manager.create_state("KAN-20", "span", "d")
+    api = _Repo("https://gitlab.example/api.git", "aaa111", 1)
+    api.push_ok = True
+    web = _Repo("https://gitlab.example/web.git", "bbb111", 1)
+    web.push_ok = True
+    root = _Multi([api, web])
+    processor._contexts["KAN-20"] = {"git": root}
+    state = state_manager.get_state("KAN-20")
+    delivered = asyncio.run(
+        processor._push_and_create_mr(
+            state,
+            existing_mr_url="https://gitlab.example/other/-/merge_requests/9",
+            open_mr=True,
+        )
+    )
+    assert delivered is False
+    assert not api.pushed
+    assert not web.pushed
+    assert not api.mr_opened
+    assert not web.mr_opened
+
+
 def test_multi_repo_delivery_ignores_the_parent_folder(processor):
     """The workspace root is not a git repo. Delivery reads each clone."""
 

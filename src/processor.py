@@ -9181,9 +9181,10 @@ class JobProcessor:
         recording delivery so cancel after agent success does not stamp
         ``delivery_status=delivered`` or open an MR after terminal cancel.
 
-        When ``existing_mr_url`` is set (GitLab MR comment jobs), push onto
-        that branch and reuse the URL — do not open a second MR, and do not
-        post Jira progress (the caller replies on the MR).
+        When ``existing_mr_url`` is set (GitLab MR / Azure PR comment jobs),
+        push onto that branch and reuse the URL — do not open a second MR.
+        On a multi-repo workspace that URL is delivered only for the clone
+        whose remote is that review. The other clones are left untouched.
 
         ``open_mr=False`` stops after push (or already-on-remote).
 
@@ -9202,14 +9203,43 @@ class JobProcessor:
         git = git_manager or self._git_for(state.issue_key)
         if git_manager is None and git is not None:
             children = list(getattr(git, "repo_checkouts", None) or [])
-            if len(children) > 1 and not (existing_mr_url or "").strip():
+            if len(children) > 1:
+                # The workspace root is not a git repo. A review comment
+                # pushes only the clone that review belongs to. The other
+                # clones stay local: this job must not open a new MR for them.
+                from src.dashboard.temp_storage import _remote_matches_review
+
+                review = (existing_mr_url or "").strip()
+                targets = children
+                if review:
+                    targets = [
+                        child
+                        for child in children
+                        if _remote_matches_review(
+                            str(getattr(child, "remote_url", "") or ""),
+                            review,
+                        )
+                    ]
+                    if not targets:
+                        msg = (
+                            f"No cloned repository matches review {review}. "
+                            "Nothing was pushed."
+                        )
+                        logger.error(f"{state.issue_key}: {msg}")
+                        try:
+                            git.last_push_error = msg
+                        except Exception:
+                            pass
+                        if notify_on_fail:
+                            self._record_delivery_failure(state.issue_key, msg)
+                        return False
                 ok_all = True
-                for child in children:
+                for child in targets:
                     if self._is_aborted(state.issue_key):
                         return False
                     ok = await self._push_and_create_mr(
                         state,
-                        existing_mr_url=existing_mr_url,
+                        existing_mr_url=review or None,
                         open_mr=open_mr,
                         notify_on_fail=notify_on_fail,
                         git_manager=child,
