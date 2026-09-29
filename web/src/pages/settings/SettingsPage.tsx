@@ -28,7 +28,7 @@ import {
   type SettingsSection,
 } from './settingsSectionUrl'
 import { ModelField } from '../../ui/ModelField'
-import { ProjectSearchField, projectMatchesQuery } from '../../ui/ProjectSelect'
+import { SavedRepoSearch } from '../../ui/ProjectSelect'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
@@ -217,11 +217,7 @@ function RepoSetList({
   onRemoveAt: (index: number) => void
 }) {
   const addRef = useRef<HTMLButtonElement>(null)
-  const [repoQuery, setRepoQuery] = useState('')
   const editorToken = editor == null ? '' : editor.index == null ? 'new' : String(editor.index)
-  useEffect(() => {
-    setRepoQuery('')
-  }, [editorToken])
   const saved = projects
     .map((row) => ({ url: row.url.trim(), label: (row.label || '').trim() }))
     .filter((row) => row.url)
@@ -233,7 +229,6 @@ function RepoSetList({
       .filter((url) => url && !known.has(url))
       .map((url) => ({ url, label: '' })),
   ]
-  const visibleChoices = choices.filter((row) => projectMatchesQuery(row, repoQuery))
   const canSave = Boolean(
     editor && editor.name.trim() && editor.repositories.filter(Boolean).length >= 2,
   )
@@ -311,32 +306,46 @@ function RepoSetList({
                 required
               />
             </label>
-            {choices.length > 0 ? (
-              <ProjectSearchField value={repoQuery} onChange={setRepoQuery} />
-            ) : null}
-            <div className="mt-3 flex max-h-60 flex-col gap-2 overflow-y-auto">
-              {choices.length === 0 ? (
-                <p className="text-xs text-text-muted">Add a project first.</p>
-              ) : visibleChoices.length === 0 ? (
-                <p className="text-xs text-text-muted">No matching projects.</p>
-              ) : (
-                visibleChoices.map((row) => (
-                  <label key={row.url} className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={editor.repositories.includes(row.url)}
-                      onChange={() => {
-                        const repositories = editor.repositories.includes(row.url)
-                          ? editor.repositories.filter((url) => url !== row.url)
-                          : [...editor.repositories, row.url]
-                        onChangeEditor({ ...editor, repositories })
-                      }}
-                    />
-                    <span className="min-w-0 break-all font-mono">{row.label || row.url}</span>
-                  </label>
-                ))
-              )}
-            </div>
+            {editor.repositories.filter(Boolean).length === 0 ? (
+              <p className="text-xs text-text-muted">No repositories in this set yet.</p>
+            ) : (
+              <ul className="divide-y divide-border" aria-label="Repositories in this set">
+                {editor.repositories.filter(Boolean).map((url) => {
+                  const row = choices.find((choice) => choice.url === url)
+                  return (
+                    <li key={url} className="flex items-center justify-between gap-3 py-2">
+                      <span className="min-w-0 truncate text-sm text-text">{row?.label || url}</span>
+                      <button
+                        type="button"
+                        className="vd-btn-ghost bad"
+                        onClick={() =>
+                          onChangeEditor({
+                            ...editor,
+                            repositories: editor.repositories.filter((item) => item !== url),
+                          })
+                        }
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {saved.length > 0 ? (
+              <SavedRepoSearch
+                key={editorToken}
+                label="Add a repository"
+                projects={saved}
+                exclude={editor.repositories}
+                onPick={(url) => {
+                  if (editor.repositories.includes(url)) return
+                  onChangeEditor({ ...editor, repositories: [...editor.repositories, url] })
+                }}
+              />
+            ) : (
+              <p className="mt-3 text-xs text-text-muted">Add a project first.</p>
+            )}
             <p className="mt-2 text-xs text-text-muted">Select at least two projects.</p>
             <div className="vd-modal-actions">
               {editor.index != null ? (
