@@ -13,6 +13,7 @@ import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { JobsTable } from '../jobs/JobsTable'
 import { issueTabFromSection, issueTabPath, type IssueTab } from './issueTabUrl'
+import { groupDeliveries } from '../jobs/repoDeliveries'
 
 function collectDeliveries(detail: TaskDetail): GitDelivery[] {
   if (detail.git_deliveries && detail.git_deliveries.length > 0) return detail.git_deliveries
@@ -342,40 +343,68 @@ export function IssueDetailPage() {
               <pre className="vd-pre max-h-48 text-danger-text">{detail.error_message}</pre>
             )}
             {deliveries.length > 0 && (
-              <ul className="space-y-3 border-t border-border pt-4">
-                {deliveries.map((d, i) => (
-                  <li
-                    key={`${d.job_id || 'd'}-${i}`}
-                    className="rounded border border-border bg-bg p-3"
-                  >
-                    <div className="flex flex-wrap gap-2 text-[11px] text-text-muted">
-                      {d.job_id && (
-                        <button
-                          type="button"
-                          className="font-mono text-accent-text hover:underline"
-                          onClick={() => navigate(`/jobs/${encodeURIComponent(d.job_id!)}`)}
-                        >
-                          {d.job_id}
-                        </button>
-                      )}
-                      {d.status && <StatusBadge status={d.status} size="sm" />}
-                      {d.feature_branch && (
-                        <span className="font-mono">{d.feature_branch}</span>
-                      )}
+              <div className="space-y-4 border-t border-border pt-4">
+                {groupDeliveries(deliveries).map((group) => (
+                  <section key={group.repo} className="space-y-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+                      {group.repo}
                     </div>
-                    {d.merge_request_url && (
-                      <a
-                        href={d.merge_request_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="mt-2 inline-block break-all text-sm text-accent-text hover:underline"
-                      >
-                        {d.merge_request_url}
-                      </a>
-                    )}
-                  </li>
+                    <ul className="space-y-3">
+                      {group.rows.map((d, i) => (
+                        <li
+                          key={`${group.repo}-${d.commit_sha || d.merge_request_url || i}`}
+                          className="rounded border border-border bg-bg p-3"
+                        >
+                          <div className="flex flex-wrap gap-2 text-[11px] text-text-muted">
+                            {d.job_id && (
+                              <button
+                                type="button"
+                                className="font-mono text-accent-text hover:underline"
+                                onClick={() => navigate(`/jobs/${encodeURIComponent(d.job_id!)}`)}
+                              >
+                                {d.job_id}
+                              </button>
+                            )}
+                            {d.status && <StatusBadge status={d.status} size="sm" />}
+                            {d.feature_branch && (
+                              <span className="font-mono">{d.feature_branch}</span>
+                            )}
+                          </div>
+                          {(d.commit_url || d.commit_sha) && (
+                            <div className="mt-2 text-sm">
+                              {d.commit_url ? (
+                                <a
+                                  href={d.commit_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="break-all text-accent-text hover:underline"
+                                >
+                                  {d.commit_sha ? d.commit_sha.slice(0, 12) : 'Open commit'}
+                                </a>
+                              ) : (
+                                <span className="font-mono text-xs">{d.commit_sha}</span>
+                              )}
+                              {d.commit_subject && (
+                                <div className="text-xs text-text-secondary">{d.commit_subject}</div>
+                              )}
+                            </div>
+                          )}
+                          {d.merge_request_url && (
+                            <a
+                              href={d.merge_request_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-2 inline-block break-all text-sm text-accent-text hover:underline"
+                            >
+                              {d.merge_request_url}
+                            </a>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 ))}
-              </ul>
+              </div>
             )}
             <div className="border-t border-border pt-4">
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">

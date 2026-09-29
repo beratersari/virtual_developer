@@ -361,6 +361,13 @@ class Settings(BaseSettings):
             '"target_branch":"develop"}]'
         ),
     )
+    repository_sets: str = Field(
+        default="",
+        description=(
+            "JSON list of named multi-repo groups for a dashboard job. "
+            'Example: [{"name":"Orders","repositories":["https://host/a.git","https://host/b.git"]}]'
+        ),
+    )
     
     # GitLab credentials — repository URL and source branch come from each Jira issue
     # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
@@ -1136,6 +1143,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "work_modes",
         "agent_backend",
         "project_repositories",
+        "repository_sets",
         "trigger_mentions",
         "trigger_assignee_names",
         "jira_trigger_user",
@@ -1383,6 +1391,10 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
             from src.dashboard.project_repos import project_repositories_to_json
 
             value = project_repositories_to_json(value)
+        if key == "repository_sets":
+            from src.dashboard.repo_sets import repository_sets_to_json
+
+            value = repository_sets_to_json(value)
         try:
             setattr(settings_obj, key, value)
         except Exception as e:

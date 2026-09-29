@@ -347,6 +347,64 @@ class JobProcessor:
         meta = (getattr(st, "metadata", None) if st is not None else None) or {}
         return str(meta.get("source") or "").strip().lower() == "azure_workitem"
 
+    def _repository_urls_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Dashboard multi-repo list. A Jira poll event does not send this."""
+        raw = (event or {}).get("repository_urls")
+        urls = [str(u).strip() for u in raw if str(u).strip()] if isinstance(raw, list) else []
+        if len(urls) >= 2:
+            out: Dict[str, Any] = {"repository_urls": urls[:12]}
+            refs = (event or {}).get("repository_refs")
+            if isinstance(refs, list) and refs:
+                from src.dashboard.repo_sets import normalize_repository_refs
+
+                primary = str((event or {}).get("repository_url") or urls[0])
+                normalized = normalize_repository_refs(primary, "", "", refs)
+                if normalized:
+                    out["repository_refs"] = normalized
+                    out["repository_urls"] = [row["url"] for row in normalized]
+            return out
+        issue = (event or {}).get("issue") or {}
+        fields = issue.get("fields") or {}
+        summary = str(fields.get("summary") or "")
+        description = fields.get("description")
+        if not isinstance(description, str) or not description.strip():
+            return {}
+        from src.issue_git_spec import parse_issue_git_spec
+
+        spec, _err = parse_issue_git_spec(summary, description)
+        refs = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
+        if len(refs) < 2:
+            return {}
+        rows = [
+            {"url": url, "source_branch": source, "target_branch": target}
+            for url, source, target in refs
+        ]
+        return {
+            "repository_urls": [row["url"] for row in rows],
+            "repository_refs": rows,
+        }
+
+    def _with_repo_layout(self, issue_key: str, prompt: str) -> str:
+        git = self._git_for(issue_key)
+        children = list(getattr(git, "repo_checkouts", None) or []) if git else []
+        if len(children) < 2:
+            return prompt
+        lines = [
+            "## Repositories",
+            "The working directory is a folder of clones, not one git repo.",
+            "Change only the clones this ticket needs. Commit inside each clone.",
+            "Do not push and do not open a merge request.",
+        ]
+        for child in children:
+            folder = getattr(getattr(child, "temp_dir", None), "name", "") or "?"
+            work = getattr(child, "work_branch", None) or getattr(child, "source_branch", "")
+            target = getattr(child, "target_branch", "")
+            lines.append(
+                f"- `{folder}` — {getattr(child, 'remote_url', '')} "
+                f"(`{work}` → `{target}`)"
+            )
+        return prompt.rstrip() + "\n\n" + "\n".join(lines) + "\n"
+
     def _azure_workitem_meta_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         issue = (event or {}).get("issue") or {}
         coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
@@ -1455,6 +1513,40 @@ class JobProcessor:
                     branch = source
         return repo, branch, target
 
+    def _session_scope(self, issue_key: str, git: Any = None) -> str:
+        """Empty for one repository. A set key for a multi-repo workspace."""
+        from src.state.session_bind_store import multi_session_scope
+
+        gm = git if git is not None else self._git_for(issue_key)
+        urls: List[str] = []
+        children = list(getattr(gm, "repo_checkouts", None) or []) if gm else []
+        if len(children) > 1:
+            for child in children:
+                raw = str(getattr(child, "remote_url", "") or "").strip()
+                if raw:
+                    urls.append(raw)
+        refs = None
+        if len(urls) < 2:
+            st = self.state_manager.get_state(issue_key)
+            meta = dict((st.metadata if st else None) or {})
+            extra = meta.get("repository_urls")
+            if isinstance(extra, list):
+                urls = [str(u).strip() for u in extra if str(u).strip()]
+            saved = meta.get("repository_refs")
+            if isinstance(saved, list):
+                refs = saved
+        elif len(children) > 1:
+            refs = [
+                {
+                    "url": getattr(child, "remote_url", ""),
+                    "source_branch": getattr(child, "work_branch", None)
+                    or getattr(child, "source_branch", ""),
+                    "target_branch": getattr(child, "target_branch", ""),
+                }
+                for child in children
+            ]
+        return multi_session_scope(urls, refs)
+
     def _session_kind_for_issue(self, issue_key: str) -> str:
         """``plan`` / ``build`` / ``test`` map for this issue's current workflow."""
         from src.state.session_bind_store import normalize_session_kind
@@ -1490,6 +1582,7 @@ class JobProcessor:
         import src.state.session_bind_store as session_binds
 
         repo, branch, target = self._session_bind_key(issue_key, git)
+        scope = self._session_scope(issue_key, git)
         recs: List[Dict[str, Any]] = []
         store = session_binds.session_bind_store
         kind = self._session_kind_for_issue(issue_key)
@@ -1507,13 +1600,30 @@ class JobProcessor:
                     other_kind_sids.add(fx)
 
         if repo and branch and target and kind:
-            hit = store.get(repo, branch, target, kind=kind, backend=backend)
+            hit = store.get(
+                repo, branch, target, kind=kind, backend=backend, scope=scope
+            )
             if hit:
                 recs.append(hit)
             for other in session_binds.other_session_kinds(kind):
-                _remember_other(store.get(repo, branch, target, kind=other))
+                _remember_other(
+                    store.get(repo, branch, target, kind=other, scope=scope)
+                )
         # Kind binds are keyed by work branch. A GitLab/Azure job on a
         # different source must still not resume the planner or tester chat.
+        def _same_layout(rec: Optional[Dict[str, Any]]) -> bool:
+            """A multi-repo bind must not satisfy a one-repo job, or the reverse."""
+            if not rec:
+                return False
+            rec_scope = str(rec.get("scope") or "")
+            multi_dir = session_binds.bind_directory_is_multi(
+                str(rec.get("working_directory") or "")
+            )
+            rec_multi = rec_scope.startswith("multi") or multi_dir
+            if scope:
+                return rec_scope == scope
+            return not rec_multi
+
         want_issue = (issue_key or "").strip().upper()
         if kind and want_issue:
             for rec in store.list_binds(limit=500):
@@ -1527,12 +1637,17 @@ class JobProcessor:
                     _remember_other(rec)
         if kind != "plan":
             if repo and branch and target:
-                hit = store.get(repo, branch, target, issue_key=issue_key)
+                hit = store.get(
+                    repo, branch, target, issue_key=issue_key, scope=scope
+                )
                 if hit and session_binds.bind_compatible_with_kind(hit, kind):
                     recs.append(hit)
                 elif hit:
                     _remember_other(hit)
             by_issue = store.find_by_issue_key(issue_key)
+            if by_issue and by_issue not in recs:
+                if not _same_layout(by_issue):
+                    by_issue = None
             if by_issue and by_issue not in recs:
                 if session_binds.bind_compatible_with_kind(by_issue, kind):
                     recs.append(by_issue)
@@ -1569,7 +1684,12 @@ class JobProcessor:
                 if repo and branch and target:
                     for other in ("plan", "build", "test", "review"):
                         row = store.get(
-                            repo, branch, target, kind=other, backend=BACKEND_CLAUDE
+                            repo,
+                            branch,
+                            target,
+                            kind=other,
+                            backend=BACKEND_CLAUDE,
+                            scope=scope,
                         )
                         saved = str((row or {}).get("session_id") or "").strip()
                         if saved:
@@ -1597,7 +1717,7 @@ class JobProcessor:
                     bind_wd = wd0.strip()
         if repo and branch and target:
             for fx in store.forgotten_ids_for(
-                repo, branch, target, issue_key=issue_key, kind=kind
+                repo, branch, target, issue_key=issue_key, kind=kind, scope=scope
             ):
                 if fx not in forgotten:
                     forgotten.append(fx)
@@ -1605,11 +1725,23 @@ class JobProcessor:
         if kind != "plan":
             st = self.state_manager.get_state(issue_key)
             if st is not None:
-                _add_sid(st.current_opencode_session_id)
-                meta = dict(st.metadata or {})
-                _add_sid(meta.get("last_opencode_session_id"))
-                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                def _add_if_layout(raw: Any) -> None:
+                    sid = str(raw or "").strip()
+                    if not sid:
+                        return
+                    for rec in store.list_binds(limit=500):
+                        if str(rec.get("session_id") or "").strip() != sid:
+                            continue
+                        full = store.get_by_id(str(rec.get("bind_id") or "")) or rec
+                        if not _same_layout(full):
+                            return
                     _add_sid(sid)
+
+                _add_if_layout(st.current_opencode_session_id)
+                meta = dict(st.metadata or {})
+                _add_if_layout(meta.get("last_opencode_session_id"))
+                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                    _add_if_layout(sid)
         return sids, forgotten, bind_wd
 
     def _attach_bound_opencode_session(
@@ -1781,6 +1913,7 @@ class JobProcessor:
             issue_key=issue_key,
             kind=kind,
             backend=self._backend_for_session_id(issue_key, sid),
+            scope=self._session_scope(issue_key, git),
         )
 
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
@@ -1824,6 +1957,7 @@ class JobProcessor:
             working_directory=wd,
             kind=kind,
             backend=self._backend_for_session_id(issue_key, sid),
+            scope=self._session_scope(issue_key, git),
         )
         self._record_job_working_directory(issue_key, wd)
 
@@ -2531,6 +2665,20 @@ class JobProcessor:
         )
         return job_id
 
+    def _open_job_id(self, issue_key: str) -> Optional[str]:
+        """Newest job row for this issue that is still in flight."""
+        open_status = {"running", "planning", "executing", "pending"}
+        try:
+            rows = self.job_store.list_jobs(issue_key=issue_key, limit=20)
+        except Exception:
+            return None
+        for job in rows:
+            if (job.get("status") or "") in open_status:
+                jid = str(job.get("job_id") or "").strip()
+                if jid:
+                    return jid
+        return None
+
     def _finish_job_record(
         self,
         issue_key: str,
@@ -2543,6 +2691,10 @@ class JobProcessor:
         if not job_id:
             st = self.state_manager.get_state(issue_key)
             job_id = (st.metadata or {}).get("current_job_id") if st else None
+        if not job_id:
+            # Cold start has no in-memory job id. The jobs list still shows
+            # the last executing row unless we close it here.
+            job_id = self._open_job_id(issue_key)
         if not job_id:
             return
         # Do not overwrite a terminal status with another terminal on the same job
@@ -4118,6 +4270,7 @@ class JobProcessor:
             )
             meta = {"workflow_type": workflow_type.value}
             meta.update(self._azure_workitem_meta_from_event(event))
+            meta.update(self._repository_urls_from_event(event))
             self.state_manager.update_state(
                 issue_key,
                 issue_summary=state.issue_summary,
@@ -4149,6 +4302,7 @@ class JobProcessor:
                 return False, "could not save issue state"
             meta = {"workflow_type": workflow_type.value}
             meta.update(self._azure_workitem_meta_from_event(event))
+            meta.update(self._repository_urls_from_event(event))
             self.state_manager.update_state(
                 issue_key,
                 metadata=meta,
@@ -4516,13 +4670,39 @@ class JobProcessor:
         # (develop/main/…) use isolated feature/{KEY} work branches.
         src = (spec.source_branch or "").strip()
         tgt = (spec.target_branch or "").strip()
-        if src and src != tgt and not GitManager._is_primary_base(src):
-            if not self._claim_source_branch(
-                issue_key, spec.repository_url, spec.source_branch
+        extra_urls: list = []
+        extra_refs: list = []
+        if st is not None:
+            raw_urls = (st.metadata or {}).get("repository_urls")
+            if isinstance(raw_urls, list):
+                extra_urls = [str(u).strip() for u in raw_urls if str(u).strip()]
+            raw_refs = (st.metadata or {}).get("repository_refs")
+            if isinstance(raw_refs, list):
+                extra_refs = [row for row in raw_refs if isinstance(row, dict)]
+        claims = extra_refs or [
+            {
+                "url": url,
+                "source_branch": spec.source_branch,
+                "target_branch": spec.target_branch,
+            }
+            for url in (extra_urls or [spec.repository_url])
+        ]
+        for row in claims:
+            claim_url = str(row.get("url") or row.get("repository_url") or "").strip()
+            claim_src = str(row.get("source_branch") or src).strip()
+            claim_tgt = str(row.get("target_branch") or tgt).strip()
+            if (
+                not claim_url
+                or not claim_src
+                or claim_src == claim_tgt
+                or GitManager._is_primary_base(claim_src)
             ):
+                continue
+            if not self._claim_source_branch(issue_key, claim_url, claim_src):
+                self._release_source_branch(issue_key)
                 raise GitSourceBranchError(
                     f"{issue_key}: another job is already using source branch "
-                    f"`{spec.source_branch}` on this repository. Wait for it to "
+                    f"`{claim_src}` on `{claim_url}`. Wait for it to "
                     f"finish or use a distinct Source branch."
                 )
 
@@ -4533,6 +4713,8 @@ class JobProcessor:
                 source_branch=spec.source_branch,
                 target_branch=spec.target_branch,
                 keep_source_work_branch=keep_source_work_branch,
+                repository_urls=extra_urls or None,
+                repository_refs=extra_refs or None,
             )
         except GitCancelledError:
             logger.info(f"{issue_key}: clone aborted because the job was cancelled")
@@ -4551,6 +4733,19 @@ class JobProcessor:
                 work_branch=work,
                 target_branch=spec.target_branch,
             )
+            for child in getattr(git, "repo_checkouts", None) or []:
+                child_work = (
+                    getattr(child, "work_branch", None) or work or ""
+                ).strip()
+                child_target = (
+                    getattr(child, "target_branch", None) or spec.target_branch or ""
+                ).strip()
+                self.note_workspace_lock(
+                    issue_key,
+                    repository_url=getattr(child, "remote_url", "") or "",
+                    work_branch=child_work,
+                    target_branch=child_target,
+                )
         except Exception:
             pass
         # Cancel may have won while clone ran (no runner registered yet).
@@ -5247,6 +5442,38 @@ class JobProcessor:
         tgt = (spec.target_branch if spec else "") or ""
         work = GitManager.resolve_work_branch_name(key, src, tgt) if (src or tgt) else ""
         lock = workspace_lock_key(repo, work, tgt)
+        lock_keys = [lock] if lock else []
+        raw_refs = event.get("repository_refs") if isinstance(event, dict) else None
+        raw_urls = event.get("repository_urls") if isinstance(event, dict) else None
+
+        def _add_repo_lock(url: str, row_src: str, row_tgt: str) -> None:
+            row_work = (
+                GitManager.resolve_work_branch_name(key, row_src, row_tgt)
+                if (row_src or row_tgt)
+                else work
+            )
+            child_lock = workspace_lock_key(url, row_work, row_tgt)
+            if child_lock and child_lock not in lock_keys:
+                lock_keys.append(child_lock)
+
+        described = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
+        if isinstance(raw_refs, list) and len(raw_refs) >= 2:
+            for row in raw_refs:
+                if not isinstance(row, dict):
+                    continue
+                _add_repo_lock(
+                    str(row.get("url") or row.get("repository_url") or ""),
+                    str(row.get("source_branch") or src).strip(),
+                    str(row.get("target_branch") or tgt).strip(),
+                )
+        elif len(described) >= 2:
+            for url, row_src, row_tgt in described:
+                _add_repo_lock(str(url or ""), str(row_src or ""), str(row_tgt or ""))
+        elif isinstance(raw_urls, list) and work and tgt:
+            for raw_url in raw_urls:
+                child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
+                if child_lock and child_lock not in lock_keys:
+                    lock_keys.append(child_lock)
         rec = self.queue_store.enqueue(
             source="jira",
             issue_key=key,
@@ -5257,6 +5484,7 @@ class JobProcessor:
             work_branch=work,
             target_branch=tgt,
             lock_key=lock,
+            lock_keys=lock_keys,
             job_id=self._active_jobs.get(key),
             jira_event_id=event_id,
             payload=event,
@@ -7687,6 +7915,7 @@ class JobProcessor:
                 plan_path=plan_for_prompt or None,
             )
             task_label = f"Execute: {state.issue_key}"
+        first_prompt = self._with_repo_layout(state.issue_key, first_prompt)
         task = AgentTask(
             description=task_label,
             prompt=first_prompt,
@@ -7761,6 +7990,7 @@ class JobProcessor:
                 plan_path=plan_path_for_agent or None,
                 work_branch=work_branch,
             )
+        task.prompt = self._with_repo_layout(state.issue_key, task.prompt)
         if work_branch:
             try:
                 self.state_manager.update_state(
@@ -8103,6 +8333,10 @@ class JobProcessor:
         self._release_context(state.issue_key, success=True)
         logger.info(f"Work completed for {state.issue_key}")
 
+    def _repo_checkouts(self, git: Any) -> list:
+        """Child clones when the workspace root is not itself a git repo."""
+        return list(getattr(git, "repo_checkouts", None) or [])
+
     def _snapshot_delivery_baseline(self, issue_key: str, git: Any) -> Optional[str]:
         """Record HEAD SHA at job start (before agent) for delivery attribution.
 
@@ -8110,6 +8344,40 @@ class JobProcessor:
         re-run on an existing source branch cannot attribute prior commits/MR
         to the new job.
         """
+        children = self._repo_checkouts(git)
+        if len(children) > 1:
+            baselines: Dict[str, str] = {}
+            for child in children:
+                child_sha = self._checkout_sha(child)
+                try:
+                    child.delivery_baseline_sha = child_sha
+                except Exception:
+                    pass
+                url = str(getattr(child, "remote_url", "") or "").strip()
+                if child_sha and url:
+                    baselines[url] = child_sha
+            try:
+                git.delivery_baselines = baselines
+                # One SHA cannot stand for every repository.
+                git.delivery_baseline_sha = None
+            except Exception:
+                pass
+            try:
+                self.state_manager.update_state(
+                    issue_key,
+                    metadata={"delivery_baselines": baselines},
+                )
+            except Exception:
+                pass
+            if baselines:
+                logger.info(
+                    f"{issue_key} delivery baseline for {len(baselines)} repositories"
+                )
+            else:
+                logger.warning(
+                    f"{issue_key} could not snapshot a baseline in any repository"
+                )
+            return next(iter(baselines.values()), None)
         sha: Optional[str] = None
         try:
             if hasattr(git, "get_last_commit_sha"):
@@ -8195,6 +8463,9 @@ class JobProcessor:
         git = self._git_for(issue_key)
         if not git:
             return "No git workspace available after agent run."
+        children = self._repo_checkouts(git)
+        if len(children) > 1:
+            return self._assert_multi_repo_delivery(git, children)
         work = (getattr(git, "work_branch", None) or "").strip()
         if not work:
             return "Work branch was not prepared; refusing to treat the run as successful."
@@ -8255,11 +8526,113 @@ class JobProcessor:
             )
         return None
 
+    def _checkout_sha(self, git: Any) -> Optional[str]:
+        try:
+            if not hasattr(git, "get_last_commit_sha"):
+                return None
+            raw = git.get_last_commit_sha()
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        return str(raw).strip() or None
+
+    def _assert_multi_repo_delivery(self, git: Any, children: list) -> Optional[str]:
+        """Succeed when any cloned repository has commits ahead of its target.
+
+        The workspace root is only the OpenCode folder. It has no ``.git``.
+        Each clone is counted on its own work branch. The parent stores the
+        last clone's branch name, which is a different branch when the
+        repositories do not share one.
+        """
+        parent_work = (getattr(git, "work_branch", None) or "").strip()
+        branches = [
+            (getattr(child, "work_branch", None) or "").strip() or parent_work
+            for child in children
+        ]
+        if not any(branches):
+            return "Work branch was not prepared; refusing to treat the run as successful."
+        try:
+            on_branch = git.ensure_on_work_branch()
+        except Exception:
+            on_branch = False
+        if not on_branch:
+            named = ", ".join(f"`{branch}`" for branch in branches if branch)
+            return (
+                f"A repository is not on its work branch ({named}). "
+                "Refusing to push a drifted branch."
+            )
+        unread: list[str] = []
+        any_ahead = False
+        for child, child_work in zip(children, branches):
+            label = str(getattr(child, "remote_url", "") or "repository")
+            if not child_work or not self._checkout_sha(child):
+                unread.append(label)
+                continue
+            ahead = 0
+            try:
+                ahead = int(child.commits_ahead_of_target(child_work) or 0)
+            except Exception:
+                ahead = 0
+            if ahead >= 1:
+                any_ahead = True
+        if any_ahead:
+            return None
+        if unread:
+            names = ", ".join(unread)
+            return (
+                f"Could not read HEAD in {names}; "
+                "refusing to treat the run as successful."
+            )
+        shown = ", ".join(
+            f"`{branch}`" for branch in dict.fromkeys(b for b in branches if b)
+        )
+        return (
+            f"No commits on {shown} ahead of the target branch "
+            "in any repository. Agent exit code was 0 but nothing was delivered."
+        )
+
+    def _clone_baseline_sha(self, issue_key: str, git: Any, child: Any) -> str:
+        """Job-start SHA for one clone. The parent folder has no single SHA."""
+        direct = str(getattr(child, "delivery_baseline_sha", None) or "").strip()
+        if direct:
+            return direct
+        url = str(getattr(child, "remote_url", "") or "").strip()
+        baselines = getattr(git, "delivery_baselines", None)
+        if isinstance(baselines, dict) and url:
+            hit = str(baselines.get(url) or "").strip()
+            if hit:
+                return hit
+        try:
+            st = self.state_manager.get_state(issue_key)
+            stored = (st.metadata or {}).get("delivery_baselines") if st else None
+            if isinstance(stored, dict) and url:
+                return str(stored.get(url) or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _clone_head_moved(self, issue_key: str, git: Any, child: Any) -> bool:
+        """True when this clone's HEAD differs from its own job-start baseline."""
+        head = self._checkout_sha(child) or ""
+        baseline = self._clone_baseline_sha(issue_key, git, child)
+        return bool(head and baseline and head != baseline)
+
     def _head_moved_this_job(self, issue_key: str) -> bool:
-        """True when HEAD is a different SHA than the job-start baseline."""
+        """True when HEAD is a different SHA than the job-start baseline.
+
+        A multi-repo workspace root is not a git repo. Any child whose own
+        baseline moved counts. The parent ``delivery_baseline_sha`` is empty
+        on that path and must not hide a commit in a later clone.
+        """
         git = self._git_for(issue_key)
         if git is None:
             return False
+        children = self._repo_checkouts(git)
+        if len(children) > 1:
+            return any(
+                self._clone_head_moved(issue_key, git, child) for child in children
+            )
         try:
             raw = git.get_last_commit_sha() if hasattr(git, "get_last_commit_sha") else None
             head = str(raw).strip() if raw is not None else ""
@@ -8296,7 +8669,10 @@ class JobProcessor:
 
         ``require_new_sha=True`` (agent *failed*): do not treat older
         commits already on this work branch as this job's delivery. An
-        unknown-agent / no-work failure must stay ERROR.
+        unknown-agent / no-work failure must stay ERROR. When HEAD did
+        move, this function still pushes and opens the merge request.
+        A multi-repo root has no single SHA (see the baseline comment);
+        "moved" means any clone differs from its own baseline.
 
         Never open an MR when the work branch is not ahead of the target
         (empty ``feature/{KEY}`` cut from main must not get a 0-commit MR).
@@ -8773,6 +9149,7 @@ class JobProcessor:
         existing_mr_url: Optional[str] = None,
         open_mr: bool = True,
         notify_on_fail: bool = True,
+        git_manager: Optional["GitManager"] = None,
     ) -> bool:
         """Push prepared work_branch and open MR.
 
@@ -8810,7 +9187,23 @@ class JobProcessor:
             )
             return False
 
-        git = self._git_for(state.issue_key)
+        git = git_manager or self._git_for(state.issue_key)
+        if git_manager is None and git is not None:
+            children = list(getattr(git, "repo_checkouts", None) or [])
+            if len(children) > 1 and not (existing_mr_url or "").strip():
+                ok_all = True
+                for child in children:
+                    if self._is_aborted(state.issue_key):
+                        return False
+                    ok = await self._push_and_create_mr(
+                        state,
+                        existing_mr_url=existing_mr_url,
+                        open_mr=open_mr,
+                        notify_on_fail=notify_on_fail,
+                        git_manager=child,
+                    )
+                    ok_all = ok_all and bool(ok)
+                return ok_all
         if not git:
             logger.warning(f"No git manager for {state.issue_key}")
             msg = "No git workspace available; cannot push or open a merge request."
@@ -8937,6 +9330,9 @@ class JobProcessor:
                 reason = raw.strip() if isinstance(raw, str) and raw.strip() else (
                     "git push failed (see daemon log)"
                 )
+                remote = str(getattr(git, "remote_url", "") or "").strip()
+                if remote and remote not in reason:
+                    reason = f"{remote}: {reason}"
                 logger.warning(
                     f"Push failed or remote not configured for {state.issue_key}: "
                     f"{reason[:200]}"
@@ -9029,6 +9425,7 @@ class JobProcessor:
             commit_sha=commit_sha,
             commit_subject=commit_subject,
             commit_url=commit_url,
+            repository_url=str(getattr(git, "remote_url", "") or "").strip() or None,
         )
 
         if reuse_mr:
@@ -9087,6 +9484,7 @@ class JobProcessor:
         commit_sha: Optional[str] = None,
         commit_subject: Optional[str] = None,
         commit_url: Optional[str] = None,
+        repository_url: Optional[str] = None,
     ) -> None:
         """Store push/MR/commit on the active job and append issue delivery history.
 
@@ -9103,6 +9501,7 @@ class JobProcessor:
             "commit_sha": commit_sha or None,
             "commit_subject": commit_subject or None,
             "commit_url": commit_url or None,
+            "repository_url": repository_url or None,
             "created_at": now,
         }
 
@@ -9114,7 +9513,17 @@ class JobProcessor:
                     "commit_sha": commit_sha or None,
                     "commit_subject": commit_subject or None,
                     "commit_url": commit_url or None,
+                    "repository_url": repository_url or None,
                 }
+                existing_job = self.job_store.get_job(job_id) or {}
+                rows = [
+                    row
+                    for row in (existing_job.get("deliveries") or [])
+                    if isinstance(row, dict)
+                    and (row.get("repository_url") or "") != (repository_url or "")
+                ]
+                rows.append(delivery)
+                patch["deliveries"] = rows
                 if merge_request_url:
                     patch["merge_request_state"] = "opened"
                     m = re.search(
@@ -9289,6 +9698,7 @@ class JobProcessor:
                 description=desc,
                 work_branch=work_branch,
             )
+            prompt = self._with_repo_layout(issue_key, prompt)
 
             task = AgentTask(
                 description=f"Comment request: {issue_key}",

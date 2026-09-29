@@ -26,6 +26,7 @@ from src.dashboard.schemas import (
     AzureWorkItemLookupRequest,
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
+    ImportProjectsRequest,
     IssueReportRequest,
     AgentCreate,
     AgentWrite,
@@ -854,6 +855,8 @@ def create_dashboard_app(
             backend=body.backend or "",
             collection_url=getattr(body, "collection_url", "") or "",
             azure_project=getattr(body, "azure_project", "") or "",
+            repository_urls=list(getattr(body, "repository_urls", None) or []),
+            repository_refs=list(getattr(body, "repository_refs", None) or []),
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -928,6 +931,8 @@ def create_dashboard_app(
             target_branch=body.target_branch or "",
             mode=body.mode or "",
             source_branch_mode=body.source_branch_mode or "",
+            repository_urls=list(getattr(body, "repository_urls", None) or []),
+            repository_refs=list(getattr(body, "repository_refs", None) or []),
             store=schedule_store,
         )
         if not result.get("ok"):
@@ -1535,6 +1540,15 @@ def create_dashboard_app(
         )
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
+    @app.post("/api/settings/projects/import")
+    def import_accessible_projects(body: ImportProjectsRequest) -> dict:
+        """Save every Git repository the configured GitLab and Azure PATs can read."""
+        from src.dashboard.accessible_repos import import_accessible_repositories
+
+        result = import_accessible_repositories(body.project_repositories)
+        result["server_time"] = build_meta().server_time
         return result
 
     @app.get("/api/azure/projects")

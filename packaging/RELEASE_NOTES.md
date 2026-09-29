@@ -1,3 +1,11 @@
+# Yaver 0.9.64
+
+A dashboard job can work in every repository of a saved repo set, or in extra repositories you add on the schedule. Each repository keeps its own source and target, and Yaver pushes it and opens its own merge request. The job page and the issue page show each repository's commit and merge request. One repository on a schedule still runs as a single job. Mode, backend, and model sit with the repositories on the schedule form.
+
+Repo sets and saved projects are lists. The plus button adds one, the pencil edits it in a popup, and the trash icon removes it. Opening Settings → Projects loads every Git repository the saved GitLab and Azure tokens can read, and a project you already saved keeps its label and branches. Azure DevOps Server is asked with API 7.1, then 7.0, 6.1, and 6.0, and a server without a collection-wide list is read one team project at a time. Search on a repo set and on a schedule filters those projects by name or URL.
+
+A failed build still pushes and opens a merge request when this run moved that repository. Delivery and the queue use each repository's own branch, including branches written in the issue description. The shared folder stays until every merge request recorded on the job is merged or closed, and it also stays when you cancel a finished run. A later single-repo job does not resume the multi-repo chat. A rejected push names the repository, and a second push to the same merge request keeps the new commit.
+
 # Yaver 0.9.63
 
 The Completed total on Analytics opens a jobs list that includes a finished plan, which is the same set that total already counts. Back to Analytics returns to the period you were viewing, and a custom range keeps the same from and to.

@@ -157,6 +157,10 @@ class ScheduleCreateRequest(BaseModel):
         max_length=255,
         description="Azure team project for the new work item",
     )
+    # Extra clones for this dashboard job only. The Jira description stays one repo.
+    repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    # Per-repository source and target. Omitted branches copy the job branches.
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 class ScheduleMrRequest(BaseModel):
@@ -199,6 +203,8 @@ class ScheduleExistingRequest(BaseModel):
     target_branch: str = ""
     mode: str = ""
     source_branch_mode: str = ""
+    repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 class ScheduleItem(BaseModel):
@@ -308,6 +314,8 @@ class JobItem(BaseModel):
     commit_sha: Optional[str] = None
     commit_subject: Optional[str] = None
     commit_url: Optional[str] = None
+    # One entry per repository when the job cloned more than one remote.
+    deliveries: List[Dict[str, Any]] = Field(default_factory=list)
     # delivered | no_new_commits | etc. (soft completion when no new commits)
     delivery_status: Optional[str] = None
     delivery_note: Optional[str] = None
@@ -632,11 +640,25 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+    repository_sets: List["RepositorySetItem"] = Field(default_factory=list)
     work_modes: List["WorkModeItem"] = Field(default_factory=list)
     # {YAVER_BASE_DIR}/yaver and {YAVER_BASE_DIR}/t
     base_dir: str = ""
     data_dir: str = ""
     temp_dir_base: str = ""
+
+
+class RepositorySetItem(BaseModel):
+    """Named group of repositories for one dashboard multi-repo job."""
+
+    name: str = Field(..., min_length=1, max_length=80)
+    repositories: List[str] = Field(default_factory=list, max_length=12)
+
+
+class ImportProjectsRequest(BaseModel):
+    """Current saved-project rows to keep while importing token-visible repos."""
+
+    project_repositories: Optional[List[Dict[str, Any]]] = None
 
 
 class ProjectRepositoryItem(BaseModel):
@@ -866,6 +888,11 @@ class SettingsUpdate(BaseModel):
         default=None,
         max_length=40,
         description="Full replace of saved git remotes for the New-issue form",
+    )
+    repository_sets: Optional[List[RepositorySetItem]] = Field(
+        default=None,
+        max_length=20,
+        description="Full replace of named multi-repo groups",
     )
     work_modes: Optional[List[WorkModeItem]] = Field(
         default=None,

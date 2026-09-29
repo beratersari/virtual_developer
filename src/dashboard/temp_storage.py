@@ -1268,6 +1268,27 @@ def _remote_matches_review(remote_url: str, review_url: str) -> bool:
     return bool(left and right and left == right)
 
 
+_DONE_REVIEW_STATES = frozenset({"merged", "closed", "completed", "abandoned"})
+
+
+def _job_review_urls(job: Dict[str, Any]) -> List[str]:
+    """Every merge-request URL stored on this job, including each delivery."""
+    urls: List[str] = []
+    seen: Set[str] = set()
+    rows: List[Any] = list(job.get("deliveries") or [])
+    rows.append({"merge_request_url": job.get("merge_request_url")})
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("merge_request_url") or "").strip()
+        key = _norm_mr_url(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        urls.append(raw)
+    return urls
+
+
 def _job_matches_review(
     job: Dict[str, Any],
     *,
@@ -1296,7 +1317,82 @@ def _job_matches_review(
         mr_iid=job_iid,
         repository_url=str(job.get("repository_url") or ""),
     )
-    return _same_project_iid(want, got)
+    if _same_project_iid(want, got):
+        return True
+    for url in _job_review_urls(job):
+        row_id = _review_project_iid(url=url)
+        if _same_project_iid(want, row_id):
+            return True
+    return False
+
+
+def _review_urls_for_folder(folder_name: str) -> List[str]:
+    """MR/PR URLs recorded on jobs whose working directory is this temp folder."""
+    name = (folder_name or "").strip()
+    if not name:
+        return []
+    urls: List[str] = []
+    seen: Set[str] = set()
+    try:
+        from src.state.job_store import job_store
+
+        jobs = job_store.list_jobs(limit=max(int(job_store.count_jobs() or 0), 1))
+    except Exception as e:
+        logger.debug(f"Could not list jobs for {name}: {e}")
+        return []
+    for job in jobs:
+        wd = str(job.get("working_directory") or "").replace("\\", "/").rstrip("/")
+        if not wd or Path(wd).name != name:
+            continue
+        for url in _job_review_urls(job):
+            key = _norm_mr_url(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+    return urls
+
+
+def _review_state_for_cleanup(url: str, *, known_done_url: str = "") -> str:
+    """State of one review. The webhook URL is already merged or closed."""
+    if known_done_url and _norm_mr_url(url) == _norm_mr_url(known_done_url):
+        return "merged"
+    cached = _cached_mr_state(url)
+    if cached:
+        return cached
+    try:
+        state = _lookup_review_state(url)
+    except Exception as e:
+        logger.debug(f"Review status {url!r} failed: {e}")
+        return "unknown"
+    if state and state != "unknown":
+        remember_mr_state(url, state)
+    return (state or "unknown").strip().lower() or "unknown"
+
+
+def multi_workspace_ready_to_delete(
+    folder_name: str, *, known_done_url: str = ""
+) -> bool:
+    """A ``multi_*`` folder goes away only when every recorded review is done.
+
+    One open merge request keeps the whole workspace. A folder that is not a
+    multi-repo root keeps the single-review rule. Age purge is separate: an
+    unchanged folder is still removed after ``temp_clone_max_age_days``.
+    """
+    name = (folder_name or "").strip()
+    if not name.startswith("multi_"):
+        return True
+    urls = _review_urls_for_folder(name)
+    if len(urls) <= 1:
+        return True
+    for url in urls:
+        state = _review_state_for_cleanup(url, known_done_url=known_done_url)
+        if state not in _DONE_REVIEW_STATES:
+            logger.info(
+                f"Keep multi-repo workspace {name}: {url} is {state}"
+            )
+            return False
+    return True
 
 
 def clone_folder_names_for_mr(
@@ -1411,6 +1507,8 @@ def delete_clones_for_merge_request(
             logger.info(f"Skip MR-merge delete of {name}: clone is in flight")
             any_live = True
             continue
+        if not multi_workspace_ready_to_delete(name, known_done_url=mr_url):
+            continue
         resolved_names.append((name, resolved))
     if not any_live:
         _purge_merged_review_artifacts(mr_url=mr_url, issue_key=issue_key)
@@ -1467,7 +1565,9 @@ def sweep_merged_storage_clones() -> List[str]:
                 remember_mr_state(url, state)
                 if state != "unknown":
                     _persist_job_mr_state(url, state)
-        if state not in {"merged", "closed", "completed", "abandoned"}:
+        if state not in _DONE_REVIEW_STATES:
+            continue
+        if not multi_workspace_ready_to_delete(child.name, known_done_url=url):
             continue
         try:
             resolved = child.resolve()

@@ -63,7 +63,7 @@ Yaver is a Python daemon that:
 - Unused temp clones older than ``TEMP_CLONE_MAX_AGE_DAYS`` (default 7) are deleted hourly. Live jobs are never purged. 0 = keep forever (operators delete from Storage).
 - Storage Delete is **disabled / refused** while a live job owns the clone (`in_use`). Stop the job first.
 - Dashboard schedule **Cancel** is only for `scheduled` / `error`. **`dispatching` cannot be cancelled** (would abort a live job on the same issue).
-- GitLab MR **merged/closed** and Azure PR **completed/abandoned** cleanup uses the issue key parsed from the title (``feat(KAN-12): …`` → ``KAN-12``, or the synthetic ``GL-…`` / ``AZ-…`` fallback). That **unlinks** ``{YAVER_DATA_DIR}/plans/{KEY}.md`` and **deletes local issue state** for that key — including while the Jira ticket is still ``plan_ready`` or executing. Job JSON stays for Analytics. The matching temp clone is deleted. **Intentional.** Do not “fix” by keeping the plan file because implement has not run yet. Proof: ``tests/test_daily_usage_review_proofs.py::test_gitlab_merge_webhook_deletes_plan_named_in_mr_title``.
+- GitLab MR **merged/closed** and Azure PR **completed/abandoned** cleanup uses the issue key parsed from the title (``feat(KAN-12): …`` → ``KAN-12``, or the synthetic ``GL-…`` / ``AZ-…`` fallback). That **unlinks** ``{YAVER_DATA_DIR}/plans/{KEY}.md`` and **deletes local issue state** for that key — including while the Jira ticket is still ``plan_ready`` or executing. Job JSON stays for Analytics. The matching temp clone is deleted. **Intentional.** Do not “fix” by keeping the plan file because implement has not run yet. Proof: ``tests/test_daily_usage_review_proofs.py::test_gitlab_merge_webhook_deletes_plan_named_in_mr_title``. A multi-repo workspace (``multi_*``) is one folder for every clone. Merge cleanup deletes that folder only after every merge request recorded on the job is merged or closed. Until then the folder stays. The hourly age purge still deletes it when the folder is older than ``TEMP_CLONE_MAX_AGE_DAYS``, even if a review is still open.
 
 ### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
@@ -99,7 +99,10 @@ To Do + bot assignee
 ```
 
 Plan, build, and test keep **separate** OpenCode sessions per repo + source +
-target (`kind=plan` / `kind=build` / `kind=test`). One issue can have three
+target (`kind=plan` / `kind=build` / `kind=test`). A multi-repo job keeps
+its own session for that set of repositories. A later single-repo job on
+the first repository, even with the same source and target, does not resume
+it and does not replace it. One issue can have three
 `ses_*` chats until Dashboard Reset. Plan refactor resumes the plan session.
 A later build (or test) on that repo/source/target resumes that kind only.
 
@@ -260,6 +263,24 @@ Orchestrator **always** owns remote delivery when the job returns success:
 
 Do **not** skip MR creation because the model ran `git push`. Nudge text tells the
 model not to push; if it still does, delivery must remain correct.
+
+#### Delivery after the agent errors (build)
+
+The rule is the docstring on `_deliver_if_new_commits`. Read both halves.
+
+- Agent **failed** (`require_new_sha`): do not treat **older** commits
+  already on the work branch as this job's delivery. If HEAD did not move,
+  those stay undelivered and the run stays an error. If HEAD **did** move,
+  the same function still pushes and opens the merge request.
+- Agent **succeeded**: prior unpushed commits (HEAD unchanged, branch
+  already ahead of the target) are still pushed and the merge request is
+  still opened. That is the comment on `_assert_build_delivery`.
+
+A multi-repo workspace root is not a git repo. The baseline comment says
+one SHA cannot stand for every repository, so `delivery_baseline_sha` on
+the parent is empty on purpose. "HEAD moved" is any clone whose SHA
+differs from that clone's own baseline. Push still runs for a clone that
+is not ahead of its target; that clone does not get a merge request.
 
 #### MR titles / UTF-8 (Windows)
 

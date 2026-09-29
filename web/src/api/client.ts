@@ -23,6 +23,8 @@ import type {
   SchedulePrPreview,
   SchedulePreview,
   SchedulesPayload,
+  ImportedProjects,
+  ProjectRepository,
   SettingsPatch,
   SettingsPayload,
   StorageDeletesPayload,
@@ -178,6 +180,7 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     commit_sha: j.commit_sha ?? null,
     commit_subject: j.commit_subject ?? null,
     commit_url: j.commit_url ?? null,
+    deliveries: j.deliveries || [],
     delivery_status: j.delivery_status ?? null,
     delivery_note: j.delivery_note ?? null,
     working_directory: j.working_directory ?? null,
@@ -454,6 +457,22 @@ export function patchSettings(body: SettingsPatch) {
   })
 }
 
+export function importAccessibleProjects(project_repositories: ProjectRepository[]) {
+  return request<ImportedProjects>('/api/settings/projects/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_repositories: project_repositories
+        .filter((row) => row.url.trim())
+        .map((row) => ({
+          label: row.label,
+          url: row.url.trim(),
+          target_branch: (row.target_branch || '').trim(),
+          source_branch: (row.source_branch || '').trim(),
+        })),
+    }),
+  })
+}
+
 export function fetchModels(refresh = false, backend?: string) {
   const params = new URLSearchParams()
   if (refresh) params.set('refresh', 'true')
@@ -645,6 +664,13 @@ export function createSchedule(body: ScheduleCreateBody) {
   if (body.backend) payload.backend = body.backend
   if (body.collection_url) payload.collection_url = body.collection_url
   if (body.azure_project) payload.azure_project = body.azure_project
+  if (body.repository_urls && body.repository_urls.length > 1) {
+    payload.repository_urls = body.repository_urls
+  }
+  if (body.repository_refs && body.repository_refs.length > 1) {
+    payload.repository_refs = body.repository_refs
+    payload.repository_urls = body.repository_refs.map((row) => row.url)
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem
@@ -836,6 +862,7 @@ export function scheduleExistingIssue(body: {
   target_branch?: string
   mode?: string
   source_branch_mode?: 'custom' | 'issue_key'
+  repository_refs?: { url: string; source_branch: string; target_branch: string }[]
 }) {
   const payload: Record<string, unknown> = {
     issue_key: body.issue_key,
@@ -852,6 +879,10 @@ export function scheduleExistingIssue(body: {
   if (body.target_branch) payload.target_branch = body.target_branch
   if (body.mode) payload.mode = body.mode
   if (body.source_branch_mode) payload.source_branch_mode = body.source_branch_mode
+  if (body.repository_refs && body.repository_refs.length > 1) {
+    payload.repository_refs = body.repository_refs
+    payload.repository_urls = body.repository_refs.map((row) => row.url)
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem

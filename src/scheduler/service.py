@@ -88,6 +88,7 @@ def build_issue_description(
     mode: str,
     model: str = "",
     backend: str = "",
+    repository_refs: Optional[list] = None,
 ) -> str:
     """Build Jira description with mandatory {params} block for the agent."""
     from src.issue_git_spec import _normalize_backend_id, _normalize_model_id
@@ -97,15 +98,35 @@ def build_issue_description(
     bid = _normalize_backend_id(backend)
     model_line = f"Model: {mid}\n" if mid else ""
     backend_line = f"Backend: {bid}\n" if bid else ""
+    from src.dashboard.repo_sets import normalize_repository_refs
+
+    rows = normalize_repository_refs(
+        repository_url, source_branch, target_branch, repository_refs
+    )
+    if rows:
+        rows[0]["source_branch"] = source_branch or rows[0]["source_branch"]
+        rows[0]["target_branch"] = target_branch or rows[0]["target_branch"]
+    else:
+        rows = [
+            {
+                "url": repository_url,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+            }
+        ]
+    repo_lines = "".join(
+        f"Repository: {row['url']}\n"
+        f"Source branch: {row['source_branch']}\n"
+        f"Target branch: {row['target_branch']}\n"
+        for row in rows
+    )
     # Jira wiki treats {params} as a macro and collapses the block to one
     # line. Wrap in {code} so Server/DC shows each field on its own line.
     # The agent parser still finds the inner {params} markers.
     params = (
         "{code}\n"
         "{params}\n"
-        f"Repository: {repository_url}\n"
-        f"Source branch: {source_branch}\n"
-        f"Target branch: {target_branch}\n"
+        f"{repo_lines}"
         f"Mode: {mode}\n"
         f"{model_line}"
         f"{backend_line}"
@@ -308,6 +329,10 @@ def _preview_from_loaded_issue(
         "mode": spec.mode or "",
         "model": spec.model or "",
         "backend": spec.backend or "",
+        "repository_refs": [
+            {"url": url, "source_branch": src, "target_branch": tgt}
+            for url, src, tgt in (spec.repository_refs or ())
+        ],
         "message": "Issue found and template is valid. Choose a run time to schedule.",
     }
 
@@ -441,6 +466,7 @@ def _selection_unchanged(
     source_branch: str,
     target_branch: str,
     mode: str,
+    repository_refs: Optional[list] = None,
 ) -> bool:
     """True when the form still matches the looked-up ticket.
 
@@ -469,6 +495,24 @@ def _selection_unchanged(
     live_mode = (preview.get("mode") or "").strip().lower()
     if (mode or "").strip().lower() != live_mode:
         return False
+    live_refs = preview.get("repository_refs") or []
+    if len(live_refs) > 1 or len(repository_refs or []) > 1:
+        def _key(rows: Any) -> tuple:
+            out = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                out.append(
+                    (
+                        _normalize_repo_url(str(row.get("url") or "")),
+                        _normalize_branch(str(row.get("source_branch") or "")),
+                        _normalize_branch(str(row.get("target_branch") or "")),
+                    )
+                )
+            return tuple(out)
+
+        if _key(live_refs) != _key(repository_refs):
+            return False
     return True
 
 
@@ -484,6 +528,8 @@ def schedule_existing_issue(
     target_branch: str = "",
     mode: str = "",
     source_branch_mode: str = "",
+    repository_urls: Optional[list] = None,
+    repository_refs: Optional[list] = None,
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
@@ -589,6 +635,7 @@ def schedule_existing_issue(
                 source_branch=src,
                 target_branch=tgt,
                 mode=mode_c,
+                repository_refs=repository_refs or repository_urls,
             ):
                 desc = live_desc
                 if mid:
@@ -604,6 +651,7 @@ def schedule_existing_issue(
                     mode=mode_c,
                     model=mid,
                     backend=bid,
+                    repository_refs=repository_refs or repository_urls,
                 )
         else:
             desc = operator_desc or live_desc
@@ -700,6 +748,14 @@ def schedule_existing_issue(
                     f"{key}: description update soft-failed: {e}"
                 )
 
+        from src.dashboard.repo_sets import normalize_repository_refs
+
+        ref_input = repository_refs if repository_refs else repository_urls
+        repo_refs = normalize_repository_refs(repo, src, tgt, ref_input)
+        if repo_refs:
+            repo_refs[0]["source_branch"] = src
+            repo_refs[0]["target_branch"] = tgt
+        repo_urls = [row["url"] for row in repo_refs]
         rec = ss.create(
             title=preview.get("title") or key,
             description=desc[:4000],
@@ -715,6 +771,8 @@ def schedule_existing_issue(
             project_key=key.split("-")[0] if "-" in key else "",
             issue_type=preview.get("issue_type") or "Task",
             source="existing",
+            repository_urls=repo_urls,
+            repository_refs=repo_refs,
         )
         logger.info(
             f"Schedule existing issue {key} schedule_id={rec.get('schedule_id')} "
@@ -1116,6 +1174,8 @@ def _create_scheduled_azure_work_item(
     model: str,
     backend: str,
     store: Optional[ScheduleStore],
+    repository_urls: Optional[list] = None,
+    repository_refs: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Create a TFS work item + local schedule (same picker as Jira New)."""
     from src.azure.client import AzureDevOpsClient
@@ -1142,6 +1202,7 @@ def _create_scheduled_azure_work_item(
         mode=mode,
         model=model,
         backend=backend,
+        repository_refs=repository_refs or repository_urls,
     )
     from src.azure.comment_html import work_item_description_html
 
@@ -1194,6 +1255,7 @@ def _create_scheduled_azure_work_item(
             mode=mode,
             model=model,
             backend=backend,
+            repository_refs=repository_refs or repository_urls,
         )
         ado.update_work_item_fields(
             project,
@@ -1238,6 +1300,16 @@ def _create_scheduled_azure_work_item(
             "error": ASSIGN_PAT_FAILED,
             "issue_key": issue_key,
         }
+    from src.dashboard.repo_sets import normalize_repository_refs
+
+    ref_input = repository_refs if repository_refs else repository_urls
+    repo_refs = normalize_repository_refs(
+        repository_url, src, target_branch, ref_input
+    )
+    if repo_refs:
+        repo_refs[0]["source_branch"] = src
+        repo_refs[0]["target_branch"] = target_branch
+    repo_urls = [row["url"] for row in repo_refs]
     rec = (store or schedule_store).create(
         title=title,
         description=(description or "").strip(),
@@ -1256,6 +1328,8 @@ def _create_scheduled_azure_work_item(
         azure_host=str(coords.get("host") or ""),
         azure_collection_url=collection_url,
         azure_project=project,
+        repository_urls=repo_urls,
+        repository_refs=repo_refs,
     )
     logger.info(
         f"Created Azure work item {issue_key} project={project} "
@@ -1286,6 +1360,8 @@ def create_scheduled_job(
     backend: str = "",
     collection_url: str = "",
     azure_project: str = "",
+    repository_urls: Optional[list] = None,
+    repository_refs: Optional[list] = None,
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
@@ -1324,6 +1400,10 @@ def create_scheduled_job(
     repo = _normalize_repo_url(repository_url)
     if not repo:
         return {"ok": False, "error": "repository_url is required"}
+    from src.dashboard.repo_sets import normalize_repository_refs
+
+    # Branches are filled again after an issue-key source is known.
+    repo_refs_input = repository_refs if repository_refs else repository_urls
     tgt = _normalize_branch(target_branch)
     if not tgt:
         return {"ok": False, "error": "target_branch is required"}
@@ -1366,6 +1446,8 @@ def create_scheduled_job(
             model=mid,
             backend=bid,
             store=store,
+            repository_urls=repository_urls,
+            repository_refs=repo_refs_input,
         )
 
     project = (project_key or "").strip() or (
@@ -1381,6 +1463,7 @@ def create_scheduled_job(
         mode=mode_c,
         model=mid,
         backend=bid,
+        repository_refs=repo_refs_input,
     )
 
     client = jira_client
@@ -1422,6 +1505,7 @@ def create_scheduled_job(
                 mode=mode_c,
                 model=mid,
                 backend=bid,
+                repository_refs=repo_refs_input,
             )
             # Soft: rewrite description so agents see feature/KEY (not __pending__)
             try:
@@ -1469,6 +1553,13 @@ def create_scheduled_job(
         except Exception as e:
             logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
 
+        from src.dashboard.repo_sets import normalize_repository_refs
+
+        repo_refs = normalize_repository_refs(repo, src, tgt, repo_refs_input)
+        if repo_refs:
+            repo_refs[0]["source_branch"] = src
+            repo_refs[0]["target_branch"] = tgt
+        repo_urls = [row["url"] for row in repo_refs]
         ss = store or schedule_store
         rec = ss.create(
             title=title,
@@ -1485,6 +1576,8 @@ def create_scheduled_job(
             project_key=project,
             issue_type=itype,
             source="new",
+            repository_urls=repo_urls,
+            repository_refs=repo_refs,
         )
         return {
             "ok": True,
@@ -1616,10 +1709,43 @@ def _note_schedule_workspace_lock(
     if not callable(note) or not (issue_key or "").strip():
         return ""
     try:
-        return (
-            note(issue_key, **_schedule_workspace_lock_kwargs(rec, issue_key))
-            or ""
-        )
+        kwargs = _schedule_workspace_lock_kwargs(rec, issue_key)
+        noted = note(issue_key, **kwargs) or ""
+        refs = rec.get("repository_refs") if isinstance(rec, dict) else None
+        if isinstance(refs, list) and len(refs) >= 2:
+            from src.git_manager import GitManager
+
+            for row in refs:
+                if not isinstance(row, dict):
+                    continue
+                url = str(row.get("url") or "").strip()
+                if not url:
+                    continue
+                row_src = str(row.get("source_branch") or "").strip()
+                row_tgt = str(row.get("target_branch") or kwargs.get("target_branch") or "").strip()
+                row_work = GitManager.resolve_work_branch_name(
+                    issue_key, row_src, row_tgt
+                )
+                note(
+                    issue_key,
+                    repository_url=url,
+                    work_branch=row_work,
+                    target_branch=row_tgt,
+                )
+        else:
+            urls = rec.get("repository_urls") if isinstance(rec, dict) else None
+            if isinstance(urls, list):
+                for raw_url in urls:
+                    url = str(raw_url or "").strip()
+                    if not url or url == kwargs.get("repository_url"):
+                        continue
+                    note(
+                        issue_key,
+                        repository_url=url,
+                        work_branch=kwargs.get("work_branch") or "",
+                        target_branch=kwargs.get("target_branch") or "",
+                    )
+        return noted
     except Exception as e:
         logger.debug(f"{issue_key}: schedule workspace lock note failed: {e}")
         return ""
@@ -2243,6 +2369,8 @@ async def _dispatch_claimed_schedule(
                 "timestamp": int(time.time() * 1000),
                 "scheduled_job": True,
                 "schedule_id": schedule_id,
+                "repository_urls": list(live.get("repository_urls") or []),
+                "repository_refs": list(live.get("repository_refs") or []),
             }
         enqueue = getattr(processor, "enqueue_jira_event", None)
         # Prefer the work queue so a busy issue leaves a visible ``queued`` row.

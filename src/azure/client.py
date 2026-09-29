@@ -1071,7 +1071,9 @@ class AzureDevOpsClient:
                 )
                 return None
         except Exception as exc:
-            azure_warning(f"http GET error url={url} err={exc}")
+            detail = f"GET {url} err={exc}"
+            self._remember_error(detail)
+            azure_warning(f"http {detail}")
             return None
 
     def _patch_json(
@@ -1162,6 +1164,98 @@ class AzureDevOpsClient:
             skip += page
         azure_info(f"list_projects count={len(names)} collection={self.api_base}")
         return names
+
+    def list_git_repositories(self) -> List[Dict[str, str]]:
+        """Git clone URLs this collection PAT can read.
+
+        Azure DevOps Server 2022 speaks api-version 7.1/7.0 and 2020 speaks
+        6.0. ``_get_json`` walks those versions. The collection-wide
+        repository list is used when the server accepts it. A server that
+        rejects that URL (older than 2020) is listed per team project.
+        """
+        if not self.api_base or not self.pat:
+            return []
+        rows = self._git_repository_rows(f"{self.api_base}/_apis/git/repositories")
+        if rows is None:
+            rows = []
+            for name in self.list_projects():
+                proj = quote(unquote(name.strip().strip("/")), safe="")
+                if not proj:
+                    continue
+                part = self._git_repository_rows(
+                    f"{self.api_base}/{proj}/_apis/git/repositories"
+                )
+                if part:
+                    rows.extend(part)
+        items: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            item = self._saved_repo_from_azure(row)
+            if not item:
+                continue
+            key = item["url"].rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(item)
+        azure_info(
+            f"list_git_repositories count={len(items)} collection={self.api_base}"
+        )
+        return items
+
+    def _git_repository_rows(self, url: str) -> Optional[List[Dict[str, Any]]]:
+        """One repository list, following continuationToken. None on HTTP failure."""
+        rows: List[Dict[str, Any]] = []
+        token = ""
+        for _ in range(40):
+            params = {"continuationToken": token} if token else None
+            data = self._get_json(url, params=params)
+            if data is None:
+                return None if not rows else rows
+            page: List[Any] = []
+            next_token = ""
+            if isinstance(data, dict):
+                raw = data.get("value")
+                if isinstance(raw, list):
+                    page = raw
+                next_token = str(data.get("continuationToken") or "").strip()
+            elif isinstance(data, list):
+                page = data
+            else:
+                return rows
+            for item in page:
+                if isinstance(item, dict):
+                    rows.append(item)
+            if not next_token or next_token == token or not page:
+                return rows
+            token = next_token
+        return rows
+
+    def _saved_repo_from_azure(self, row: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        if row.get("isDisabled") is True:
+            return None
+        project = row.get("project")
+        project_name = ""
+        if isinstance(project, dict):
+            project_name = str(project.get("name") or "").strip()
+        name = str(row.get("name") or "").strip()
+        url = str(row.get("remoteUrl") or row.get("webUrl") or "").strip()
+        if not url and project_name and name:
+            proj = quote(unquote(project_name), safe="")
+            repo = quote(unquote(name), safe="")
+            url = f"{self.api_base}/{proj}/_git/{repo}"
+        if not url:
+            return None
+        label = f"{project_name}/{name}" if project_name and name else name or project_name
+        branch = str(row.get("defaultBranch") or "").strip()
+        if branch.lower().startswith("refs/heads/"):
+            branch = branch[len("refs/heads/") :]
+        return {
+            "label": label[:80],
+            "url": url,
+            "target_branch": branch[:255],
+            "source_branch": "",
+        }
 
     def create_work_item(
         self,

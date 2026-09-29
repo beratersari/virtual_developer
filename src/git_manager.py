@@ -112,9 +112,20 @@ class GitManager:
         source_branch: Optional[str] = None,
         target_branch: Optional[str] = None,
         keep_source_work_branch: bool = False,
+        repository_urls: Optional[list] = None,
+        repository_refs: Optional[list] = None,
+        workspace_dir: Optional[Path] = None,
+        register_live: bool = True,
     ):
         self.issue_key = issue_key
         self.temp_dir: Optional[Path] = None
+        self.workspace_dir = workspace_dir
+        self.repository_urls = [
+            str(u).strip() for u in (repository_urls or []) if str(u).strip()
+        ]
+        self.repository_refs = list(repository_refs or [])
+        self.repo_checkouts: List["GitManager"] = []
+        self._register_live_on_setup = bool(register_live)
         self.remote_enabled: bool = False
         self.remote_url: Optional[str] = (
             self.normalize_remote_url(remote_url or "") or None
@@ -143,7 +154,13 @@ class GitManager:
         )
 
         if issue_key:
-            self._setup_temp_working_dir()
+            if (
+                len(self._repository_specs()) > 1
+                and self.workspace_dir is None
+            ):
+                self._setup_multi_repo_workspace()
+            else:
+                self._setup_temp_working_dir()
 
         if self.temp_dir:
             set_current_temp_dir(self.temp_dir)
@@ -151,7 +168,8 @@ class GitManager:
 
     def _setup_temp_working_dir(self) -> None:
         """Setup isolated temp clone for this JIRA issue (always required)."""
-        self._register_live()
+        if self._register_live_on_setup:
+            self._register_live()
         try:
             self._setup_temp_working_dir_inner()
         except GitCancelledError:
@@ -285,6 +303,146 @@ class GitManager:
             raise RuntimeError(f"Unsafe temp path rejected: {temp_path}") from e
         return temp_path
 
+    def _setup_multi_repo_workspace(self) -> None:
+        """Clone every repository into its own folder under one root.
+
+        OpenCode starts in the root. Checkout and submodule update stay
+        the single-repo path, once per child.
+        """
+        if self._register_live_on_setup:
+            self._register_live()
+        try:
+            specs = self._repository_specs()
+            if not specs:
+                raise GitCloneError(
+                    "*Yaver* could not clone: no repository URL was provided."
+                )
+            first_url = specs[0]["url"]
+            self.remote_url = first_url
+            self.remote_name = self._extract_remote_name(first_url)
+            self.remote_enabled = True
+            if not (specs[0]["target_branch"] or self.target_branch):
+                raise GitTargetBranchError(
+                    "*Yaver* could not prepare the workspace: no target branch."
+                )
+            first = specs[0]
+            self.source_branch = first["source_branch"] or self.source_branch
+            self.target_branch = first["target_branch"] or self.target_branch
+            self.work_branch = self._resolve_work_branch_name(self.issue_key)
+            self.temp_dir = self._multi_repo_root()
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            used: set[str] = set()
+            for spec in specs:
+                slug = self._child_dirname(spec["url"], used)
+                child = GitManager(
+                    issue_key=self.issue_key,
+                    remote_url=spec["url"],
+                    source_branch=spec["source_branch"],
+                    target_branch=spec["target_branch"],
+                    keep_source_work_branch=self.keep_source_work_branch,
+                    workspace_dir=self.temp_dir / slug,
+                    register_live=False,
+                )
+                self.repo_checkouts.append(child)
+            logger.info(
+                f"Multi-repo workspace {self.temp_dir} "
+                f"({len(self.repo_checkouts)} clones)"
+            )
+        except GitCancelledError:
+            if self.should_discard_on_cancel():
+                self.discard_workspace()
+            else:
+                self._unregister_live()
+            raise
+        except Exception:
+            self._unregister_live()
+            raise
+
+    def _repository_specs(self) -> List[Dict[str, str]]:
+        """One entry per clone: url, source branch, target branch."""
+        raw_refs = getattr(self, "repository_refs", None) or []
+        specs: List[Dict[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(url: str, source: str, target: str) -> None:
+            normalized = self.normalize_remote_url(url)
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            specs.append(
+                {
+                    "url": normalized,
+                    "source_branch": (source or self.source_branch or "").strip(),
+                    "target_branch": (target or self.target_branch or "").strip(),
+                }
+            )
+
+        if isinstance(raw_refs, list):
+            for item in raw_refs:
+                if isinstance(item, str):
+                    _add(item, self.source_branch, self.target_branch)
+                elif isinstance(item, dict):
+                    _add(
+                        str(item.get("url") or item.get("repository_url") or ""),
+                        str(item.get("source_branch") or self.source_branch or ""),
+                        str(item.get("target_branch") or self.target_branch or ""),
+                    )
+        if len(specs) < 2:
+            specs = []
+            seen = set()
+            for url in self.repository_urls:
+                _add(url, self.source_branch, self.target_branch)
+        return specs
+
+    def _repository_identity_parts(self) -> List[tuple]:
+        from src.state.session_bind_store import normalize_branch, normalize_repo_key
+
+        parts = []
+        for spec in self._repository_specs():
+            work = self.resolve_work_branch_name(
+                self.issue_key,
+                spec["source_branch"],
+                spec["target_branch"],
+                keep_source=self.keep_source_work_branch,
+            )
+            parts.append(
+                (
+                    normalize_repo_key(spec["url"]),
+                    normalize_branch(work),
+                    normalize_branch(spec["target_branch"]),
+                )
+            )
+        parts.sort()
+        return parts
+
+    def _multi_repo_root(self) -> Path:
+        from src.paths import resolve_temp_dir_base
+
+        parts = self._repository_identity_parts()
+        works = {part[1] for part in parts}
+        targets = {part[2] for part in parts}
+        if len(works) == 1 and len(targets) == 1:
+            material = (
+                f"{'|'.join(part[0] for part in parts)}\0"
+                f"{next(iter(works))}\0{next(iter(targets))}"
+            )
+        else:
+            material = "|".join(f"{key}\0{work}\0{target}" for key, work, target in parts)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+        base_temp = resolve_temp_dir_base(settings.temp_dir_base)
+        base_temp.mkdir(parents=True, exist_ok=True)
+        return self._safe_under_temp_base(base_temp, f"multi_{digest}")
+
+    def _child_dirname(self, url: str, used: set[str]) -> str:
+        base = self._safe_fs_token(self._extract_remote_name(url), max_len=40)
+        name = base
+        n = 2
+        while name in used:
+            name = f"{base}_{n}"
+            n += 1
+        used.add(name)
+        return name
+
     def _create_temp_directory(self) -> Path:
         """Return the stable temp clone dir for this repo + work + target.
 
@@ -299,6 +457,11 @@ class GitManager:
         OpenCode ``session.directory`` are rewritten so serve resume still
         matches the live clone.
         """
+        if self.workspace_dir is not None:
+            path = Path(self.workspace_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
         from src.paths import resolve_temp_dir_base
 
         base_temp = resolve_temp_dir_base(settings.temp_dir_base)
@@ -1615,6 +1778,12 @@ class GitManager:
 
     def cancel_processes(self, *, force: bool = True) -> int:
         """Force-kill every live git/glab child (and leftover path users)."""
+        killed_children = 0
+        for child in list(getattr(self, "repo_checkouts", None) or []):
+            try:
+                killed_children += int(child.cancel_processes(force=force) or 0)
+            except Exception:
+                pass
         self._init_proc_state()
         self._cancelled = True
         with self._proc_lock:
@@ -1639,7 +1808,7 @@ class GitManager:
         # Agent-spawned git is not in ``_live_procs``. Evict it and drop
         # stale index.lock so the next prompt can reuse this clone.
         killed += self.reclaim_workspace(extra_root_pids=extra_pids)
-        return killed
+        return killed + killed_children
 
     def reclaim_workspace(
         self, *, extra_root_pids: Optional[List[int]] = None
@@ -1664,7 +1833,11 @@ class GitManager:
             return 0
 
     def should_discard_on_cancel(self) -> bool:
-        """True when cancel should delete this workspace (incomplete clone)."""
+        """True when cancel should delete this workspace (incomplete clone).
+
+        A multi-repo root is never a git repo. Completeness is each child
+        clone, so a finished set is kept for the next job on that folder.
+        """
         self._init_proc_state()
         if self._clone_in_progress:
             return True
@@ -1672,6 +1845,18 @@ class GitManager:
             return False
         try:
             if not self.temp_dir.exists():
+                return False
+            children = list(getattr(self, "repo_checkouts", None) or [])
+            if children:
+                for child in children:
+                    if getattr(child, "_clone_in_progress", False):
+                        return True
+                    child_dir = getattr(child, "temp_dir", None)
+                    if child_dir is None:
+                        return True
+                    path = Path(child_dir)
+                    if not path.exists() or not (path / ".git").exists():
+                        return True
                 return False
             if not (self.temp_dir / ".git").exists():
                 return True
@@ -1737,6 +1922,9 @@ class GitManager:
     ) -> subprocess.CompletedProcess:
         """Run a git command in the temp working directory.
 
+        A multi-repo workspace root is not a git repository. Git runs
+        inside each clone, never in that root.
+
         When ``auth=True`` and a settings PAT exists for the host, temporarily
         points ``origin`` at ``https://oauth2:PAT@…``. Always disables the
         Windows credential-manager GUI for this child (empty helper + GCM never).
@@ -1744,6 +1932,13 @@ class GitManager:
         Always applies a hard timeout (default ``git_command_timeout_seconds``)
         so a hung push/fetch cannot pin a job slot forever.
         """
+        if self.repo_checkouts:
+            return subprocess.CompletedProcess(
+                args=["git", *args],
+                returncode=1,
+                stdout="",
+                stderr="workspace root is not a git repository",
+            )
         cwd = cwd or self.temp_dir
 
         if cwd is None or not cwd.exists() or not cwd.is_dir():
@@ -2536,6 +2731,12 @@ class GitManager:
           branch name.
         """
         key = issue_key or self.issue_key
+        if self.repo_checkouts:
+            last = None
+            for child in self.repo_checkouts:
+                last = child.ensure_feature_branch(key)
+            self.work_branch = last
+            return last
         logger.info(
             f"ensure_feature_branch for {key}: "
             f"params source={self.source_branch!r} target={self.target_branch!r}"
@@ -2611,6 +2812,8 @@ class GitManager:
 
     def get_current_branch(self) -> str:
         """Get the current branch name."""
+        if self.repo_checkouts:
+            return self.repo_checkouts[0].get_current_branch()
         result = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], check=False)
         if result.returncode != 0:
             return "main"
@@ -2632,6 +2835,8 @@ class GitManager:
 
     def get_last_commit_sha(self, *, short: bool = False) -> Optional[str]:
         """Return HEAD commit SHA (full or short), or None if unavailable."""
+        if self.repo_checkouts:
+            return self.repo_checkouts[0].get_last_commit_sha(short=short)
         fmt = "%h" if short else "%H"
         result = self._run_git(["log", "-1", f"--format={fmt}"], check=False)
         if result.returncode != 0:
@@ -2685,6 +2890,11 @@ class GitManager:
 
     def commits_ahead_of_target(self, branch_name: Optional[str] = None) -> int:
         """How many commits ``branch`` is ahead of ``origin/{target}`` (0 if unknown)."""
+        if self.repo_checkouts:
+            return max(
+                child.commits_ahead_of_target(branch_name)
+                for child in self.repo_checkouts
+            )
         branch = (branch_name or self.work_branch or self.get_current_branch() or "").strip()
         target = (self.target_branch or "").strip()
         if not branch or not target:
@@ -2707,6 +2917,8 @@ class GitManager:
 
     def ensure_on_work_branch(self) -> bool:
         """Checkout prepared ``work_branch`` if HEAD drifted. Returns False on failure."""
+        if self.repo_checkouts:
+            return all(child.ensure_on_work_branch() for child in self.repo_checkouts)
         work = (self.work_branch or "").strip()
         if not work:
             return False
@@ -3428,6 +3640,10 @@ def purge_stale_temp_dirs(
     Live job clones in ``protect_paths`` are never removed. OpenCode
     session binds are kept so the next clone resumes the same ``ses_*``.
     ``max_age_days`` 0 or negative means do nothing. Default is 7 days.
+    A ``multi_*`` workspace is one folder here: it is removed when that
+    folder's age exceeds the limit, even if a merge request is still open.
+    Merge cleanup removes it sooner only after every review it recorded
+    is merged or closed.
     """
     if max_age_days is None:
         age = float(getattr(settings, "temp_clone_max_age_days", 7) or 0)
