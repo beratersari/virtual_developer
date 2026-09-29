@@ -1,3 +1,13 @@
+# Yaver 0.9.65
+
+A follow-up comment on one merge request or pull request of a multi-repo job pushes only that repository and reuses that review. The other repositories stay local. A push of the shared folder fails, because that folder is not a git repository. A later run that names one repository drops the previous set, including when a schedule sends an empty list while the ticket text still names the old pair. A description that does not parse, and that does not send a repository list, leaves the stored set in place.
+
+A comment on a review this job already opened stays on that issue when the title has no key or names a different ticket. Merging one review keeps the plan and the local issue until every review recorded on the job is merged or closed. A later job that uses the same repository, source, and target waits until the running job finishes.
+
+Settings → Projects keeps the list you already saved until you choose Reload from tokens. Saving accepts the full imported list. You can search projects by name, select the visible rows, and delete that selection. Schedule and repo-set pickers find a saved repository by name or URL.
+
+Analytics uses the width of the page. The breakdown tables keep their columns on screen, the jobs chart keeps a fixed height, and category mix sits with that chart. The standalone executable reads its agents from the folder beside the program.
+
 # Yaver 0.9.64
 
 A dashboard job can work in every repository of a saved repo set, or in extra repositories you add on the schedule. Each repository keeps its own source and target, and Yaver pushes it and opens its own merge request. The job page and the issue page show each repository's commit and merge request. One repository on a schedule still runs as a single job. Mode, backend, and model sit with the repositories on the schedule form.

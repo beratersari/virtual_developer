@@ -8,6 +8,29 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.65] — 2026-09-29
+
+A review comment on a multi-repo job delivers only that repository. Settings can search and delete saved projects, and Analytics uses the width of the page.
+
+### Added
+
+- Saved projects can be searched by name. Select all applies to the visible rows, and Delete selected removes them after confirmation.
+- Analytics shows a category mix beside the jobs chart.
+
+### Fixed
+
+- A follow-up on one merge request or pull request pushes only the matching repository and reuses that review. A push of the shared folder fails, because that folder is not a git repository. The other repositories stay local.
+- A one-repository rework clears the stored repository set. An explicit list with fewer than two repositories clears it even when the ticket text still names the old pair. A description that does not parse, and that does not include a repository list, leaves the set in place.
+- A comment on a review this job opened stays on that issue when the title has no key or names another ticket. Each delivery stores the review id and the target branch.
+- Merging one review of a multi-repo job keeps the plan and the local issue until every recorded review is done.
+- Settings save accepts the project list the token import stores.
+- Opening Settings → Projects keeps the saved list. Reload from tokens is what imports repositories.
+- Schedule and repo-set fields find a saved repository by name or URL.
+- Analytics tables stay on the page, and the jobs chart keeps a fixed height so the hover marker stays on the point under the pointer.
+- The standalone executable loads its agents from the folder beside the program.
+
+[0.9.65]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.65
+
 ## [0.9.64] — 2026-09-29
 
 A dashboard job can work in several repositories at once. Each one keeps its own branch, commit, and merge request. Settings lists the Git repositories your GitLab and Azure tokens can read.
