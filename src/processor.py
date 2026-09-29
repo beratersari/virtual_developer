@@ -1776,8 +1776,40 @@ class JobProcessor:
                     _add_if_layout(sid)
         return sids, forgotten, bind_wd
 
+    def _resume_keeps_new_instruction(
+        self,
+        issue_key: str,
+        task: AgentTask,
+        *,
+        preserve_prompt: bool,
+    ) -> bool:
+        """True when this resume must send the prompt just built.
+
+        A second build of the same kit uses the short continue line. A plan
+        revise, a test run, a review comment, and an MR/PR follow-up are a
+        new instruction that is not already in the chat.
+        """
+        if preserve_prompt:
+            return True
+        kind = self._session_kind_for_issue(issue_key)
+        if kind in {"plan", "review", "test"}:
+            return True
+        from src.opencode_serve import is_plan_agent
+
+        if is_plan_agent(getattr(task, "agent", None)):
+            return True
+        agent = (getattr(task, "agent", None) or "").lower().replace("_", "-")
+        if "review" in agent:
+            return True
+        return agent in {"test", "tester", "derman-test"} or agent.endswith("-test")
+
     def _attach_bound_opencode_session(
-        self, issue_key: str, task: AgentTask, git: Any = None
+        self,
+        issue_key: str,
+        task: AgentTask,
+        git: Any = None,
+        *,
+        preserve_prompt: bool = False,
     ) -> Optional[str]:
         """Reuse the OpenCode session or Codex thread for this issue / bind.
 
@@ -1786,8 +1818,8 @@ class JobProcessor:
         row, a locked DB, or a new clone path must not start a cold session.
         Dashboard Reset is the only forget. Relocate OpenCode
         ``session.directory`` onto the live clone so serve resume stays aligned.
-        Codex resume uses ``exec resume`` and a short continue prompt — not
-        another full BUILD/PLAN kit.
+        A repeated build kit on Codex/Claude uses a short continue prompt.
+        Plan, test, review, and comment follow-ups keep the new instruction.
         """
         if getattr(task, "session_id", None):
             return task.session_id
@@ -1893,17 +1925,22 @@ class JobProcessor:
                 )
 
         task.session_id = chosen
-        if backend == BACKEND_CLAUDE:
-            from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
+        keep_instruction = self._resume_keeps_new_instruction(
+            issue_key, task, preserve_prompt=preserve_prompt
+        )
+        if not is_opencode and not keep_instruction:
+            # Same build kit again. The thread already has it. A plan revise
+            # or a new comment must not take this branch.
+            if backend == BACKEND_CLAUDE:
+                from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
 
-            task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
-            # The model gets the short continue line. The transcript still
-            # needs the prompt from the run that opened this session.
-            self._inherit_codex_thread_artifacts(issue_key, chosen)
-        elif not is_opencode:
-            from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
+                task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
+            else:
+                from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
 
-            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+                task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+        if not is_opencode:
+            # Dashboard Prompt tab still shows the run that opened the chat.
             self._inherit_codex_thread_artifacts(issue_key, chosen)
         try:
             self.state_manager.update_state(
@@ -6549,7 +6586,9 @@ class JobProcessor:
                 )
                 self._release_context(state.issue_key, success=False)
                 return
-            self._attach_bound_opencode_session(state.issue_key, task, git)
+            self._attach_bound_opencode_session(
+                state.issue_key, task, git, preserve_prompt=True
+            )
 
             result = await runner.run_agent_with_retry(
                 task,
@@ -7318,7 +7357,9 @@ class JobProcessor:
                 )
                 self._release_context(state.issue_key, success=False)
                 return
-            self._attach_bound_opencode_session(state.issue_key, task, git)
+            self._attach_bound_opencode_session(
+                state.issue_key, task, git, preserve_prompt=True
+            )
 
             result = await runner.run_agent_with_retry(
                 task,
@@ -8051,7 +8092,12 @@ class JobProcessor:
         self._snapshot_delivery_baseline(state.issue_key, git)
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
-        self._attach_bound_opencode_session(state.issue_key, task, git)
+        self._attach_bound_opencode_session(
+            state.issue_key,
+            task,
+            git,
+            preserve_prompt=from_plan_execute or is_test,
+        )
 
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
