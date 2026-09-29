@@ -235,6 +235,156 @@ def test_single_repo_failure_still_delivers_when_head_moved(processor, state_man
     assert repo.pushed and repo.mr_opened
 
 
+def test_one_repo_rework_drops_the_previous_multi_repo_set(processor, state_manager):
+    """A later one-repository run must not keep cloning the previous set.
+
+    Scheduling the same issue again with one repository, or editing the
+    description down to one repository and moving it back to To Do, has to
+    clear the stored urls and refs. An empty update must not leave the old
+    pair in place.
+    """
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    state_manager.create_state("KAN-20", "span", "old")
+    state_manager.update_state(
+        "KAN-20",
+        status=TaskStatus.COMPLETED,
+        completed_at=datetime.now(),
+        metadata={
+            "repository_urls": [api, web],
+            "repository_refs": [
+                {
+                    "url": api,
+                    "source_branch": "feature/KAN-20",
+                    "target_branch": "develop",
+                },
+                {
+                    "url": web,
+                    "source_branch": "feature/web-side",
+                    "target_branch": "main",
+                },
+            ],
+        },
+    )
+    event = make_issue_event(
+        key="KAN-20",
+        summary="span",
+        description=(
+            "{params}\n"
+            f"Repository: {api}\n"
+            "Source branch: feature/KAN-20\n"
+            "Target branch: develop\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+        status="To Do",
+        event_type="jira:issue_updated",
+    )
+    started: list[str] = []
+
+    async def cap(state):
+        started.append(state.issue_key)
+
+    async def run():
+        with patch.object(processor, "_start_execution_workflow", side_effect=cap):
+            with patch.object(processor, "_start_planning_workflow", side_effect=cap):
+                with patch.object(processor, "_mark_jira_in_progress", return_value=True):
+                    await processor._handle_issue_updated(event)
+
+    asyncio.run(run())
+    assert started == ["KAN-20"]
+    meta = state_manager.get_state("KAN-20").metadata or {}
+    urls = [str(url) for url in (meta.get("repository_urls") or [])]
+    refs = [
+        str(row.get("url") or "")
+        for row in (meta.get("repository_refs") or [])
+        if isinstance(row, dict)
+    ]
+    assert web not in urls
+    assert web not in refs
+
+
+def test_empty_repo_list_drops_a_set_still_written_in_the_description(
+    processor, state_manager
+):
+    """A one-repo schedule sends an empty list. Stale ticket text must not restore the set."""
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    state_manager.create_state("KAN-20", "span", "old")
+    state_manager.update_state(
+        "KAN-20",
+        status=TaskStatus.COMPLETED,
+        completed_at=datetime.now(),
+        metadata={"repository_urls": [api, web], "repository_refs": [{"url": web}]},
+    )
+    event = make_issue_event(
+        key="KAN-20",
+        summary="span",
+        description=(
+            "{params}\n"
+            f"Repository: {api}\n"
+            "Source branch: develop\n"
+            "Target branch: develop\n"
+            f"Repository: {web}\n"
+            "Source branch: feature/web-side\n"
+            "Target branch: main\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+        status="To Do",
+        event_type="jira:issue_updated",
+    )
+    event["repository_urls"] = []
+
+    async def cap(_state):
+        return None
+
+    async def run():
+        with patch.object(processor, "_start_execution_workflow", side_effect=cap):
+            with patch.object(processor, "_start_planning_workflow", side_effect=cap):
+                with patch.object(processor, "_mark_jira_in_progress", return_value=True):
+                    await processor._handle_issue_updated(event)
+
+    asyncio.run(run())
+    meta = state_manager.get_state("KAN-20").metadata or {}
+    assert web not in [str(url) for url in (meta.get("repository_urls") or [])]
+
+
+def test_unparsed_description_keeps_the_stored_repository_set(
+    processor, state_manager
+):
+    """A bad edit with no repository list must not wipe a good set."""
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    state_manager.create_state("KAN-20", "span", "old")
+    state_manager.update_state(
+        "KAN-20",
+        status=TaskStatus.COMPLETED,
+        completed_at=datetime.now(),
+        metadata={"repository_urls": [api, web]},
+    )
+    event = make_issue_event(
+        key="KAN-20",
+        summary="span",
+        description="please run this again",
+        status="To Do",
+        event_type="jira:issue_updated",
+    )
+
+    async def cap(_state):
+        return None
+
+    async def run():
+        with patch.object(processor, "_start_execution_workflow", side_effect=cap):
+            with patch.object(processor, "_start_planning_workflow", side_effect=cap):
+                with patch.object(processor, "_mark_jira_in_progress", return_value=True):
+                    await processor._handle_issue_updated(event)
+
+    asyncio.run(run())
+    meta = state_manager.get_state("KAN-20").metadata or {}
+    assert web in [str(url) for url in (meta.get("repository_urls") or [])]
+
+
 def test_multi_repo_delivery_ignores_the_parent_folder(processor):
     """The workspace root is not a git repo. Delivery reads each clone."""
 

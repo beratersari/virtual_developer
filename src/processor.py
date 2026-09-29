@@ -348,9 +348,19 @@ class JobProcessor:
         return str(meta.get("source") or "").strip().lower() == "azure_workitem"
 
     def _repository_urls_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """Dashboard multi-repo list. A Jira poll event does not send this."""
+        """Dashboard multi-repo list. A Jira poll event does not send this.
+
+        An explicit list with fewer than two repositories clears a set
+        stored by an earlier run, even when the ticket text still names
+        the old pair. ``update_state`` merges metadata, so omitting the
+        keys would keep that set and the next clone would still include
+        it. A description that does not parse, when the event did not
+        send the list, leaves the stored set alone.
+        """
         raw = (event or {}).get("repository_urls")
         urls = [str(u).strip() for u in raw if str(u).strip()] if isinstance(raw, list) else []
+        if isinstance(raw, list) and len(urls) < 2:
+            return {"repository_urls": [], "repository_refs": []}
         if len(urls) >= 2:
             out: Dict[str, Any] = {"repository_urls": urls[:12]}
             refs = (event or {}).get("repository_refs")
@@ -372,9 +382,11 @@ class JobProcessor:
         from src.issue_git_spec import parse_issue_git_spec
 
         spec, _err = parse_issue_git_spec(summary, description)
-        refs = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
-        if len(refs) < 2:
+        if spec is None:
             return {}
+        refs = tuple(getattr(spec, "repository_refs", ()) or ())
+        if len(refs) < 2:
+            return {"repository_urls": [], "repository_refs": []}
         rows = [
             {"url": url, "source_branch": source, "target_branch": target}
             for url, source, target in refs
