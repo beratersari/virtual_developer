@@ -561,6 +561,7 @@ export type RepositoryRef = {
   url: string
   source_branch: string
   target_branch: string
+  source_branch_mode?: 'custom' | 'issue_key'
 }
 
 export type ScheduleCreateBody = {

@@ -31,6 +31,7 @@ export function SavedRepoSearch({
   selectedUrl = '',
   onPick,
   trailing = [],
+  autoFocus = false,
 }: {
   label: string
   projects: { label?: string; url: string }[]
@@ -38,6 +39,7 @@ export function SavedRepoSearch({
   selectedUrl?: string
   onPick: (url: string) => void
   trailing?: { value: string; label: string }[]
+  autoFocus?: boolean
 }) {
   const id = useId()
   const listId = useId()
@@ -64,6 +66,7 @@ export function SavedRepoSearch({
           aria-autocomplete="list"
           placeholder="Name or URL"
           autoComplete="off"
+          autoFocus={autoFocus}
           value={open ? query : selected?.label || selected?.url || ''}
           onFocus={() => {
             setQuery('')
