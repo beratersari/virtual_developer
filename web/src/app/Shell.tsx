@@ -173,7 +173,13 @@ export function Shell() {
       </aside>
 
       <main className="vd-main">
-        <div className="vd-main-inner space-y-5">
+        <div
+          className={
+            location.pathname.startsWith('/analytics')
+              ? 'vd-main-inner vd-main-wide space-y-5'
+              : 'vd-main-inner space-y-5'
+          }
+        >
           {live.error && <Alert>{live.error}</Alert>}
           {live.poll?.error &&
           live.poll.error.trim().toLowerCase() !== 'jira disabled' ? (

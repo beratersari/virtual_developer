@@ -60,15 +60,17 @@ function FacetGroup({
   items,
   selected,
   onChange,
+  className = '',
 }: {
   title: string
   items: AnalyticsFacet[]
   selected: Set<string>
   onChange: (next: Set<string>) => void
+  className?: string
 }) {
   if (!items.length) return null
   return (
-    <div>
+    <div className={className}>
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
           {title}
@@ -151,13 +153,56 @@ function CountCard({
   return <div className="vd-card px-4 py-3">{body}</div>
 }
 
+function CategoryMix({ rows }: { rows: AnalyticsNamedCount[] }) {
+  const top = rows.slice(0, 6)
+  return (
+    <div className="vd-card flex min-w-0 flex-col p-4">
+      <h2 className="text-sm font-semibold">Category mix</h2>
+      <p className="mt-1 text-xs text-text-muted">Share of jobs in this range.</p>
+      {top.length === 0 ? (
+        <p className="py-8 text-center text-sm text-text-muted">No jobs in this filter.</p>
+      ) : (
+        <ul className="mt-4 flex flex-1 flex-col justify-center gap-3">
+          {top.map((row) => (
+            <li key={row.id}>
+              <div className="mb-1 flex items-baseline justify-between gap-3 text-xs">
+                <span className="min-w-0 truncate font-medium text-text" title={row.label || row.id}>
+                  {row.label || row.id}
+                </span>
+                <span className="shrink-0 font-mono tabular-nums text-text-muted">
+                  {row.jobs} · {row.share}%
+                </span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-bg" aria-hidden>
+                <div
+                  className="h-full rounded-full bg-accent"
+                  style={{ width: `${Math.min(100, Math.max(0, row.share))}%` }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
   if (!rows.length) {
     return <p className="px-4 py-6 text-sm text-text-muted">No jobs in this filter.</p>
   }
   return (
     <div className="vd-table-wrap">
-      <table className="vd-table vd-table-compact">
+      <table className="vd-table vd-table-compact vd-table-fit">
+        <colgroup>
+          <col />
+          <col style={{ width: '4.25rem' }} />
+          <col style={{ width: '6.25rem' }} />
+          <col style={{ width: '4.25rem' }} />
+          <col style={{ width: '5.5rem' }} />
+          <col style={{ width: '4.75rem' }} />
+          <col style={{ width: '8.5rem' }} />
+        </colgroup>
         <thead>
           <tr>
             <th>Name</th>
@@ -166,13 +211,15 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
             <th>Error</th>
             <th>Cancelled</th>
             <th>In flight</th>
-            <th className="w-1/3">Share</th>
+            <th>Share</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.id}>
-              <td className="font-medium">{row.label || row.id}</td>
+              <td className="font-medium" title={row.label || row.id}>
+                {row.label || row.id}
+              </td>
               <td className="font-mono">{row.jobs}</td>
               <td className="font-mono text-success-text">{row.completed}</td>
               <td className="font-mono text-danger-text">{row.error}</td>
@@ -438,24 +485,51 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      <div className="vd-card grid gap-4 p-4 md:grid-cols-3 lg:grid-cols-4">
-        <FacetGroup title="Status" items={facets.status || []} selected={status} onChange={setStatus} />
+      <div className="vd-card flex flex-wrap items-start gap-x-6 gap-y-4 p-4">
         <FacetGroup
+          className="min-w-52 flex-1 basis-56"
+          title="Status"
+          items={facets.status || []}
+          selected={status}
+          onChange={setStatus}
+        />
+        <FacetGroup
+          className="min-w-52 flex-1 basis-56"
           title="Category"
           items={facets.category || []}
           selected={category}
           onChange={setCategory}
         />
-        <FacetGroup title="Source" items={facets.source || []} selected={source} onChange={setSource} />
         <FacetGroup
+          className="min-w-52 flex-1 basis-56"
+          title="Source"
+          items={facets.source || []}
+          selected={source}
+          onChange={setSource}
+        />
+        <FacetGroup
+          className="min-w-52 flex-1 basis-56"
           title="Backend"
           items={facets.backend || []}
           selected={backend}
           onChange={setBackend}
         />
-        <FacetGroup title="Model" items={facets.model || []} selected={model} onChange={setModel} />
-        <FacetGroup title="Agent" items={facets.agent || []} selected={agent} onChange={setAgent} />
         <FacetGroup
+          className="min-w-52 flex-1 basis-56"
+          title="Model"
+          items={facets.model || []}
+          selected={model}
+          onChange={setModel}
+        />
+        <FacetGroup
+          className="min-w-52 flex-1 basis-56"
+          title="Agent"
+          items={facets.agent || []}
+          selected={agent}
+          onChange={setAgent}
+        />
+        <FacetGroup
+          className="min-w-52 flex-1 basis-56"
           title="Repository"
           items={facets.repository || []}
           selected={repository}
@@ -497,7 +571,71 @@ export function AnalyticsPage() {
         />
       </div>
 
-      <div className="space-y-5">
+      <div className="vd-analytics-chart">
+      <div className="vd-card min-w-0 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Jobs over time</h2>
+          <div className="flex flex-wrap gap-3 text-xs">
+            {OUTCOME_SERIES.map((s) => (
+              <label key={s.id} className="inline-flex items-center gap-1.5 text-text-secondary">
+                <input
+                  type="checkbox"
+                  className="vd-checkbox"
+                  checked={visible.has(s.id)}
+                  onChange={() => setVisible(toggle(visible, s.id))}
+                />
+                <span className="inline-block h-2 w-2 rounded-full" style={{ background: s.color }} />
+                {s.label}
+              </label>
+            ))}
+          </div>
+        </div>
+        {!showCharts ? (
+          <p className="py-8 text-center text-sm text-text-muted">
+            Select a series to show the chart.
+          </p>
+        ) : outcomeSeries.some((s) => s.values.some((v) => v > 0)) ? (
+          <LineChart
+            labels={labels}
+            series={outcomeSeries}
+            height={200}
+            label="Jobs over time"
+          />
+        ) : (
+          <p className="py-8 text-center text-sm text-text-muted">No jobs in this range.</p>
+        )}
+      </div>
+      <CategoryMix rows={payload?.categories || []} />
+      </div>
+
+      <div className="vd-analytics-split">
+        <div className="min-w-0">
+          <h2 className="mb-2 text-sm font-semibold">By category</h2>
+          <BreakdownTable rows={payload?.categories || []} />
+        </div>
+        <div className="min-w-0">
+          <h2 className="mb-2 text-sm font-semibold">By source</h2>
+          <BreakdownTable rows={payload?.sources || []} />
+        </div>
+      </div>
+
+      <div className="vd-analytics-split">
+        <div className="min-w-0">
+          <h2 className="mb-2 text-sm font-semibold">By model</h2>
+          <BreakdownTable rows={payload?.models || []} />
+        </div>
+        <div className="min-w-0">
+          <h2 className="mb-2 text-sm font-semibold">By backend</h2>
+          <BreakdownTable rows={payload?.backends || []} />
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <h2 className="mb-2 text-sm font-semibold">By agent</h2>
+        <BreakdownTable rows={payload?.agents || []} />
+      </div>
+
+      <div className="grid items-start gap-5 xl:grid-cols-2">
         <div>
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
             Opened by us
@@ -506,7 +644,7 @@ export function AnalyticsPage() {
             Merge requests Yaver opened from a Jira or Azure Boards job. Click a
             card for the links. A later /yaver on the same MR does not count twice.
           </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3">
             <CountCard
               label="Open"
               value={payload?.reviews?.ours?.opened ?? 0}
@@ -539,7 +677,7 @@ export function AnalyticsPage() {
             Existing GitLab MRs and Azure PRs we commented on (/yaver, /review,
             /ask). Click a card for the links.
           </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3">
             <CountCard
               label="Open"
               value={payload?.reviews?.contributed?.opened ?? 0}
@@ -564,62 +702,6 @@ export function AnalyticsPage() {
             />
           </div>
         </div>
-      </div>
-
-      <div className="vd-card p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Jobs over time</h2>
-          <div className="flex flex-wrap gap-3 text-xs">
-            {OUTCOME_SERIES.map((s) => (
-              <label key={s.id} className="inline-flex items-center gap-1.5 text-text-secondary">
-                <input
-                  type="checkbox"
-                  className="vd-checkbox"
-                  checked={visible.has(s.id)}
-                  onChange={() => setVisible(toggle(visible, s.id))}
-                />
-                <span className="inline-block h-2 w-2 rounded-full" style={{ background: s.color }} />
-                {s.label}
-              </label>
-            ))}
-          </div>
-        </div>
-        {!showCharts ? (
-          <p className="py-8 text-center text-sm text-text-muted">
-            Select a series to show the chart.
-          </p>
-        ) : outcomeSeries.some((s) => s.values.some((v) => v > 0)) ? (
-          <LineChart labels={labels} series={outcomeSeries} />
-        ) : (
-          <p className="py-8 text-center text-sm text-text-muted">No jobs in this range.</p>
-        )}
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div>
-          <h2 className="mb-2 text-sm font-semibold">By category</h2>
-          <BreakdownTable rows={payload?.categories || []} />
-        </div>
-        <div>
-          <h2 className="mb-2 text-sm font-semibold">By source</h2>
-          <BreakdownTable rows={payload?.sources || []} />
-        </div>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div>
-          <h2 className="mb-2 text-sm font-semibold">By model</h2>
-          <BreakdownTable rows={payload?.models || []} />
-        </div>
-        <div>
-          <h2 className="mb-2 text-sm font-semibold">By backend</h2>
-          <BreakdownTable rows={payload?.backends || []} />
-        </div>
-      </div>
-
-      <div>
-        <h2 className="mb-2 text-sm font-semibold">By agent</h2>
-        <BreakdownTable rows={payload?.agents || []} />
       </div>
     </section>
   )

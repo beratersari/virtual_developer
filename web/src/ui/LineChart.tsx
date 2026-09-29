@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 
 export type LineSeries = {
   id: string
@@ -27,16 +27,49 @@ export function chartPointRows(
   }))
 }
 
+/** Bucket under a pointer x in viewBox units. The whole column is the target. */
+export function chartIndexAt(
+  x: number,
+  padL: number,
+  innerW: number,
+  n: number,
+): number {
+  if (n <= 1 || innerW <= 0) return 0
+  const ratio = (x - padL) / innerW
+  const i = Math.round(ratio * (n - 1))
+  if (i < 0) return 0
+  if (i > n - 1) return n - 1
+  return i
+}
+
 export function LineChart({
   labels,
   series,
   height = 220,
+  label = 'Line chart',
 }: {
   labels: string[]
   series: LineSeries[]
   height?: number
+  label?: string
 }) {
-  const width = 720
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [plotWidth, setPlotWidth] = useState(720)
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const apply = () => {
+      const next = Math.max(280, Math.round(el.clientWidth))
+      setPlotWidth((prev) => (Math.abs(prev - next) < 2 ? prev : next))
+    }
+    apply()
+    const observer = new ResizeObserver(apply)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+  // Draw in real pixels. A fixed 720×220 viewBox scaled with `h-auto`
+  // made the chart half the screen tall on a wide monitor.
+  const width = plotWidth
   const padL = 36
   const padR = 12
   const padT = 12
@@ -51,20 +84,39 @@ export function LineChart({
   const yTicks = Array.from({ length: ticks + 1 }, (_, i) =>
     Math.round((max * (ticks - i)) / ticks),
   )
-  const labelEvery = Math.max(1, Math.ceil(n / 8))
-  const wrapRef = useRef<HTMLDivElement>(null)
+  const labelEvery = Math.max(
+    1,
+    Math.ceil(n / Math.max(4, Math.floor(width / 90))),
+  )
   const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(
     null,
   )
 
-  function showPoint(event: ReactPointerEvent, index: number) {
+  function showPoint(clientX: number, clientY: number, index: number) {
     const box = wrapRef.current?.getBoundingClientRect()
     if (!box) return
     setHover({
       index,
-      x: event.clientX - box.left,
-      y: event.clientY - box.top,
+      x: clientX - box.left,
+      y: clientY - box.top,
     })
+  }
+
+  function onPlotMove(event: ReactPointerEvent) {
+    const box = wrapRef.current?.getBoundingClientRect()
+    if (!box || box.width <= 0) return
+    const x = ((event.clientX - box.left) / box.width) * width
+    showPoint(event.clientX, event.clientY, chartIndexAt(x, padL, innerW, n))
+  }
+
+  function moveHover(delta: number) {
+    const next =
+      hover == null
+        ? delta < 0
+          ? n - 1
+          : 0
+        : Math.max(0, Math.min(n - 1, hover.index + delta))
+    setHover({ index: next, x: xAt(next), y: padT + innerH / 2 })
   }
 
   const hoverRows = hover ? chartPointRows(series, hover.index) : []
@@ -72,16 +124,30 @@ export function LineChart({
   const flip =
     hover != null &&
     hover.x > (wrapRef.current?.clientWidth ?? width) * 0.62
+  const tooltipBelow = hover != null && hover.y < 72
 
   return (
     <div ref={wrapRef} className="relative w-full">
-      <div className="w-full overflow-x-auto">
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="h-auto w-full"
-        role="img"
-        aria-label="Line chart"
+        width="100%"
+        height={height}
+        className="block cursor-crosshair"
+        role="group"
+        aria-label={label}
+        tabIndex={0}
         onPointerLeave={() => setHover(null)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight') {
+            event.preventDefault()
+            moveHover(1)
+          } else if (event.key === 'ArrowLeft') {
+            event.preventDefault()
+            moveHover(-1)
+          } else if (event.key === 'Escape') {
+            setHover(null)
+          }
+        }}
       >
         {yTicks.map((tick, i) => {
           const y = yAt(tick)
@@ -130,30 +196,59 @@ export function LineChart({
           return (
             <g key={s.id}>
               <path d={d} fill="none" stroke={s.color} strokeWidth="2.2" />
-              {s.values.map((v, i) => (
-                <circle
-                  key={`${s.id}-${i}`}
-                  cx={xAt(i)}
-                  cy={yAt(v)}
-                  r={hover?.index === i ? 3.6 : 2.4}
-                  fill={s.color}
-                  className="cursor-pointer"
-                  onPointerEnter={(event) => showPoint(event, i)}
-                  onPointerLeave={() => setHover(null)}
-                />
-              ))}
             </g>
           )
         })}
+        {hover && (
+          <g pointerEvents="none">
+            <line
+              x1={xAt(hover.index)}
+              x2={xAt(hover.index)}
+              y1={padT}
+              y2={padT + innerH}
+              stroke="currentColor"
+              className="text-text-muted"
+              strokeWidth="1"
+            />
+            {series.map((s) => {
+              const v = s.values[hover.index]
+              if (!Number.isFinite(v)) return null
+              return (
+                <circle
+                  key={`hot-${s.id}`}
+                  cx={xAt(hover.index)}
+                  cy={yAt(v)}
+                  r="3.5"
+                  fill={s.color}
+                  stroke="#0b1020"
+                  strokeWidth="1.5"
+                />
+              )
+            })}
+          </g>
+        )}
+        <rect
+          x={padL}
+          y={padT}
+          width={Math.max(0, innerW)}
+          height={Math.max(0, innerH)}
+          fill="transparent"
+          onPointerMove={onPlotMove}
+        />
       </svg>
-      </div>
       {hover && (
         <div
           className="pointer-events-none absolute z-20 min-w-[9rem] rounded-md border border-border bg-bg-elevated px-2.5 py-2 text-xs shadow-lg"
           style={{
             left: hover.x,
             top: hover.y,
-            transform: flip ? 'translate(-100%, -115%)' : 'translate(10px, -115%)',
+            transform: flip
+              ? tooltipBelow
+                ? 'translate(-100%, 12px)'
+                : 'translate(-100%, -115%)'
+              : tooltipBelow
+                ? 'translate(10px, 12px)'
+                : 'translate(10px, -115%)',
           }}
           role="tooltip"
         >
