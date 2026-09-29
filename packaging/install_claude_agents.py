@@ -27,39 +27,17 @@ def claude_home() -> Path:
     return Path.home() / ".claude"
 
 
-def _split_frontmatter(text: str) -> str:
-    raw = text.lstrip("\ufeff")
-    if not raw.startswith("---"):
-        return raw.strip() + "\n"
-    end = raw.find("\n---", 3)
-    if end < 0:
-        return raw.strip() + "\n"
-    body = raw[end + 4 :]
-    return body.strip() + "\n"
+def _load_to_claude_agent():
+    """The standalone exe does not ship this script. The function lives in src."""
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from src.claude_agent_text import to_claude_agent
+
+    return to_claude_agent
 
 
-def to_claude_agent(text: str, name: str) -> str:
-    """Return a Claude agent file for ``name`` using the OpenCode body."""
-    description = (
-        f"Unattended Yaver agent {name}. Never asks questions. "
-        "Does not git push."
-    )
-    body = _split_frontmatter(text)
-    if name == "derman-reviewer":
-        tools = "Read, Grep, Glob"
-        denied = "AskUserQuestion, Edit, Write, Bash"
-    else:
-        tools = "Read, Edit, Write, Grep, Glob, Bash"
-        denied = "AskUserQuestion"
-    return (
-        "---\n"
-        f"name: {name}\n"
-        f"description: {description}\n"
-        f"tools: {tools}\n"
-        f"disallowedTools: {denied}\n"
-        "---\n\n"
-        + body
-    )
+to_claude_agent = _load_to_claude_agent()
 
 
 def _find_source(root: Path) -> tuple[Path, Path]:

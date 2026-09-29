@@ -8,7 +8,6 @@ agent into ``~/.opencode/agents``, ``~/.config/opencode/agents``, and
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import shutil
@@ -34,8 +33,15 @@ class AgentFileError(ValueError):
 
 
 def agents_dir() -> Path:
-    """Agents the operator edits. This is ``opencoderman/agents`` in the zip."""
-    return Path(__file__).resolve().parent.parent / "opencoderman" / "agents"
+    """Agents the operator edits.
+
+    A source checkout and the product zip keep ``opencoderman/agents`` next
+    to ``src/``. The standalone exe keeps that same folder next to
+    ``yaver.exe``, not under ``_internal``.
+    """
+    from src.install_paths import install_root
+
+    return install_root() / "opencoderman" / "agents"
 
 
 def opencode_agents_dir() -> Path:
@@ -148,13 +154,9 @@ def new_agent_template() -> str:
 
 
 def _claude_agent_text(text: str, name: str) -> str:
-    path = Path(__file__).resolve().parent.parent / "packaging" / "install_claude_agents.py"
-    spec = importlib.util.spec_from_file_location("yaver_install_claude_agents", path)
-    if spec is None or spec.loader is None:
-        raise AgentFileError("Claude agent converter is missing")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.to_claude_agent(text, name)
+    from src.claude_agent_text import to_claude_agent
+
+    return to_claude_agent(text, name)
 
 
 def _read_text(path: Path) -> str | None:
