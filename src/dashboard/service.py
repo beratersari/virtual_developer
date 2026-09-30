@@ -1634,7 +1634,12 @@ def build_jobs(
 
 
 def _queue_live_issue_keys(processor: Any = None) -> set:
-    """Issue keys that are already in-flight and must not appear as waiting."""
+    """Issue keys this process is already running.
+
+    Disk planning/executing is checked per waiting row in
+    ``_queued_hidden_while_live``. The queue list must not read every
+    issue file first.
+    """
     live: set = set()
     if processor is None:
         return live
@@ -1644,18 +1649,6 @@ def _queue_live_issue_keys(processor: Any = None) -> set:
             live = {(k or "").strip().upper() for k in (list_fn() or []) if k}
         except Exception:
             live = set()
-    sm = getattr(processor, "state_manager", None)
-    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
-    get_all = getattr(sm, "get_all_states", None) if sm is not None else None
-    if callable(get_all) and inflight:
-        try:
-            for st in get_all() or []:
-                if getattr(st, "status", None) in inflight:
-                    key = (getattr(st, "issue_key", None) or "").strip().upper()
-                    if key:
-                        live.add(key)
-        except Exception:
-            pass
     return live
 
 
@@ -1780,6 +1773,7 @@ def build_live_envelope(
         except Exception:
             live_keys = []
     queued = 0
+    epoch = 0
     try:
         from src.state.queue_store import work_queue_store as default_queue
 
@@ -1789,13 +1783,18 @@ def build_live_envelope(
             for rec in default_queue.list_items(status="queued", limit=500)
             if not _queued_hidden_while_live(rec, live, processor)
         )
+        try:
+            epoch = int(default_queue.epoch())
+        except Exception:
+            epoch = 0
     except Exception:
         queued = 0
+        epoch = 0
     return {
         "type": "live",
         "meta": build_meta().model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
-        "queue": {"queued_count": queued},
+        "queue": {"queued_count": queued, "epoch": epoch},
         "live_issue_keys": live_keys,
     }
 

@@ -623,3 +623,133 @@ def test_queue_api_lists_and_cancels(tmp_path, monkeypatch, fake_jira, isolate_j
     gone = client.delete(f"/api/queue/{rec['queue_id']}")
     assert gone.status_code == 200
     assert proc.queue_store.get(rec["queue_id"])["status"] == "cancelled"
+
+
+def test_queued_list_does_not_reread_finished_files(tmp_path):
+    """Opening Queue must not parse every finished row again.
+
+    The dashboard lists waiting items on each visit. History stays on disk,
+    and a second read of the waiting list has to come from the open rows.
+    """
+    import json
+
+    store = WorkQueueStore(queue_dir=tmp_path)
+    for i in range(20):
+        (tmp_path / f"q_old{i:04d}.json").write_text(
+            json.dumps(
+                {
+                    "queue_id": f"q_old{i:04d}",
+                    "status": "completed",
+                    "created_at": "2000-01-01T00:00:00.000",
+                    "issue_key": f"OLD-{i}",
+                }
+            ),
+            encoding="utf-8",
+        )
+    live = store.enqueue(source="jira", issue_key="KAN-1", summary="waiting")
+    assert len(store.list_items(status="queued")) == 1
+
+    reads: list[str] = []
+    real_open = open
+
+    def _spy(file, *args, **kwargs):
+        name = str(file)
+        if name.endswith(".json") and "q_" in name.replace("\\", "/"):
+            reads.append(name)
+        return real_open(file, *args, **kwargs)
+
+    with patch("builtins.open", _spy):
+        rows = store.list_items(status="queued", limit=50)
+    assert [r["queue_id"] for r in rows] == [live["queue_id"]]
+    assert reads == []
+    assert store.finish(live["queue_id"], status="completed")
+    reads.clear()
+    with patch("builtins.open", _spy):
+        assert store.list_items(status="queued", limit=50) == []
+    assert reads == []
+
+
+def test_queue_view_hides_inflight_issue_without_loading_every_state(tmp_path):
+    from src.dashboard.service import build_queue
+    from src.state.models import TaskStatus
+
+    store = WorkQueueStore(queue_dir=tmp_path)
+    store.enqueue(source="jira", issue_key="KAN-1", summary="waiting")
+
+    class _Proc:
+        IN_FLIGHT_STATUSES = {TaskStatus.EXECUTING, TaskStatus.PLANNING}
+
+        def list_live_processing_keys(self):
+            return []
+
+        def _issue_is_in_flight(self, key):
+            return (key or "").strip().upper() == "KAN-1"
+
+        class _States:
+            calls = 0
+
+            def get_all_states(self):
+                type(self).calls += 1
+                return []
+
+        state_manager = _States()
+
+    view = build_queue(store=store, processor=_Proc(), status="queued", limit=50)
+    assert view.queued_count == 0
+    assert view.items == []
+    assert _Proc.state_manager.calls == 0
+
+
+def test_disk_executing_hides_queued_jira_without_scanning_every_state(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """A planning/executing ticket stays off the Queue tab without reading every issue."""
+    from src.dashboard.service import build_queue
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-DISK", "s", "d")
+    state_manager.update_state("KAN-DISK", status=TaskStatus.EXECUTING)
+    assert "KAN-DISK" not in proc._contexts
+    calls = {"n": 0}
+    real_get_all = state_manager.get_all_states
+
+    def _counting_get_all():
+        calls["n"] += 1
+        return real_get_all()
+
+    state_manager.get_all_states = _counting_get_all  # type: ignore[method-assign]
+    row = proc.queue_store.enqueue(source="jira", issue_key="KAN-DISK", summary="wait")
+    view = build_queue(store=proc.queue_store, processor=proc, status="queued")
+    assert calls["n"] == 0
+    assert view.queued_count == 0
+    assert not any(item.queue_id == row["queue_id"] for item in view.items)
+
+
+def test_queue_change_pushes_the_live_socket(tmp_path):
+    """A new waiting row is pushed. The Queue tab must not wait for the idle tick."""
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.api import create_dashboard_app
+    from src.state.manager import JiraStateManager
+    from src.state.queue_store import work_queue_store
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    client = TestClient(app)
+    hits: list[str] = []
+    work_queue_store.subscribe(lambda: hits.append("store"))
+    with client.websocket_connect("/ws") as ws:
+        first = ws.receive_json()
+        assert first["queue"]["queued_count"] == 0
+        before = len(getattr(work_queue_store, "_listeners", []))
+        assert before >= 2
+        work_queue_store.enqueue(source="jira", issue_key="KAN-9", summary="later")
+        assert hits == ["store"]
+        msg = ws.receive_json()
+        assert (msg.get("queue") or {}).get("queued_count") == 1
+        assert int((msg.get("queue") or {}).get("epoch") or 0) >= 1

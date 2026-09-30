@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { dashboardWsUrl, fetchMeta, fetchPoll, fetchQueue, fetchSettings } from '../api/client'
 import type { Meta, PollPayload, SettingsPayload } from '../api/types'
+import { rememberQueuePayload } from './entityCache'
 import { shouldBumpLiveGeneration } from '../util/liveTick'
 import { useNow } from '../util/time'
 import { LiveContext, type LiveValue } from './live'
@@ -66,7 +67,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       fetchMeta(),
       fetchPoll(),
       fetchSettings(),
-      fetchQueue({ status: 'queued', limit: 1 }),
+      fetchQueue({ status: 'queued', limit: 200 }),
     ]).then((results) => {
       if (cancelled) return
       const [m, p, s, q] = results
@@ -81,8 +82,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         }
       }
       if (s.status === 'fulfilled') setSettings(s.value)
-      if (q.status === 'fulfilled' && typeof q.value.queued_count === 'number') {
-        setQueueQueued(q.value.queued_count)
+      if (q.status === 'fulfilled') {
+        rememberQueuePayload(q.value)
+        if (typeof q.value.queued_count === 'number') setQueueQueued(q.value.queued_count)
       }
       if (
         m.status === 'rejected' &&

@@ -1,6 +1,7 @@
-import type { JobItem, JobsPayload, TaskDetail } from '../api/types'
+import type { JobItem, JobsPayload, QueuePayload, TaskDetail } from '../api/types'
 
 let jobsPayload: JobsPayload | null = null
+let queuePayload: QueuePayload | null = null
 const jobsById = new Map<string, JobItem>()
 const tasksByKey = new Map<string, TaskDetail>()
 
@@ -11,6 +12,14 @@ export function rememberJobsPayload(payload: JobsPayload) {
 
 export function peekJobsPayload(): JobsPayload | null {
   return jobsPayload
+}
+
+export function rememberQueuePayload(payload: QueuePayload) {
+  queuePayload = payload
+}
+
+export function peekQueuePayload(): QueuePayload | null {
+  return queuePayload
 }
 
 export function rememberJob(job: JobItem) {

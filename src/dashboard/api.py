@@ -1884,7 +1884,7 @@ def create_dashboard_app(
         clients.add(ws)
         loop = asyncio.get_event_loop()
 
-        def _on_snapshot(_snap: dict) -> None:
+        def _kick_live(*_args: object) -> None:
             try:
                 asyncio.run_coroutine_threadsafe(_push_live(), loop)
             except Exception:
@@ -1894,7 +1894,21 @@ def create_dashboard_app(
             data = await asyncio.to_thread(_live_payload)
             await _broadcast(data)
 
-        unsub = poll_snapshot_store.subscribe(_on_snapshot)
+        unsub = poll_snapshot_store.subscribe(_kick_live)
+        queue_unsub = None
+        try:
+            from src.state.queue_store import WorkQueueStore
+            from src.state import queue_store as queue_store_mod
+
+            qstore = queue_store_mod.work_queue_store
+            proc = app.state.processor
+            bound = getattr(proc, "queue_store", None) if proc is not None else None
+            if isinstance(bound, WorkQueueStore):
+                qstore = bound
+            if isinstance(qstore, WorkQueueStore):
+                queue_unsub = qstore.subscribe(_kick_live)
+        except Exception:
+            queue_unsub = None
         try:
             await ws.send_json(await asyncio.to_thread(_live_payload))
             while True:
@@ -1908,6 +1922,11 @@ def create_dashboard_app(
             logger.debug(f"Dashboard websocket closed: {e}")
         finally:
             unsub()
+            if callable(queue_unsub):
+                try:
+                    queue_unsub()
+                except Exception:
+                    pass
             clients.discard(ws)
 
     async def _broadcast(data: dict) -> None:

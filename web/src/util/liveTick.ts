@@ -2,7 +2,7 @@
 
 export function liveDataSignature(payload: {
   live_issue_keys?: string[]
-  queue?: { queued_count?: number }
+  queue?: { queued_count?: number; epoch?: number }
 }): string {
   const liveKeys = Array.isArray(payload.live_issue_keys)
     ? payload.live_issue_keys
@@ -15,7 +15,11 @@ export function liveDataSignature(payload: {
     payload.queue && typeof payload.queue.queued_count === 'number'
       ? String(payload.queue.queued_count)
       : ''
-  return `${liveKeys}|${q}`
+  const epoch =
+    payload.queue && typeof payload.queue.epoch === 'number'
+      ? String(payload.queue.epoch)
+      : ''
+  return `${liveKeys}|${q}|${epoch}`
 }
 
 export function shouldBumpLiveGeneration(
@@ -24,7 +28,7 @@ export function shouldBumpLiveGeneration(
     jobs?: unknown
     tasks?: unknown
     live_issue_keys?: string[]
-    queue?: { queued_count?: number }
+    queue?: { queued_count?: number; epoch?: number }
   },
   lastSig: string,
 ): { bump: boolean; sig: string } {
