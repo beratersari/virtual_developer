@@ -1879,14 +1879,10 @@ class JobProcessor:
         kind = self._session_kind_for_issue(issue_key)
         if kind in {"plan", "review", "test"}:
             return True
-        from src.opencode_serve import is_plan_agent
+        from src.opencode_serve import is_plan_agent, is_review_agent, is_test_agent
 
-        if is_plan_agent(getattr(task, "agent", None)):
-            return True
-        agent = (getattr(task, "agent", None) or "").lower().replace("_", "-")
-        if "review" in agent:
-            return True
-        return agent in {"test", "tester", "derman-test"} or agent.endswith("-test")
+        agent = getattr(task, "agent", None)
+        return is_plan_agent(agent) or is_review_agent(agent) or is_test_agent(agent)
 
     def _attach_bound_opencode_session(
         self,
