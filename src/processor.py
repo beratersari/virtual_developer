@@ -437,6 +437,91 @@ class JobProcessor:
             )
         return prompt.rstrip() + "\n\n" + "\n".join(lines) + "\n"
 
+    def _reviewed_work_branch(self, git: Any, event: Any) -> str:
+        """Branch named in a GitLab or Azure follow-up prompt.
+
+        On a multi-repo workspace ``ensure_feature_branch`` leaves the
+        parent on the last clone's branch. The comment is about one
+        review, so the prompt uses that review's clone.
+        """
+        raw_children = getattr(git, "repo_checkouts", None)
+        children = list(raw_children) if isinstance(raw_children, (list, tuple)) else []
+        event_source = str(getattr(event, "source_branch", "") or "").strip()
+        if len(children) > 1:
+            from src.dashboard.temp_storage import _remote_matches_review
+
+            needles = [
+                str(getattr(event, attr, "") or "").strip()
+                for attr in ("repository_url", "mr_url", "pr_url")
+            ]
+            needles = [needle for needle in needles if needle]
+            for child in children:
+                remote = str(getattr(child, "remote_url", "") or "")
+                if not any(
+                    _remote_matches_review(remote, needle) for needle in needles
+                ):
+                    continue
+                branch = str(
+                    getattr(child, "work_branch", None)
+                    or getattr(child, "source_branch", None)
+                    or ""
+                ).strip()
+                if branch:
+                    return branch
+            if event_source:
+                return event_source
+        raw = getattr(git, "work_branch", None)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return event_source
+
+    def _restore_missing_ref_branches(
+        self,
+        issue_key: str,
+        state: Optional[JiraAgentState],
+        refs: list,
+    ) -> list:
+        """Fill blank stored branches from the issue description.
+
+        Older schedule dispatch saved the first repository with empty
+        branches. The description still has each repository's pair.
+        A one-repo clear stores no refs, so this does not run there.
+        """
+        rows = [dict(row) for row in refs if isinstance(row, dict)]
+        if len(rows) < 2 or state is None:
+            return rows
+        if not any(
+            not str(row.get("source_branch") or "").strip()
+            or not str(row.get("target_branch") or "").strip()
+            for row in rows
+        ):
+            return rows
+        from src.dashboard.repo_sets import merge_missing_ref_branches
+
+        spec, _err = parse_issue_git_spec(
+            _issue_text(getattr(state, "issue_summary", "") or ""),
+            _issue_text(getattr(state, "description", "") or ""),
+        )
+        described = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
+        if len(described) < 2:
+            return rows
+        repaired, changed = merge_missing_ref_branches(rows, described)
+        if not changed:
+            return rows
+        logger.info(
+            f"{issue_key}: restored empty repository branches from the issue description"
+        )
+        try:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={"repository_refs": repaired},
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{issue_key}: could not store restored repository branches: {exc}"
+            )
+        return repaired
+
     def _azure_workitem_meta_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         issue = (event or {}).get("issue") or {}
         coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
@@ -4748,6 +4833,7 @@ class JobProcessor:
             raw_refs = (st.metadata or {}).get("repository_refs")
             if isinstance(raw_refs, list):
                 extra_refs = [row for row in raw_refs if isinstance(row, dict)]
+        extra_refs = self._restore_missing_ref_branches(issue_key, st, extra_refs)
         claims = extra_refs or [
             {
                 "url": url,
@@ -4756,10 +4842,18 @@ class JobProcessor:
             }
             for url in (extra_urls or [spec.repository_url])
         ]
+        from src.dashboard.repo_sets import same_repository
+
         for row in claims:
             claim_url = str(row.get("url") or row.get("repository_url") or "").strip()
-            claim_src = str(row.get("source_branch") or src).strip()
-            claim_tgt = str(row.get("target_branch") or tgt).strip()
+            own_src = str(row.get("source_branch") or "").strip()
+            own_tgt = str(row.get("target_branch") or "").strip()
+            if same_repository(claim_url, spec.repository_url):
+                claim_src = own_src or src
+                claim_tgt = own_tgt or tgt
+            else:
+                claim_src = own_src
+                claim_tgt = own_tgt
             if (
                 not claim_url
                 or not claim_src
@@ -6528,12 +6622,7 @@ class JobProcessor:
             )
             durable = self._durable_plan_path(state.issue_key)
             plan_path_for_agent = str(durable) if durable.exists() else None
-            raw_wb = getattr(git, "work_branch", None)
-            work_branch = (
-                raw_wb.strip()
-                if isinstance(raw_wb, str) and raw_wb.strip()
-                else event.source_branch
-            )
+            work_branch = self._reviewed_work_branch(git, event)
             if review_job:
                 task.prompt = PromptBuilder.build_review_comment_prompt(
                     issue_key=state.issue_key,
@@ -6577,6 +6666,7 @@ class JobProcessor:
                     )
                 except Exception:
                     pass
+            task.prompt = self._with_repo_layout(state.issue_key, task.prompt)
             self._snapshot_delivery_baseline(state.issue_key, git)
             runner = self._runner_for(state.issue_key)
             if runner is None:
@@ -7298,12 +7388,7 @@ class JobProcessor:
             )
             durable = self._durable_plan_path(state.issue_key)
             plan_path_for_agent = str(durable) if durable.exists() else None
-            raw_wb = getattr(git, "work_branch", None)
-            work_branch = (
-                raw_wb.strip()
-                if isinstance(raw_wb, str) and raw_wb.strip()
-                else event.source_branch
-            )
+            work_branch = self._reviewed_work_branch(git, event)
             if review_job:
                 task.prompt = PromptBuilder.build_review_comment_prompt(
                     issue_key=state.issue_key,
@@ -7347,6 +7432,7 @@ class JobProcessor:
                     )
                 except Exception:
                     pass
+            task.prompt = self._with_repo_layout(state.issue_key, task.prompt)
             self._snapshot_delivery_baseline(state.issue_key, git)
             runner = self._runner_for(state.issue_key)
             if runner is None:

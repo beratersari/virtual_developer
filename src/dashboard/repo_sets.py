@@ -7,7 +7,7 @@ chosen on the dashboard and stored on the schedule, not in that line.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence, Tuple
 
 from src.issue_git_spec import _looks_like_git_url, _normalize_repo_url
 
@@ -106,8 +106,11 @@ def normalize_repository_refs(
     """Primary first, then extras. Each row has its own source and target.
 
     A string extra copies the primary branches. A dict may set
-    ``source_branch`` and ``target_branch``. Fewer than two URLs returns
-    an empty list so a one-repo job stays the normal path.
+    ``source_branch`` and ``target_branch``. A later dict of a URL that
+    is already listed fills only branches that are still blank, so an
+    empty synthetic primary does not hide the real row. A branch that
+    is already set stays. Fewer than two URLs returns an empty list so
+    a one-repo job stays the normal path.
     """
     source = (source_branch or "").strip()
     target = (target_branch or "").strip()
@@ -125,16 +128,29 @@ def normalize_repository_refs(
             )
             row_source = str(raw.get("source_branch") or source).strip()
             row_target = str(raw.get("target_branch") or target).strip()
+            own_source = str(raw.get("source_branch") or "").strip()
+            own_target = str(raw.get("target_branch") or "").strip()
         else:
             url = _normalize_repo_url(str(raw or ""))
             row_source = source
             row_target = target
+            own_source = ""
+            own_target = ""
         if not url or not _looks_like_git_url(url):
             continue
         if len(url) > 500:
             url = url[:500]
         key = _url_key(url)
         if key in seen:
+            if isinstance(raw, dict):
+                for existing in out:
+                    if _url_key(existing["url"]) != key:
+                        continue
+                    if not existing["source_branch"] and own_source:
+                        existing["source_branch"] = own_source[:255]
+                    if not existing["target_branch"] and own_target:
+                        existing["target_branch"] = own_target[:255]
+                    break
             continue
         seen.add(key)
         out.append(
@@ -149,6 +165,69 @@ def normalize_repository_refs(
     if len(out) < 2:
         return []
     return out
+
+
+def same_repository(left: str, right: str) -> bool:
+    """True when both strings are the same git remote."""
+    a = _url_key(left)
+    b = _url_key(right)
+    return bool(a and b and a == b)
+
+
+def merge_missing_ref_branches(
+    stored: Sequence[Dict[str, Any]],
+    described: Any,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Fill blank source or target from another row of the same repository.
+
+    A branch that is already set is kept. ``described`` may be dicts
+    (``url`` / ``source_branch`` / ``target_branch``) or
+    ``(url, source, target)`` tuples. Returns the rows and whether any
+    blank field was filled.
+    """
+    donors: Dict[str, Tuple[str, str]] = {}
+    items = described if isinstance(described, (list, tuple)) else []
+    for item in items:
+        if isinstance(item, dict):
+            url = str(item.get("url") or item.get("repository_url") or "")
+            donor_source = str(item.get("source_branch") or "").strip()
+            donor_target = str(item.get("target_branch") or "").strip()
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            url = str(item[0] or "")
+            donor_source = str(item[1] or "").strip()
+            donor_target = str(item[2] or "").strip()
+        else:
+            continue
+        key = _url_key(url)
+        if not key:
+            continue
+        prev = donors.get(key)
+        if prev is None:
+            donors[key] = (donor_source, donor_target)
+        else:
+            donors[key] = (prev[0] or donor_source, prev[1] or donor_target)
+    out: List[Dict[str, Any]] = []
+    changed = False
+    for row in stored:
+        if not isinstance(row, dict):
+            continue
+        copied = dict(row)
+        url = str(copied.get("url") or copied.get("repository_url") or "").strip()
+        source = str(copied.get("source_branch") or "").strip()
+        target = str(copied.get("target_branch") or "").strip()
+        donor = donors.get(_url_key(url))
+        if donor:
+            if not source and donor[0]:
+                source = donor[0][:255]
+                changed = True
+            if not target and donor[1]:
+                target = donor[1][:255]
+                changed = True
+        copied["url"] = url
+        copied["source_branch"] = source
+        copied["target_branch"] = target
+        out.append(copied)
+    return out, changed
 
 
 def repository_sets_to_json(raw: Any) -> str:
