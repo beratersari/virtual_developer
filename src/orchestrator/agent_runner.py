@@ -686,11 +686,14 @@ class AgentRunner:
             DEFAULT_CODEX_COLD_CONTINUE_PROMPT,
             DEFAULT_CODEX_RESUME_PROMPT,
         )
+        from src.opencode_serve import _keeps_task_instruction
 
         sid = (session_id or "").strip()
+        keep_instruction = _keeps_task_instruction(getattr(task, "agent", None))
         if leftover_writer and sid:
             task.session_id = sid
-            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            if not keep_instruction:
+                task.prompt = DEFAULT_CODEX_RESUME_PROMPT
             logger.warning(
                 f"Retry after leftover writer: keep Codex thread {sid} "
                 "(live exec still writing; wait, then continue this thread)"
@@ -698,7 +701,8 @@ class AgentRunner:
             return
         if sid and lock_hits < 2:
             task.session_id = sid
-            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            if not keep_instruction:
+                task.prompt = DEFAULT_CODEX_RESUME_PROMPT
             logger.warning(
                 f"Retry after thread_locked: resume Codex thread {sid} "
                 f"(lock hit {lock_hits})"
@@ -711,7 +715,8 @@ class AgentRunner:
                 forgotten.append(sid)
             task.forgotten_session_ids = forgotten
         task.session_id = None
-        task.prompt = DEFAULT_CODEX_COLD_CONTINUE_PROMPT
+        if not keep_instruction:
+            task.prompt = DEFAULT_CODEX_COLD_CONTINUE_PROMPT
         logger.warning(
             f"Retry after thread_locked: Codex thread {sid or '-'} still "
             "has an active writer — starting a new thread from current files"
@@ -736,9 +741,9 @@ class AgentRunner:
         """
         sid = (session_id or "").strip()
         from src.backends.base import BACKEND_CLAUDE, normalize_backend_name
-        from src.opencode_serve import is_plan_agent
+        from src.opencode_serve import _keeps_task_instruction
 
-        plan_job = is_plan_agent(getattr(task, "agent", None))
+        keep_instruction = _keeps_task_instruction(getattr(task, "agent", None))
 
         if normalize_backend_name(getattr(task, "backend", None)) == BACKEND_CLAUDE:
             from src.backends.base import is_claude_session_id
@@ -746,9 +751,9 @@ class AgentRunner:
 
             if sid and is_claude_session_id(sid):
                 task.session_id = sid
-                # A plan retry must keep the plan instruction. The build
-                # continue line tells the model to implement.
-                if not plan_job:
+                # Plan, review, and test retries keep their instruction.
+                # The build continue line tells the model to implement.
+                if not keep_instruction:
                     task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
                 task.abort_busy_session = False
                 logger.warning(f"Retry after {why}: resume Claude session {sid}")
@@ -767,7 +772,7 @@ class AgentRunner:
                 )
                 return
             task.session_id = sid
-            if not plan_job:
+            if not keep_instruction:
                 task.prompt = DEFAULT_CODEX_RESUME_PROMPT
             task.abort_busy_session = False
             logger.warning(
@@ -816,13 +821,13 @@ class AgentRunner:
             )
             return
         task.session_id = sid
-        if plan_job:
-            # Keep the plan instruction. DEFAULT_CONTINUE_PROMPT says
-            # "resume implementation ... and commit".
+        if keep_instruction:
+            # Keep the plan, review, or test instruction.
+            # DEFAULT_CONTINUE_PROMPT says "resume implementation ... and commit".
             task.abort_busy_session = False
             logger.warning(
-                f"Retry after {why}: resume plan session {sid} "
-                "with the plan instruction"
+                f"Retry after {why}: resume session {sid} "
+                "with the original instruction"
             )
             return
         if why == "incomplete_session":
@@ -887,8 +892,11 @@ class AgentRunner:
             directory=work_dir,
         )
         # Cancel handle: serve path stores client + session (not a subprocess).
+        # "serve" is not a backend name. Without backend=opencode, cancel
+        # follows settings.agent_backend and a Codex default never aborts.
         serve_handle: Dict[str, Any] = {
             "mode": "serve",
+            "backend": "opencode",
             "client": client,
             "session_id": task.session_id,
             "cancel": False,
@@ -1333,16 +1341,17 @@ class AgentRunner:
             "claude",
         }:
             process["cancel"] = True
+            backend_name = process.get("backend") or process.get("mode")
+            if process.get("mode") == "serve":
+                backend_name = "opencode"
             logger.info(
-                f"Cancelling {process.get('backend') or process.get('mode')} "
+                f"Cancelling {backend_name} "
                 f"task: task_id={task_id}"
             )
             try:
                 from src.backends import get_agent_backend
 
-                get_agent_backend(
-                    process.get("backend") or process.get("mode")
-                ).cancel(process)
+                get_agent_backend(backend_name).cancel(process)
             except Exception as e:
                 logger.debug(f"backend cancel failed: {e}")
             return True

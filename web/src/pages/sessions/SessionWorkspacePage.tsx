@@ -12,16 +12,12 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { MarkdownBody } from '../../ui/MarkdownBody'
 import { PageHeader } from '../../ui/PageHeader'
 import { JobsTable } from '../jobs/JobsTable'
-import { sessionKindGroup } from '../../util/sessions'
-
-function kindLabel(kind?: string | null): string {
-  const group = sessionKindGroup(kind)
-  if (group === 'plan') return 'plan'
-  if (group === 'build') return 'build'
-  if (group === 'test') return 'test'
-  const raw = (kind || '').trim()
-  return raw || 'legacy'
-}
+import {
+  cloneFolder,
+  kindLabel,
+  multiRepoLabel,
+  resetBody,
+} from './sessionResetCopy'
 
 export function SessionWorkspacePage() {
   const { workspaceId = '' } = useParams()
@@ -101,12 +97,22 @@ export function SessionWorkspacePage() {
               className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm"
             >
               <div className="min-w-0 space-y-0.5">
-                <div className="font-semibold text-text">{kindLabel(s.kind)}</div>
+                <div className="font-semibold text-text">
+                  {kindLabel(s.kind)}
+                  {multiRepoLabel(s.scope) ? ' · multi-repo' : ''}
+                </div>
                 <div className="font-mono text-[11px] text-text-secondary">
                   {s.session_id}
                   {s.issue_key ? ` · last ${s.issue_key}` : ''}
                   {s.updated_at ? ` · ${s.updated_at}` : ''}
                 </div>
+                {(multiRepoLabel(s.scope) || cloneFolder(s.working_directory)) && (
+                  <div className="font-mono text-[11px] text-text-muted">
+                    {multiRepoLabel(s.scope) ? multiRepoLabel(s.scope) : ''}
+                    {multiRepoLabel(s.scope) && cloneFolder(s.working_directory) ? ' · ' : ''}
+                    {cloneFolder(s.working_directory)}
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -140,10 +146,10 @@ export function SessionWorkspacePage() {
 
       <ConfirmDialog
         open={Boolean(resetId)}
-        title={`Reset this ${targetKind} session?`}
+        title={target ? `Reset ${target.session_id}?` : `Reset this ${targetKind} session?`}
         body={
           target
-            ? `Next ${targetKind} job on ${target.branch}${target.target_branch ? ` → ${target.target_branch}` : ''} starts a new ${targetKind} session.\n\nThe other kinds on this workspace are left alone. Does not delete OpenCode’s own history — only our resume pointer.`
+            ? resetBody(target)
             : 'Next job on this bind starts a new session.'
         }
         confirmLabel="Reset session"

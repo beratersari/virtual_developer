@@ -1773,6 +1773,22 @@ class JobProcessor:
         forgotten: List[str] = []
         bind_wd: Optional[str] = None
         sids: List[str] = []
+        # Claude ids on any branch. A Codex job must not exec-resume them
+        # just because the UUID shape matches a Codex thread. Untagged
+        # UUIDs with no Claude row stay Codex.
+        claude_ids: set[str] = set()
+        try:
+            from src.backends.base import BACKEND_CLAUDE
+            from src.state.session_bind_store import inferred_bind_backend
+
+            for rec in store.list_binds(limit=500):
+                if inferred_bind_backend(rec) != BACKEND_CLAUDE:
+                    continue
+                saved = str(rec.get("session_id") or "").strip()
+                if saved:
+                    claude_ids.add(saved)
+        except Exception as e:
+            logger.debug(f"claude session scan failed: {e}")
 
         def _add_sid(raw: Any) -> None:
             from src.backends.base import (
@@ -1814,7 +1830,9 @@ class JobProcessor:
                 if want == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                     return
                 if want == BACKEND_CODEX and (
-                    not is_codex_thread_id(sid) or sid in claude_owned
+                    not is_codex_thread_id(sid)
+                    or sid in claude_owned
+                    or sid in claude_ids
                 ):
                     return
                 if want == BACKEND_CLAUDE and sid not in owned and sid not in claude_owned:
@@ -1879,14 +1897,10 @@ class JobProcessor:
         kind = self._session_kind_for_issue(issue_key)
         if kind in {"plan", "review", "test"}:
             return True
-        from src.opencode_serve import is_plan_agent
+        from src.opencode_serve import is_plan_agent, is_review_agent, is_test_agent
 
-        if is_plan_agent(getattr(task, "agent", None)):
-            return True
-        agent = (getattr(task, "agent", None) or "").lower().replace("_", "-")
-        if "review" in agent:
-            return True
-        return agent in {"test", "tester", "derman-test"} or agent.endswith("-test")
+        agent = getattr(task, "agent", None)
+        return is_plan_agent(agent) or is_review_agent(agent) or is_test_agent(agent)
 
     def _attach_bound_opencode_session(
         self,
@@ -4679,7 +4693,14 @@ class JobProcessor:
                 )
         
         elif cmd_lower.startswith("/cancel"):
-            # Always cancel state and notify Jira; kill live process when registered
+            # Always cancel state and notify Jira; kill live process when registered.
+            # Await the serve abort while the handle still exists. cancel_task
+            # only schedules that HTTP call, and a Codex default used to skip it.
+            if state:
+                try:
+                    await self._abort_serve_sessions_for_issue(issue_key)
+                except Exception as e:
+                    logger.warning(f"{issue_key}: cancel abort failed: {e}")
             if state and state.current_task_id:
                 runner = self._runner_for(issue_key)
                 if runner:

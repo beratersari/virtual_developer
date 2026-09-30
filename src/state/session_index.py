@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS session_binds (
     session_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT '',
     backend TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT '',
     issue_key TEXT NOT NULL DEFAULT '',
     job_id TEXT NOT NULL DEFAULT '',
     working_directory TEXT NOT NULL DEFAULT '',
@@ -44,11 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_binds_repo
 _UPSERT = """
 INSERT INTO session_binds (
     bind_id, repository_url, repository_key, branch, target_branch,
-    session_id, kind, backend, issue_key, job_id, working_directory,
+    session_id, kind, backend, scope, issue_key, job_id, working_directory,
     forgotten_json, reset_at, forget_reason, created_at, updated_at
 ) VALUES (
     :bind_id, :repository_url, :repository_key, :branch, :target_branch,
-    :session_id, :kind, :backend, :issue_key, :job_id, :working_directory,
+    :session_id, :kind, :backend, :scope, :issue_key, :job_id, :working_directory,
     :forgotten_json, :reset_at, :forget_reason, :created_at, :updated_at
 )
 ON CONFLICT(bind_id) DO UPDATE SET
@@ -59,6 +60,7 @@ ON CONFLICT(bind_id) DO UPDATE SET
     session_id=excluded.session_id,
     kind=excluded.kind,
     backend=excluded.backend,
+    scope=excluded.scope,
     issue_key=excluded.issue_key,
     job_id=excluded.job_id,
     working_directory=excluded.working_directory,
@@ -92,6 +94,7 @@ def row_params(rec: Dict[str, Any]) -> Dict[str, Any]:
         "session_id": _text(rec, "session_id"),
         "kind": _text(rec, "kind"),
         "backend": _text(rec, "backend"),
+        "scope": _text(rec, "scope"),
         "issue_key": _text(rec, "issue_key").upper(),
         "job_id": _text(rec, "job_id"),
         "working_directory": _text(rec, "working_directory"),
@@ -120,6 +123,7 @@ def row_to_bind(row: sqlite3.Row) -> Dict[str, Any]:
         "session_id": row["session_id"] or "",
         "kind": row["kind"] or "",
         "backend": row["backend"] or "",
+        "scope": (row["scope"] if "scope" in row.keys() else "") or "",
         "issue_key": row["issue_key"] or "",
         "job_id": row["job_id"] or None,
         "working_directory": row["working_directory"] or None,
@@ -164,6 +168,10 @@ class SessionBindIndex:
         if "backend" not in columns:
             conn.execute(
                 "ALTER TABLE session_binds ADD COLUMN backend TEXT NOT NULL DEFAULT ''"
+            )
+        if "scope" not in columns:
+            conn.execute(
+                "ALTER TABLE session_binds ADD COLUMN scope TEXT NOT NULL DEFAULT ''"
             )
         conn.commit()
         self._conn = conn

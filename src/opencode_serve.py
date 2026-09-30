@@ -468,6 +468,31 @@ DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT = (
     "merge request. Mark todos completed when the plan is written."
 )
 
+# Review jobs must not be told to implement. The build nudge above made
+# derman-reviewer treat a /review turn as a build.
+DEFAULT_REVIEW_UNATTENDED_NUDGE_PROMPT = (
+    "You are running unattended inside a daemon — there is no human in the "
+    "loop and no one will answer questions. Do not ask clarifying questions, "
+    "confirmation, or multiple-choice options. Choose the safest defaults "
+    "consistent with AGENTS.md, the repository, and the original review "
+    "request. Finish the review only. Do **not** implement product code, "
+    "edit the product, or commit. Do **not** git push or open a merge "
+    "request. Mark todos completed when the review is written."
+)
+
+# Test jobs write unit tests. The build nudge told derman-test to resume
+# product implementation. Local test commits stay; push stays with us.
+DEFAULT_TEST_UNATTENDED_NUDGE_PROMPT = (
+    "You are running unattended inside a daemon — there is no human in the "
+    "loop and no one will answer questions. Do not ask clarifying questions, "
+    "confirmation, or multiple-choice options. Choose the safest defaults "
+    "consistent with AGENTS.md, the repository, and the original test "
+    "request. Finish the unit tests only. Do **not** implement product "
+    "features. Commit the test files locally when they change. Do **not** "
+    "git push or open a merge request — the orchestrator delivers. Mark "
+    "todos completed when the tests are written."
+)
+
 _PLAN_AGENT_IDS = frozenset(
     {
         "derman-plan",
@@ -481,25 +506,65 @@ _PLAN_AGENT_IDS = frozenset(
 )
 
 
+def _agent_token(agent: Optional[str]) -> str:
+    return (agent or "").strip().lower().replace("_", "-")
+
+
 def is_plan_agent(agent: Optional[str]) -> bool:
     """True for OpenCoderman / stock plan agents (not derman-build)."""
-    raw = (agent or "").strip().lower().replace("_", "-")
+    raw = _agent_token(agent)
     if not raw:
         return False
     return raw in _PLAN_AGENT_IDS or raw.endswith("-plan")
 
 
+def is_review_agent(agent: Optional[str]) -> bool:
+    """True for derman-reviewer and other review agents (not plan).
+
+    A hyphen-separated part must be ``review`` or start with it
+    (``reviewer``). ``preview`` contains those letters and is not a match.
+    """
+    raw = _agent_token(agent)
+    if not raw or is_plan_agent(raw):
+        return False
+    for part in raw.split("-"):
+        if part == "review" or part.startswith("review"):
+            return True
+    return False
+
+
+def is_test_agent(agent: Optional[str]) -> bool:
+    """True for derman-test and other unit-test agents (not plan or review)."""
+    raw = _agent_token(agent)
+    if not raw or is_plan_agent(raw) or is_review_agent(raw):
+        return False
+    return raw in {"test", "tester", "derman-test"} or raw.endswith("-test")
+
+
+def _keeps_task_instruction(agent: Optional[str]) -> bool:
+    """Plan, review, and test retries must not be replaced with a build continue."""
+    return is_plan_agent(agent) or is_review_agent(agent) or is_test_agent(agent)
+
+
 def unattended_nudge_prompt(agent: Optional[str] = None) -> str:
-    """Recovery nudge after a clarifying-question stop. Plan vs build."""
+    """Recovery nudge after a clarifying-question stop."""
     if is_plan_agent(agent):
         return DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+    if is_review_agent(agent):
+        return DEFAULT_REVIEW_UNATTENDED_NUDGE_PROMPT
+    if is_test_agent(agent):
+        return DEFAULT_TEST_UNATTENDED_NUDGE_PROMPT
     return DEFAULT_UNATTENDED_NUDGE_PROMPT
 
 
 def idle_continue_prompt(agent: Optional[str] = None) -> str:
-    """Continue after idle-compact. Plan jobs stay on the plan file."""
+    """Continue after idle-compact. Plan, review, and test stay on their job."""
     if is_plan_agent(agent):
         return DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+    if is_review_agent(agent):
+        return DEFAULT_REVIEW_UNATTENDED_NUDGE_PROMPT
+    if is_test_agent(agent):
+        return DEFAULT_TEST_UNATTENDED_NUDGE_PROMPT
     return DEFAULT_CONTINUE_PROMPT
 
 

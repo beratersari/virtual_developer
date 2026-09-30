@@ -8,6 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.68] — 2026-09-30
+
+Review and test follow-ups stay on their own job. The Sessions page lists OpenCode chats, and stopping a job aborts the OpenCode session.
+
+### Fixed
+
+- A review or test timeout, error retry, clarifying-question nudge, or idle continue stays on that job. A review follow-up finishes the review. A test follow-up finishes the unit tests and may commit those tests. A build job still receives the build continue line.
+- Stopping a job aborts its OpenCode session, including when the configured worker is Codex. Shutting Yaver down waits for that abort.
+- Codex keeps the thread id from the start of the run when a later message quotes another id.
+- A Codex job does not resume a Claude chat from another branch of the same issue. A Codex thread on another branch of that issue still resumes.
+- The Sessions page lists OpenCode chats in one read. A multi-repo row shows the session id, the repositories, and the clone folder. Reset names that one session, and the other sessions on the same branch stay. Claude and Codex replies stay on the job Transcript tab.
+
+### Changed
+
+- The example agent timeout in `.env.example` is 14400 seconds. An install that already saved a timeout keeps that saved value.
+
+[0.9.68]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.68
+
 ## [0.9.67] — 2026-09-30
 
 The Jobs Queue tab shows waiting items when you open it. Settings keep the values you saved, and saved projects stay hidden until Reload from tokens.

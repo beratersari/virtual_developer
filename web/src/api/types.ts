@@ -348,6 +348,7 @@ export type OpencodeSessionBind = {
   target_branch?: string
   session_id: string
   kind?: string
+  scope?: string
   issue_key?: string
   job_id?: string | null
   working_directory?: string | null

@@ -3375,6 +3375,20 @@ def _plan_files_for_workspace(
     return out
 
 
+def _bind_is_opencode_workspace_session(rec: Dict[str, Any]) -> bool:
+    """Sessions page lists OpenCode chats. Claude and Codex stay on the job."""
+    from src.backends.base import BACKEND_OPENCODE
+    from src.state.session_bind_store import inferred_bind_backend
+
+    if not str(rec.get("session_id") or "").strip():
+        return False
+    return inferred_bind_backend(rec) == BACKEND_OPENCODE
+
+
+def _opencode_workspace_rows(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [rec for rec in recs if _bind_is_opencode_workspace_session(rec)]
+
+
 def _bind_to_schema(rec: Dict[str, Any]) -> OpencodeSessionBind:
     return OpencodeSessionBind(
         bind_id=str(rec.get("bind_id") or ""),
@@ -3384,6 +3398,7 @@ def _bind_to_schema(rec: Dict[str, Any]) -> OpencodeSessionBind:
         target_branch=str(rec.get("target_branch") or ""),
         session_id=str(rec.get("session_id") or ""),
         kind=str(rec.get("kind") or ""),
+        scope=str(rec.get("scope") or ""),
         issue_key=str(rec.get("issue_key") or ""),
         job_id=rec.get("job_id"),
         working_directory=rec.get("working_directory") or None,
@@ -3430,7 +3445,10 @@ def build_opencode_workspaces(
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
     needle = (q or "").strip()
-    rows = binds.list_workspaces(limit=None)
+    rows = binds.list_workspaces(
+        limit=None,
+        include=_bind_is_opencode_workspace_session,
+    )
     if needle:
         rows = [row for row in rows if _workspace_matches_search(row, needle)]
     total = len(rows)
@@ -3472,7 +3490,8 @@ def build_opencode_workspace_detail(
     from src.state.session_bind_store import session_bind_store as binds
 
     wid = (workspace_id or "").strip()
-    recs = binds.binds_for_workspace(wid)
+    all_recs = binds.binds_for_workspace(wid)
+    recs = _opencode_workspace_rows(all_recs)
     if not recs:
         return None
     js = store or default_job_store

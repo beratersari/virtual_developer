@@ -1,3 +1,15 @@
+# Yaver 0.9.68
+
+A review or a test that hits a timeout, an error retry, a clarifying question, or an idle continue stays on that job. The review follow-up finishes the review. The test follow-up finishes the unit tests and may commit those tests. A build job still receives the build continue line.
+
+Stopping a job aborts its OpenCode session, including when the configured worker is Codex. Shutting Yaver down waits for that abort before the process exits.
+
+Codex keeps the thread id from the start of the run when a later message quotes another id. A Codex job does not resume a Claude chat from another branch of the same issue. A Codex thread on another branch of that issue still resumes.
+
+The Sessions page lists OpenCode chats. A multi-repo row shows the session id, the repositories, and the clone folder. Reset names that one session, and the other sessions on the same branch stay. Claude and Codex replies stay on the job Transcript tab. The list is read once.
+
+The example agent timeout in .env.example is 14400 seconds. An install that already saved a timeout keeps that saved value.
+
 # Yaver 0.9.67
 
 The Jobs Queue tab shows waiting items when you open it. Switching to Queue keeps the list already loaded, and a new waiting item shows up without waiting for the next poll. Finished queue history is not read again on each visit.
