@@ -417,6 +417,90 @@ async def _await_process_exit(proc: Any, *, seconds: float) -> bool:
         return getattr(proc, "returncode", None) is not None
 
 
+_CHATTER_ITEM_TYPES = frozenset(
+    {
+        "command_execution",
+        "command",
+        "agent_message",
+        "message",
+        "reasoning",
+        "file_change",
+        "filechange",
+    }
+)
+
+
+def _thread_label(match: re.Match[str]) -> str:
+    return match.group(0).split(":", 1)[0].split("=", 1)[0].strip().lower()
+
+
+def codex_line_publishes_thread_id(line: str) -> bool:
+    """True when this line itself carries a top-level thread id."""
+    raw = (line or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            tid = obj.get("thread_id")
+            thread = obj.get("thread")
+            if not tid and isinstance(thread, dict):
+                tid = thread.get("id")
+            return bool(str(tid or "").strip())
+    match = _THREAD_RE.search(raw)
+    if not match:
+        return False
+    return _thread_label(match) in {"thread_id", "thread"}
+
+
+def codex_line_top_level_session_id(line: str) -> str:
+    """Session id from a top-level JSON field, not from assistant text.
+
+    ``parse_codex_thread_id`` reads ``thread_id`` from JSON and ``session_id``
+    from unquoted text. A JSON key is quoted (``"session_id":``), so that
+    regex misses a real ``{"session_id": "..."}`` event.
+    """
+    raw = (line or "").strip()
+    if not raw.startswith("{") or codex_line_is_quoted_session(raw):
+        return ""
+    if codex_line_publishes_thread_id(raw):
+        return ""
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(obj, dict):
+        return ""
+    sid = str(obj.get("session_id") or "").strip()
+    if sid.count("-") < 4 or len(sid) < 16:
+        return ""
+    return sid
+
+
+def codex_line_is_quoted_session(line: str) -> bool:
+    """True when session_id appears only inside assistant or tool text.
+
+    A top-level ``{"session_id": "..."}`` event is not chatter. It can be
+    the only id before ``thread.started``.
+    """
+    raw = (line or "").strip()
+    if not raw.startswith("{"):
+        return False
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if codex_line_publishes_thread_id(raw):
+        return False
+    item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+    return str(item.get("type") or "").strip().lower() in _CHATTER_ITEM_TYPES
+
+
 def parse_codex_thread_id(text: str) -> Optional[str]:
     """Best-effort thread/session id from JSONL or log text."""
     if not (text or "").strip():
@@ -964,7 +1048,18 @@ class CodexBackend:
             # Daemon tab only gets errors here; start/exit are logged around exec.
             if summary and daemon_worthy_codex_summary(summary):
                 logger.info(summary)
-            sid = parse_codex_thread_id(line)
+            sid = parse_codex_thread_id(line) or codex_line_top_level_session_id(line)
+            if sid:
+                # thread.started must survive a later line that only quotes
+                # session_id inside assistant or tool text. A later top-level
+                # thread_id may still replace it. Per-line parsing has no
+                # memory of the earlier anchor, so the handle keeps it.
+                publishes = codex_line_publishes_thread_id(line)
+                anchored = bool(handle.get("thread_anchored"))
+                if publishes:
+                    handle["thread_anchored"] = True
+                elif anchored or codex_line_is_quoted_session(line):
+                    sid = ""
             if sid:
                 handle["session_id"] = sid
                 if proc is not None:

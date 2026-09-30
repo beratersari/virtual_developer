@@ -147,3 +147,88 @@ def test_review_and_test_retries_keep_the_original_instruction(tmp_path):
         claude_build, CLAUDE_ID, why="timeout"
     )
     assert claude_build.prompt == DEFAULT_CLAUDE_RESUME_PROMPT
+
+def _codex_lines(*lines: str) -> bytes:
+    return ("\n".join(lines) + "\n").encode()
+
+
+class _CodexProc:
+    pid = 4242
+
+    def __init__(self, payload: bytes, returncode: int = 0):
+        self.returncode = returncode
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(payload)
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+
+    async def wait(self):
+        return self.returncode
+
+
+async def _run_codex_capture(tmp_path, monkeypatch, payload: bytes):
+    from src.backends.base import AgentRunRequest
+    from src.backends import codex as codex_mod
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir(exist_ok=True)
+    codex_mod._LIVE_CODEX.clear()
+    seen: list[str] = []
+
+    async def _fake_exec(*_a, **_k):
+        return _CodexProc(payload)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    try:
+        result = await CodexBackend().run(
+            AgentRunRequest(
+                prompt="build",
+                working_directory=tmp_path,
+                timeout_seconds=5,
+                on_session=seen.append,
+            )
+        )
+    finally:
+        codex_mod._LIVE_CODEX.clear()
+    return result, seen
+
+
+@pytest.mark.asyncio
+async def test_codex_live_capture_keeps_thread_started_id(tmp_path, monkeypatch):
+    quoted = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": f"app log session_id: {QUOTED_ID}",
+            },
+        }
+    )
+    started = json.dumps({"type": "thread.started", "thread_id": STARTED_ID})
+    result, seen = await _run_codex_capture(
+        tmp_path, monkeypatch, _codex_lines(started, quoted)
+    )
+    assert result.session_id == STARTED_ID
+    assert seen == [STARTED_ID]
+
+    later = json.dumps({"type": "thread.started", "thread_id": LATER_ID})
+    replaced, replaced_seen = await _run_codex_capture(
+        tmp_path, monkeypatch, _codex_lines(started, quoted, later)
+    )
+    assert replaced.session_id == LATER_ID
+    assert replaced_seen == [STARTED_ID, LATER_ID]
+
+    only = json.dumps({"session_id": TOP_LEVEL_ID})
+    top, top_seen = await _run_codex_capture(
+        tmp_path, monkeypatch, _codex_lines(only)
+    )
+    assert top.session_id == TOP_LEVEL_ID
+    assert top_seen == [TOP_LEVEL_ID]
+
+    chatter_first, chatter_seen = await _run_codex_capture(
+        tmp_path, monkeypatch, _codex_lines(quoted, started)
+    )
+    assert chatter_first.session_id == STARTED_ID
+    assert chatter_seen == [STARTED_ID]
