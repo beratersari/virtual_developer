@@ -588,6 +588,107 @@ def test_analytics_reviews_count_unique_mrs(
     assert bad.status_code == 400
 
 
+def test_code_review_jobs_count_in_job_stats_only(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """/review and /ask stay in the job tables and stay off the MR cards."""
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    opened = jobs.create_job(
+        issue_key="KAN-1",
+        summary="opened the MR",
+        workflow_type="execution",
+        source="jira",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/4",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=4,
+    )
+    jobs.update_job(
+        opened["job_id"],
+        started_at=_stamp(1),
+        status="completed",
+        merge_request_state="opened",
+    )
+    review = jobs.create_job(
+        issue_key="GL-1",
+        summary="@bot /review",
+        workflow_type="gitlab-review",
+        source="gitlab",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/4",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=4,
+    )
+    jobs.update_job(
+        review["job_id"],
+        started_at=_stamp(1, 11),
+        status="completed",
+        merge_request_state="opened",
+    )
+    ask = jobs.create_job(
+        issue_key="AZ-9",
+        summary="@bot /ask",
+        workflow_type="azure-review",
+        source="azure",
+        status="error",
+        merge_request_url="https://tfs.example.com/tfs/DefaultCollection/App/_git/app/pullrequest/9",
+        azure_project="App",
+        azure_pr_id=9,
+    )
+    jobs.update_job(
+        ask["job_id"],
+        started_at=_stamp(1, 12),
+        status="error",
+        merge_request_state="active",
+    )
+    plain = jobs.create_job(
+        issue_key="GL-2",
+        summary="review only",
+        workflow_type="review",
+        source="gitlab",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/8",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=8,
+    )
+    jobs.update_job(
+        plain["job_id"],
+        started_at=_stamp(1, 13),
+        status="completed",
+        merge_request_state="merged",
+    )
+
+    body = http.get("/api/analytics", params={"period": "7d"}).json()
+    assert body["totals"]["jobs"] == 4
+    cats = {row["id"]: row["jobs"] for row in body["categories"]}
+    assert cats.get("build") == 1
+    assert cats.get("review") == 3
+    assert body["reviews"]["ours"] == {
+        "opened": 1,
+        "merged": 0,
+        "closed": 0,
+        "total": 1,
+    }
+    assert body["reviews"]["contributed"] == {
+        "opened": 0,
+        "merged": 0,
+        "closed": 0,
+        "total": 0,
+    }
+
+    listed = http.get("/api/analytics/reviews", params={"period": "7d"}).json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["jobs"] == 1
+    assert listed["items"][0]["url"].endswith("/merge_requests/4")
+
+    review_only = http.get(
+        "/api/analytics", params={"period": "7d", "category": "review"}
+    ).json()
+    assert review_only["totals"]["jobs"] == 3
+    assert review_only["reviews"]["ours"]["total"] == 0
+    assert review_only["reviews"]["contributed"]["total"] == 0
+
+
 def test_analytics_in_flight_and_combined_filters(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):

@@ -271,12 +271,23 @@ def _mr_origin_from_job(job: Dict[str, Any]) -> str:
     return "ours"
 
 
+def _is_code_review_job(job: Dict[str, Any]) -> bool:
+    """``/review`` and ``/ask`` jobs. Their counts belong on the job tables."""
+    return job_category(str(job.get("workflow_type") or "")) == "review"
+
+
 def _unique_review_rows(
     jobs: Iterable[Tuple[datetime, Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    """One row per MR/PR. Review + build on the same URL stay one row."""
+    """One row per MR/PR from ticket work and /yaver follow-ups.
+
+    Code review jobs are omitted here. A build and a later /yaver on the
+    same URL stay one row.
+    """
     best: Dict[str, Dict[str, Any]] = {}
     for when, job in jobs:
+        if _is_code_review_job(job):
+            continue
         ident = _review_identity(job)
         if not ident:
             continue
@@ -348,7 +359,7 @@ def _counts_for_origin(rows: List[Dict[str, Any]], origin: str) -> AnalyticsRevi
 
 
 def _review_counts(jobs: Iterable[Dict[str, Any]]) -> AnalyticsReviews:
-    """Unique MRs/PRs. Same URL is one row; a Jira/work-item job marks it ours."""
+    """Unique MRs/PRs from ticket work and /yaver follow-ups. Code review jobs are omitted."""
     rows = _unique_review_rows((datetime.min, job) for job in jobs)
     return AnalyticsReviews(
         ours=_counts_for_origin(rows, "ours"),
