@@ -19,6 +19,7 @@ from src.dashboard.webhook_paths import AZURE_WEBHOOK_PATH, GITLAB_WEBHOOK_PATH
 from src.logger import logger
 from src.work_modes import all_modes, apply_saved_modes
 from src.dashboard.project_repos import (
+    merge_project_repositories,
     parse_project_repositories,
     project_repositories_to_json,
 )
@@ -265,7 +266,7 @@ def _settings_temp_dir() -> str:
     return str(resolve_temp_dir_base())
 
 
-def build_settings_view() -> SettingsView:
+def build_settings_view(*, include_projects: bool = True) -> SettingsView:
     """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
 
     Never includes ``jira_api_token`` or ``gitlab_pat`` values — only booleans.
@@ -380,13 +381,23 @@ def build_settings_view() -> SettingsView:
         trigger_mentions=",".join(
             getattr(settings, "trigger_mentions_list", None) or []
         ),
-        project_repositories=_settings_project_repositories(),
+        project_repositories=(
+            _settings_project_repositories() if include_projects else []
+        ),
         repository_sets=_settings_repository_sets(),
         work_modes=[WorkModeItem(**row) for row in all_modes()],
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
     )
+
+
+def settings_response(*, include_projects: bool = False) -> Dict[str, Any]:
+    """Settings JSON for the dashboard. The saved-project list stays out."""
+    payload = build_settings_view(include_projects=include_projects).model_dump()
+    if not include_projects:
+        payload.pop("project_repositories", None)
+    return payload
 
 
 def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) -> ModelOption:
@@ -601,6 +612,21 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     data = body.model_dump(exclude_unset=True)
     dotenv_updates: Dict[str, str] = {}
 
+    def _write_env(field: str, value: Any) -> None:
+        """Copy one saved Settings field into ``.env`` so a later save cannot restore the old line."""
+        from src.config import _RUNTIME_ENV_MIRROR
+
+        env_name = _RUNTIME_ENV_MIRROR.get(field)
+        if not env_name:
+            return
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, float) and value.is_integer():
+            text = str(int(value))
+        else:
+            text = "" if value is None else str(value)
+        dotenv_updates[env_name] = text
+
     if "jira_host" in data and data["jira_host"] is not None:
         host = str(data["jira_host"]).strip().rstrip("/")
         from src.jira_connection import _normalize_jira_host
@@ -712,6 +738,7 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
         runtime_persist["jira_board_id"] = settings.jira_board_id
+        dotenv_updates["JIRA_BOARD_ID"] = settings.jira_board_id
     if "jira_projects" in data and data["jira_projects"] is not None:
         from src.config import format_jira_projects
 
@@ -722,9 +749,11 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
         runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
+        _write_env("poll_interval_seconds", settings.poll_interval_seconds)
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
         runtime_persist["max_concurrent_jobs"] = settings.max_concurrent_jobs
+        _write_env("max_concurrent_jobs", settings.max_concurrent_jobs)
     if (
         "temp_clone_max_age_days" in data
         and data["temp_clone_max_age_days"] is not None
@@ -733,6 +762,7 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["temp_clone_max_age_days"] = (
             settings.temp_clone_max_age_days
         )
+        _write_env("temp_clone_max_age_days", settings.temp_clone_max_age_days)
     if (
         "agent_task_timeout_seconds" in data
         and data["agent_task_timeout_seconds"] is not None
@@ -753,6 +783,7 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "agent_task_max_retries" in data and data["agent_task_max_retries"] is not None:
         settings.agent_task_max_retries = int(data["agent_task_max_retries"])
         runtime_persist["agent_task_max_retries"] = settings.agent_task_max_retries
+        _write_env("agent_task_max_retries", settings.agent_task_max_retries)
         logger.info(
             f"Agent max error retries set to {settings.agent_task_max_retries} "
             f"(next job uses this)"
@@ -767,6 +798,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["agent_task_max_incomplete_retries"] = (
             settings.agent_task_max_incomplete_retries
         )
+        _write_env(
+            "agent_task_max_incomplete_retries",
+            settings.agent_task_max_incomplete_retries,
+        )
         logger.info(
             f"Agent compact/incomplete retries set to "
             f"{settings.agent_task_max_incomplete_retries} (next job uses this)"
@@ -776,18 +811,32 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         if model:
             settings.default_model = model
             runtime_persist["default_model"] = settings.default_model
+            _write_env("default_model", settings.default_model)
     if "default_review_model" in data and data["default_review_model"] is not None:
         review_model = str(data["default_review_model"]).strip()
         settings.default_review_model = review_model
         runtime_persist["default_review_model"] = review_model
+        _write_env("default_review_model", settings.default_review_model)
     if "agent_backend" in data and data["agent_backend"] is not None:
         from src.backends.base import BACKEND_OPENCODE, normalize_backend_name
 
         name = normalize_backend_name(data["agent_backend"]) or BACKEND_OPENCODE
         settings.agent_backend = name
         runtime_persist["agent_backend"] = name
+        _write_env("agent_backend", settings.agent_backend)
     if "project_repositories" in data and data["project_repositories"] is not None:
         encoded = project_repositories_to_json(data["project_repositories"])
+        settings.project_repositories = encoded
+        runtime_persist["project_repositories"] = encoded
+    if (
+        "project_repositories_append" in data
+        and data["project_repositories_append"] is not None
+    ):
+        merged = merge_project_repositories(
+            settings.project_repositories,
+            data["project_repositories_append"],
+        )
+        encoded = project_repositories_to_json(merged)
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
     if "repository_sets" in data and data["repository_sets"] is not None:
@@ -813,7 +862,9 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["jira_trigger_user"] = jira_trigger
         runtime_persist["trigger_assignee_names"] = jira_trigger
         runtime_persist["trigger_mentions"] = jira_trigger
-        dotenv_updates["JIRA_TRIGGER_USER"] = jira_trigger
+        _write_env("jira_trigger_user", jira_trigger)
+        _write_env("trigger_assignee_names", jira_trigger)
+        _write_env("trigger_mentions", jira_trigger)
     jira_label = None
     if "jira_trigger_label" in data and data["jira_trigger_label"] is not None:
         jira_label = str(data["jira_trigger_label"]).strip()
@@ -825,7 +876,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.trigger_labels = jira_label
         runtime_persist["jira_trigger_label"] = jira_label
         runtime_persist["trigger_labels"] = jira_label
-        dotenv_updates["JIRA_TRIGGER_LABEL"] = jira_label
+        _write_env("jira_trigger_label", jira_label)
+        _write_env("trigger_labels", jira_label)
     gitlab_trigger = None
     if "gitlab_trigger_user" in data and data["gitlab_trigger_user"] is not None:
         gitlab_trigger = str(data["gitlab_trigger_user"]).strip()
@@ -837,7 +889,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.gitlab_bot_mentions = gitlab_trigger
         runtime_persist["gitlab_trigger_user"] = gitlab_trigger
         runtime_persist["gitlab_bot_mentions"] = gitlab_trigger
-        dotenv_updates["GITLAB_TRIGGER_USER"] = gitlab_trigger
+        _write_env("gitlab_trigger_user", gitlab_trigger)
+        _write_env("gitlab_bot_mentions", gitlab_trigger)
     if "gitlab_webhook_enabled" in data and data["gitlab_webhook_enabled"] is not None:
         enabled = bool(data["gitlab_webhook_enabled"])
         settings.gitlab_webhook_enabled = enabled
@@ -921,11 +974,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.azure_bot_mentions = azure_trigger
         runtime_persist["azure_trigger_user"] = azure_trigger
         runtime_persist["azure_bot_mentions"] = azure_trigger
-        dotenv_updates["AZURE_TRIGGER_USER"] = azure_trigger
+        _write_env("azure_trigger_user", azure_trigger)
+        _write_env("azure_bot_mentions", azure_trigger)
     if "azure_webhook_enabled" in data and data["azure_webhook_enabled"] is not None:
         enabled = bool(data["azure_webhook_enabled"])
         settings.azure_webhook_enabled = enabled
         runtime_persist["azure_webhook_enabled"] = enabled
+        _write_env("azure_webhook_enabled", enabled)
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.
     if jira_host_is_cloud(getattr(settings, "jira_host", "")):
@@ -1579,7 +1634,12 @@ def build_jobs(
 
 
 def _queue_live_issue_keys(processor: Any = None) -> set:
-    """Issue keys that are already in-flight and must not appear as waiting."""
+    """Issue keys this process is already running.
+
+    Disk planning/executing is checked per waiting row in
+    ``_queued_hidden_while_live``. The queue list must not read every
+    issue file first.
+    """
     live: set = set()
     if processor is None:
         return live
@@ -1589,18 +1649,6 @@ def _queue_live_issue_keys(processor: Any = None) -> set:
             live = {(k or "").strip().upper() for k in (list_fn() or []) if k}
         except Exception:
             live = set()
-    sm = getattr(processor, "state_manager", None)
-    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
-    get_all = getattr(sm, "get_all_states", None) if sm is not None else None
-    if callable(get_all) and inflight:
-        try:
-            for st in get_all() or []:
-                if getattr(st, "status", None) in inflight:
-                    key = (getattr(st, "issue_key", None) or "").strip().upper()
-                    if key:
-                        live.add(key)
-        except Exception:
-            pass
     return live
 
 
@@ -1725,6 +1773,7 @@ def build_live_envelope(
         except Exception:
             live_keys = []
     queued = 0
+    epoch = 0
     try:
         from src.state.queue_store import work_queue_store as default_queue
 
@@ -1734,13 +1783,18 @@ def build_live_envelope(
             for rec in default_queue.list_items(status="queued", limit=500)
             if not _queued_hidden_while_live(rec, live, processor)
         )
+        try:
+            epoch = int(default_queue.epoch())
+        except Exception:
+            epoch = 0
     except Exception:
         queued = 0
+        epoch = 0
     return {
         "type": "live",
         "meta": build_meta().model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
-        "queue": {"queued_count": queued},
+        "queue": {"queued_count": queued, "epoch": epoch},
         "live_issue_keys": live_keys,
     }
 
@@ -1764,7 +1818,7 @@ def build_dashboard_payload(
             state_manager=state_manager,
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
-        "settings": build_settings_view().model_dump(),
+        "settings": settings_response(),
         "queue": build_queue(processor=processor).model_dump(),
     }
 

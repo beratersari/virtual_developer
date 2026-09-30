@@ -82,7 +82,8 @@ def _gitlab_membership_projects(
     rows: List[Dict[str, Any]] = []
     try:
         with httpx.Client(timeout=timeout, verify=False, headers=headers) as client:
-            for page in range(1, 31):
+            page = 1
+            while True:
                 resp = client.get(
                     f"{base}/projects",
                     params={
@@ -106,6 +107,7 @@ def _gitlab_membership_projects(
                 rows.extend(item for item in batch if isinstance(item, dict))
                 if len(batch) < 100:
                     break
+                page += 1
     except Exception as exc:
         logger.warning(f"GitLab project list failed host={host}: {exc}")
         return rows, f"GitLab {host}: {exc}"

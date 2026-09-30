@@ -457,19 +457,21 @@ export function patchSettings(body: SettingsPatch) {
   })
 }
 
-export function importAccessibleProjects(project_repositories: ProjectRepository[]) {
+export function importAccessibleProjects(project_repositories: ProjectRepository[] | null) {
+  const body: { project_repositories?: ProjectRepository[] } = {}
+  if (project_repositories !== null) {
+    body.project_repositories = project_repositories
+      .filter((row) => row.url.trim())
+      .map((row) => ({
+        label: row.label,
+        url: row.url.trim(),
+        target_branch: (row.target_branch || '').trim(),
+        source_branch: (row.source_branch || '').trim(),
+      }))
+  }
   return request<ImportedProjects>('/api/settings/projects/import', {
     method: 'POST',
-    body: JSON.stringify({
-      project_repositories: project_repositories
-        .filter((row) => row.url.trim())
-        .map((row) => ({
-          label: row.label,
-          url: row.url.trim(),
-          target_branch: (row.target_branch || '').trim(),
-          source_branch: (row.source_branch || '').trim(),
-        })),
-    }),
+    body: JSON.stringify(body),
   })
 }
 

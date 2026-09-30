@@ -184,8 +184,22 @@ def test_queue_finish_does_not_overwrite_a_terminal_row(tmp_path: Path):
     assert other["row"]["status"] == "completed"
 
 
+def _reload_like_a_new_process(env_file: Path, board_in_dotenv: str):
+    """Settings() reads the process env. A restart loads the .env value, not the last save."""
+    import os
+
+    from src.config import Settings, apply_runtime_settings_to
+
+    os.environ["JIRA_BOARD_ID"] = board_in_dotenv
+    fresh = Settings(_env_file=env_file)
+    apply_runtime_settings_to(fresh)
+    return fresh
+
+
 def test_board_id_survives_settings_save_that_rewrites_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Board id is runtime-only. A same save that rewrites .env must not drop it on restart."""
+    import time
+
     work = tmp_path / "install"
     work.mkdir()
     monkeypatch.chdir(work)
@@ -201,20 +215,21 @@ def test_board_id_survives_settings_save_that_rewrites_dotenv(tmp_path: Path, mo
     monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
     monkeypatch.setattr("src.paths.agent_data_dir", lambda: runtime.parent)
 
-    from src.config import Settings, apply_runtime_settings_to
     from src.dashboard.schemas import SettingsUpdate
     from src.dashboard.service import apply_settings_update
 
     apply_settings_update(
         SettingsUpdate(jira_board_id="42", jira_trigger_user="newbot")
     )
-    fresh = Settings(_env_file=work / ".env")
-    apply_runtime_settings_to(fresh)
+    time.sleep(1.1)
+    fresh = _reload_like_a_new_process(work / ".env", "1")
     assert fresh.jira_board_id == "42"
     assert "newbot" in (fresh.jira_trigger_user or "")
 
 
 def test_later_token_save_does_not_restore_old_board_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import time
+
     work = tmp_path / "install"
     work.mkdir()
     monkeypatch.chdir(work)
@@ -230,15 +245,247 @@ def test_later_token_save_does_not_restore_old_board_id(tmp_path: Path, monkeypa
     monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
     monkeypatch.setattr("src.paths.agent_data_dir", lambda: runtime.parent)
 
-    from src.config import Settings, apply_runtime_settings_to
     from src.dashboard.schemas import SettingsUpdate
     from src.dashboard.service import apply_settings_update
 
     apply_settings_update(SettingsUpdate(jira_board_id="42"))
+    time.sleep(1.1)
     apply_settings_update(SettingsUpdate(jira_api_token="new-token"))
-    fresh = Settings(_env_file=work / ".env")
-    apply_runtime_settings_to(fresh)
+    fresh = _reload_like_a_new_process(work / ".env", "1")
     assert fresh.jira_board_id == "42"
+
+
+def test_hand_edited_dotenv_board_id_wins_on_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A .env edit after the last dashboard write still wins on the next start."""
+    import time
+
+    work = tmp_path / "install"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    env_file = work / ".env"
+    env_file.write_text(
+        "JIRA_BOARD_ID=1\nJIRA_API_TOKEN=old-token\nJIRA_HOST=https://jira.example.com\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JIRA_BOARD_ID", "1")
+    monkeypatch.setenv("JIRA_API_TOKEN", "old-token")
+    monkeypatch.setenv("JIRA_HOST", "https://jira.example.com")
+    runtime = tmp_path / "data" / "runtime_settings.json"
+    runtime.parent.mkdir(parents=True)
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
+    monkeypatch.setattr("src.paths.agent_data_dir", lambda: runtime.parent)
+
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    apply_settings_update(SettingsUpdate(jira_board_id="42"))
+    time.sleep(1.1)
+    text = env_file.read_text(encoding="utf-8")
+    text = text.replace("JIRA_BOARD_ID=1", "JIRA_BOARD_ID=7").replace(
+        "JIRA_BOARD_ID=42", "JIRA_BOARD_ID=7"
+    )
+    env_file.write_text(text, encoding="utf-8")
+    fresh = _reload_like_a_new_process(env_file, "7")
+    assert fresh.jira_board_id == "7"
+
+
+def test_stale_runtime_host_does_not_replace_newer_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Saving the board id must not bring back an older Jira host on restart."""
+    import json
+    import os
+    import time
+
+    work = tmp_path / "install"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    env_file = work / ".env"
+    env_file.write_text(
+        "JIRA_HOST=https://good.example.com\nJIRA_BOARD_ID=1\n",
+        encoding="utf-8",
+    )
+    now = time.time()
+    os.utime(env_file, (now, now))
+    now = env_file.stat().st_mtime
+    runtime = tmp_path / "data" / "runtime_settings.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        json.dumps(
+            {
+                "jira_host": "https://stale.example.com",
+                "jira_board_id": "9",
+                "_updated": {
+                    "jira_host": now - 5000,
+                    "jira_board_id": now - 4000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
+    monkeypatch.setattr("src.paths.agent_data_dir", lambda: runtime.parent)
+    monkeypatch.setenv("JIRA_HOST", "https://good.example.com")
+    monkeypatch.setenv("JIRA_BOARD_ID", "1")
+
+    from src.config import Settings, apply_runtime_settings_to
+
+    unmarked = Settings(_env_file=env_file)
+    apply_runtime_settings_to(unmarked)
+    assert unmarked.jira_host == "https://good.example.com"
+    assert unmarked.jira_board_id == "1"
+
+    protected = json.loads(runtime.read_text(encoding="utf-8"))
+    protected["_dotenv_written_at"] = int(now * 1000)
+    protected["_dotenv_written_keys"] = ["JIRA_BOARD_ID"]
+    protected["_updated"]["jira_board_id"] = now - 10
+    runtime.write_text(json.dumps(protected), encoding="utf-8")
+    monkeypatch.setenv("JIRA_BOARD_ID", "1")
+    fresh = Settings(_env_file=env_file)
+    apply_runtime_settings_to(fresh)
+    assert fresh.jira_host == "https://good.example.com"
+    assert fresh.jira_board_id == "9"
+
+
+def test_other_mirrored_settings_survive_a_later_dotenv_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A later token save must not restore older .env lines for other Settings fields."""
+    import os
+    import time
+
+    work = tmp_path / "install"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    env_file = work / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "JIRA_HOST=https://jira.example.com",
+                "JIRA_BOARD_ID=1",
+                "JIRA_API_TOKEN=old-token",
+                "POLL_INTERVAL_SECONDS=30",
+                "MAX_CONCURRENT_JOBS=6",
+                "TEMP_CLONE_MAX_AGE_DAYS=7",
+                "AGENT_TASK_TIMEOUT_SECONDS=900",
+                "AGENT_TASK_MAX_RETRIES=3",
+                "AGENT_TASK_MAX_INCOMPLETE_RETRIES=256",
+                "DEFAULT_MODEL=opencode/hy3-free",
+                "DEFAULT_REVIEW_MODEL=old-review",
+                "AGENT_BACKEND=opencode",
+                "JIRA_TRIGGER_USER=oldbot",
+                "TRIGGER_ASSIGNEE_NAMES=Old Name",
+                "TRIGGER_MENTIONS=@old",
+                "JIRA_TRIGGER_LABEL=oldlabel",
+                "TRIGGER_LABELS=oldlabel",
+                "GITLAB_TRIGGER_USER=oldgit",
+                "GITLAB_BOT_MENTIONS=@oldgit",
+                "AZURE_TRIGGER_USER=oldaz",
+                "AZURE_BOT_MENTIONS=@oldaz",
+                "AZURE_WEBHOOK_ENABLED=false",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key, value in {
+        "JIRA_HOST": "https://jira.example.com",
+        "JIRA_BOARD_ID": "1",
+        "JIRA_API_TOKEN": "old-token",
+        "POLL_INTERVAL_SECONDS": "30",
+        "MAX_CONCURRENT_JOBS": "6",
+        "DEFAULT_MODEL": "opencode/hy3-free",
+        "AGENT_BACKEND": "opencode",
+        "JIRA_TRIGGER_USER": "oldbot",
+        "TRIGGER_ASSIGNEE_NAMES": "Old Name",
+    }.items():
+        monkeypatch.setenv(key, value)
+    runtime = tmp_path / "data" / "runtime_settings.json"
+    runtime.parent.mkdir(parents=True)
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
+    monkeypatch.setattr("src.paths.agent_data_dir", lambda: runtime.parent)
+
+    from src.config import Settings, apply_runtime_settings_to
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    apply_settings_update(
+        SettingsUpdate(
+            poll_interval_seconds=45,
+            max_concurrent_jobs=4,
+            temp_clone_max_age_days=3,
+            agent_task_timeout_seconds=7200,
+            agent_task_max_retries=5,
+            agent_task_max_incomplete_retries=64,
+            default_model="opencode/deepseek-v4-flash-free",
+            default_review_model="review/model",
+            agent_backend="codex",
+            jira_trigger_user="devbot",
+            jira_trigger_label="bot",
+            gitlab_trigger_user="berat_ai",
+            azure_trigger_user="azurebot",
+            azure_webhook_enabled=True,
+        )
+    )
+    time.sleep(1.1)
+    apply_settings_update(SettingsUpdate(jira_api_token="new-token"))
+    stale = {
+        "JIRA_BOARD_ID": "1",
+        "POLL_INTERVAL_SECONDS": "30",
+        "MAX_CONCURRENT_JOBS": "6",
+        "TEMP_CLONE_MAX_AGE_DAYS": "7",
+        "AGENT_TASK_TIMEOUT_SECONDS": "900",
+        "AGENT_TASK_MAX_RETRIES": "3",
+        "AGENT_TASK_MAX_INCOMPLETE_RETRIES": "256",
+        "DEFAULT_MODEL": "opencode/hy3-free",
+        "DEFAULT_REVIEW_MODEL": "old-review",
+        "AGENT_BACKEND": "opencode",
+        "JIRA_TRIGGER_USER": "oldbot",
+        "TRIGGER_ASSIGNEE_NAMES": "Old Name",
+        "TRIGGER_MENTIONS": "@old",
+        "JIRA_TRIGGER_LABEL": "oldlabel",
+        "TRIGGER_LABELS": "oldlabel",
+        "GITLAB_TRIGGER_USER": "oldgit",
+        "GITLAB_BOT_MENTIONS": "@oldgit",
+        "AZURE_TRIGGER_USER": "oldaz",
+        "AZURE_BOT_MENTIONS": "@oldaz",
+        "AZURE_WEBHOOK_ENABLED": "false",
+        "JIRA_HOST": "https://jira.example.com",
+    }
+    for key, value in stale.items():
+        os.environ[key] = value
+    fresh = Settings(_env_file=env_file)
+    apply_runtime_settings_to(fresh)
+    assert fresh.poll_interval_seconds == 45
+    assert fresh.max_concurrent_jobs == 4
+    assert fresh.temp_clone_max_age_days == 3
+    assert fresh.agent_task_timeout_seconds == 7200
+    assert fresh.agent_task_max_retries == 5
+    assert fresh.agent_task_max_incomplete_retries == 64
+    assert fresh.default_model == "opencode/deepseek-v4-flash-free"
+    assert fresh.default_review_model == "review/model"
+    assert fresh.agent_backend == "codex"
+    assert fresh.jira_trigger_user == "devbot"
+    assert fresh.trigger_assignee_names == "devbot"
+    assert fresh.trigger_mentions == "devbot"
+    assert fresh.jira_trigger_label == "bot"
+    assert fresh.trigger_labels == "bot"
+    assert fresh.gitlab_trigger_user == "berat_ai"
+    assert fresh.gitlab_bot_mentions == "berat_ai"
+    assert fresh.azure_trigger_user == "azurebot"
+    assert fresh.azure_bot_mentions == "azurebot"
+    assert fresh.azure_webhook_enabled is True
+    assert fresh.jira_host == "https://jira.example.com"
+    text = env_file.read_text(encoding="utf-8")
+    assert "POLL_INTERVAL_SECONDS=45" in text
+    assert "MAX_CONCURRENT_JOBS=4" in text
+    assert "TEMP_CLONE_MAX_AGE_DAYS=3" in text
+    assert "DEFAULT_MODEL=opencode/deepseek-v4-flash-free" in text
+    assert "AGENT_BACKEND=codex" in text
+    assert "TRIGGER_ASSIGNEE_NAMES=devbot" in text
+    assert "TRIGGER_MENTIONS=devbot" in text
+    assert "GITLAB_BOT_MENTIONS=berat_ai" in text
+    assert "AZURE_BOT_MENTIONS=azurebot" in text
+    assert "AZURE_WEBHOOK_ENABLED=true" in text
+    assert "JIRA_HOST=https://jira.example.com" in text
 
 
 def test_reprocess_clears_stale_plan_execute_run(tmp_path, monkeypatch):

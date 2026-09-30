@@ -76,6 +76,22 @@ def test_edit_dialogs_leave_delete_on_the_trash_icon():
     assert ">Remove<" not in project_actions
 
 
+def test_saved_projects_load_only_from_reload():
+    """Saved projects appear only after Reload from tokens."""
+    live = (ROOT / "web" / "src" / "app" / "LiveProvider.tsx").read_text(encoding="utf-8")
+    assert "fetchSettings()" in live
+    assert "projects: true" not in live
+    page = SETTINGS.read_text(encoding="utf-8")
+    assert "fetchSettings({ projects: true })" not in page
+    assert "void loadProjects()" in page
+    assert "Press Reload from tokens to load saved projects." in page
+    schedules = (ROOT / "web" / "src" / "pages" / "schedules" / "SchedulesPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "fetchSettings(" not in schedules
+    assert "project_repositories_append" in schedules
+
+
 def test_saved_projects_can_be_searched_by_name_and_deleted_together():
     text = SETTINGS.read_text(encoding="utf-8")
     card = text.split("function ProjectRepoList", 1)[1].split(

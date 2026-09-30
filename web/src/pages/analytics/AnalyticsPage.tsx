@@ -674,8 +674,8 @@ export function AnalyticsPage() {
             Contributed
           </div>
           <p className="mb-3 text-xs text-text-muted">
-            Existing GitLab MRs and Azure PRs we commented on (/yaver, /review,
-            /ask). Click a card for the links.
+            Existing GitLab MRs and Azure PRs a /yaver follow-up worked on.
+            Click a card for the links.
           </p>
           <div className="grid grid-cols-2 gap-3">
             <CountCard

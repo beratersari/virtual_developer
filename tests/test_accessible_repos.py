@@ -126,6 +126,51 @@ def test_unreachable_azure_collection_is_reported(monkeypatch):
     assert errors and "getaddrinfo failed" in errors[0]
 
 
+def test_gitlab_project_list_continues_past_thirty_pages(monkeypatch):
+    """A membership list longer than 3000 repositories is still read."""
+    from src import config as config_mod
+    from src.dashboard.accessible_repos import list_gitlab_repositories
+
+    pages: list[int] = []
+
+    def handler(_url, params):
+        page = int(params.get("page") or 1)
+        pages.append(page)
+        if page <= 30:
+            batch = [
+                {
+                    "http_url_to_repo": f"https://gitlab.example/g/p{page}-{i}.git",
+                    "path_with_namespace": f"g/p{page}-{i}",
+                    "default_branch": "main",
+                }
+                for i in range(100)
+            ]
+        else:
+            batch = [
+                {
+                    "http_url_to_repo": "https://gitlab.example/g/last.git",
+                    "path_with_namespace": "g/last",
+                    "default_branch": "main",
+                }
+            ]
+        return _Resp(200, batch)
+
+    monkeypatch.setattr(
+        config_mod.settings,
+        "gitlab_host_pats",
+        json.dumps({"gitlab.example": "tok"}),
+    )
+    monkeypatch.setattr(
+        "src.dashboard.accessible_repos.httpx.Client",
+        lambda *args, **kwargs: _Http(handler),
+    )
+    rows, errors = list_gitlab_repositories()
+    assert pages == list(range(1, 32))
+    assert errors == []
+    assert rows[-1]["url"] == "https://gitlab.example/g/last.git"
+    assert len(rows) == 3001
+
+
 def test_import_keeps_saved_rows_and_adds_token_repos(monkeypatch):
     from src import config as config_mod
 
@@ -183,14 +228,9 @@ def test_import_keeps_saved_rows_and_adds_token_repos(monkeypatch):
 
 
 def test_settings_save_accepts_the_imported_project_list():
-    """Reload from tokens can store every visible repo. Save must accept that list.
-
-    Import allows 500 rows. The settings update currently stops at 40, so a
-    later edit of a label or target does not persist.
-    """
+    """Reload from tokens can store every visible repo. Save must accept that list."""
     from pydantic import ValidationError
 
-    from src.dashboard.project_repos import MAX_PROJECT_REPOS
     from src.dashboard.schemas import SettingsUpdate
 
     rows = [
@@ -200,9 +240,8 @@ def test_settings_save_accepts_the_imported_project_list():
             "target_branch": "main",
             "source_branch": "",
         }
-        for i in range(41)
+        for i in range(501)
     ]
-    assert len(rows) <= MAX_PROJECT_REPOS
     try:
         updated = SettingsUpdate(project_repositories=rows)
     except ValidationError as exc:
@@ -210,4 +249,4 @@ def test_settings_save_accepts_the_imported_project_list():
             "Settings save rejects a project list the token import is allowed to store"
         ) from exc
     assert updated.project_repositories is not None
-    assert len(updated.project_repositories) == 41
+    assert len(updated.project_repositories) == 501

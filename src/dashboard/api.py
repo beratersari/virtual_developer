@@ -48,7 +48,7 @@ from src.dashboard.service import (
     build_models_response,
     build_one_job,
     build_poll_status,
-    build_settings_view,
+    settings_response,
     build_task_detail,
     build_tasks,
     collect_job_chat,
@@ -1477,7 +1477,8 @@ def create_dashboard_app(
 
     @app.get("/api/settings")
     def get_settings() -> dict:
-        return build_settings_view().model_dump()
+        """Dashboard settings. Saved projects are loaded only by Reload from tokens."""
+        return settings_response()
 
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
@@ -1826,7 +1827,7 @@ def create_dashboard_app(
         auth_changed = any(k in dumped for k in auth_keys)
 
         try:
-            view = apply_settings_update(body)
+            apply_settings_update(body)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         email_after = (getattr(settings, "jira_email", "") or "").strip()
@@ -1866,7 +1867,7 @@ def create_dashboard_app(
                 refresh_runtime_jira_clients(processor=proc, poller=poller)
             except Exception as e:
                 logger.warning(f"Jira client refresh after settings update failed: {e}")
-        return view.model_dump()
+        return settings_response()
 
     @app.get("/api/dashboard")
     def dashboard() -> dict:
@@ -1883,7 +1884,7 @@ def create_dashboard_app(
         clients.add(ws)
         loop = asyncio.get_event_loop()
 
-        def _on_snapshot(_snap: dict) -> None:
+        def _kick_live(*_args: object) -> None:
             try:
                 asyncio.run_coroutine_threadsafe(_push_live(), loop)
             except Exception:
@@ -1893,7 +1894,21 @@ def create_dashboard_app(
             data = await asyncio.to_thread(_live_payload)
             await _broadcast(data)
 
-        unsub = poll_snapshot_store.subscribe(_on_snapshot)
+        unsub = poll_snapshot_store.subscribe(_kick_live)
+        queue_unsub = None
+        try:
+            from src.state.queue_store import WorkQueueStore
+            from src.state import queue_store as queue_store_mod
+
+            qstore = queue_store_mod.work_queue_store
+            proc = app.state.processor
+            bound = getattr(proc, "queue_store", None) if proc is not None else None
+            if isinstance(bound, WorkQueueStore):
+                qstore = bound
+            if isinstance(qstore, WorkQueueStore):
+                queue_unsub = qstore.subscribe(_kick_live)
+        except Exception:
+            queue_unsub = None
         try:
             await ws.send_json(await asyncio.to_thread(_live_payload))
             while True:
@@ -1907,6 +1922,11 @@ def create_dashboard_app(
             logger.debug(f"Dashboard websocket closed: {e}")
         finally:
             unsub()
+            if callable(queue_unsub):
+                try:
+                    queue_unsub()
+                except Exception:
+                    pass
             clients.discard(ws)
 
     async def _broadcast(data: dict) -> None:

@@ -1415,7 +1415,12 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
         shown.azure_credentials[0], "pat", None
     ) in (None, "")
     azure_env = {k: v for k, v in written.items() if k.startswith("AZURE_")}
-    assert set(azure_env) == {"AZURE_COLLECTION_PATS", "AZURE_TRIGGER_USER"}
+    assert set(azure_env) == {
+        "AZURE_COLLECTION_PATS",
+        "AZURE_TRIGGER_USER",
+        "AZURE_BOT_MENTIONS",
+    }
+    assert azure_env["AZURE_BOT_MENTIONS"] == azure_env["AZURE_TRIGGER_USER"]
     assert "AZURE_COLLECTION_URLS" not in written
     assert "AZURE_HOST_PATS" not in written
     assert "AZURE_PAT" not in written

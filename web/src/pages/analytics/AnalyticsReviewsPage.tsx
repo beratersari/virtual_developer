@@ -158,8 +158,9 @@ export function AnalyticsReviewsPage() {
         title={titleFor(origin, state)}
         description={
           <>
-            Unique GitLab MRs and Azure PRs. Opened by us = Yaver created the MR
-            from a ticket. Contributed = we commented on an existing MR/PR.{' '}
+            Unique GitLab MRs and Azure PRs from ticket work and /yaver
+            follow-ups. Opened by us = Yaver created the MR from a ticket.
+            Contributed = a /yaver follow-up on an existing MR or PR.{' '}
             <Link to={backTo} className="text-accent hover:underline">
               Back to Analytics
             </Link>

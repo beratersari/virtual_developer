@@ -7,7 +7,6 @@ import {
   fetchAzureProjects,
   fetchIssueTypes,
   fetchSchedules,
-  fetchSettings,
   patchSettings,
   previewScheduleIssue,
   previewScheduleMr,
@@ -1232,29 +1231,21 @@ function CreateNew({ onDone }: { onDone: () => void }) {
 
   useEffect(() => {
     const rows = live.settings?.project_repositories
-    if (rows) setProjects(rows)
+    if (!rows) return
+    setProjects(rows)
+    if (seeded.current) return
+    seeded.current = true
+    const last = (() => {
+      try {
+        return window.localStorage.getItem(LAST_REPO_KEY) || ''
+      } catch {
+        return ''
+      }
+    })()
+    const preferred =
+      rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
+    if (preferred) setRepos([rowFromProject(preferred)])
   }, [live.settings])
-
-  useEffect(() => {
-    void fetchSettings()
-      .then((s) => {
-        const rows = s.project_repositories || []
-        setProjects(rows)
-        if (seeded.current) return
-        seeded.current = true
-        const last = (() => {
-          try {
-            return window.localStorage.getItem(LAST_REPO_KEY) || ''
-          } catch {
-            return ''
-          }
-        })()
-        const preferred =
-          rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
-        if (preferred) setRepos([rowFromProject(preferred)])
-      })
-      .catch(() => undefined)
-  }, [])
 
   const selectable = useMemo(() => types.filter((t) => !t.subtask), [types])
 
@@ -1294,18 +1285,22 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       }
       const first = repos.find((row) => row.url.trim())
       if (rememberRepo && first && !projects.some((p) => p.url === first.url.trim())) {
-        const next = [
-          ...projects,
-          {
-            label: '',
-            url: first.url.trim(),
-            target_branch: first.target.trim(),
-            source_branch: first.sourceMode === 'custom' ? first.source.trim() : '',
-          },
-        ]
+        const row = {
+          label: '',
+          url: first.url.trim(),
+          target_branch: first.target.trim(),
+          source_branch: first.sourceMode === 'custom' ? first.source.trim() : '',
+        }
         try {
-          const updated = await patchSettings({ project_repositories: next })
-          setProjects(updated.project_repositories || next)
+          if (Array.isArray(live.settings?.project_repositories)) {
+            const next = [...live.settings.project_repositories, row]
+            await patchSettings({ project_repositories: next })
+            setProjects(next)
+            live.setSettings({ ...live.settings, project_repositories: next })
+          } else {
+            await patchSettings({ project_repositories_append: [row] })
+            setProjects((cur) => [...cur, row])
+          }
         } catch {
           /* schedule already created; remember is best-effort */
         }

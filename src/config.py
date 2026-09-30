@@ -5,7 +5,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -183,6 +183,8 @@ def upsert_dotenv_keys(
     logger.info(
         "Updated .env keys: " + ", ".join(sorted(wanted))
     )
+    if path is None:
+        remember_dotenv_write(dest, wanted.keys())
     return len(wanted)
 
 
@@ -1116,10 +1118,14 @@ _current_temp_dir: Optional[Path] = None
 
 # Dashboard runtime overrides (survive process restart).
 # Written by apply_settings_update; applied after Settings() loads env.
-# A cwd .env key wins when that file is newer than this field's last save
-# (legacy rows without a timestamp never hide a .env value).
+# A field saved in Settings keeps that value across restart when Yaver also
+# wrote that key into cwd ``.env``. A later edit of ``.env`` wins when the
+# file is newer than Yaver's last write. A row with no timestamp, and a
+# saved row whose key Yaver did not write, still follow a newer ``.env``.
 _RUNTIME_SETTINGS_NAME = "runtime_settings.json"
 _RUNTIME_UPDATED_KEY = "_updated"
+_DOTENV_WRITTEN_KEY = "_dotenv_written_at"
+_DOTENV_WRITTEN_KEYS = "_dotenv_written_keys"
 
 # Keys the dashboard may persist (no secrets).
 _RUNTIME_PERSIST_KEYS = frozenset(
@@ -1265,6 +1271,9 @@ def save_runtime_settings(updates: Dict[str, Any]) -> None:
             current[key] = value
             updated[key] = now
         payload: Dict[str, Any] = dict(current)
+        for key, value in raw.items():
+            if str(key).startswith("_") and key != _RUNTIME_UPDATED_KEY:
+                payload[key] = value
         if updated:
             payload[_RUNTIME_UPDATED_KEY] = updated
         tmp = path.with_suffix(".json.tmp")
@@ -1277,7 +1286,11 @@ def save_runtime_settings(updates: Dict[str, Any]) -> None:
         _mirror_runtime_to_environ(current)
         logger.info(
             f"Persisted runtime settings to {path}: "
-            + ", ".join(f"{k}={current[k]!r}" for k in sorted(updates) if k in current)
+            + ", ".join(
+                f"{k}={_runtime_log_value(k, current[k])}"
+                for k in sorted(updates)
+                if k in current
+            )
         )
     except Exception as e:
         logger.error(f"Could not save runtime settings {path}: {e}")
@@ -1320,12 +1333,65 @@ def _dotenv_defined_keys(path: Path) -> set[str]:
     return keys
 
 
+def remember_dotenv_write(
+    env_path: Optional[Path] = None,
+    keys: Optional[Iterable[str]] = None,
+) -> None:
+    """Remember which ``.env`` keys Yaver just wrote, and the file mtime.
+
+    A later Settings save rewrites ``.env`` and would otherwise look like
+    the operator edited every key. Only the keys Yaver actually wrote stay
+    protected. An older saved host must not come back just because the
+    board id was saved.
+    """
+    dest = env_path or _first_dotenv_file()
+    if dest is None or not dest.is_file():
+        return
+    try:
+        written_ms = int(dest.stat().st_mtime * 1000)
+    except OSError:
+        return
+    path = runtime_settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = _read_runtime_file()
+        raw[_DOTENV_WRITTEN_KEY] = written_ms
+        accumulated = _dotenv_written_keys(raw)
+        if keys is not None:
+            accumulated.update(str(key).strip() for key in keys if str(key).strip())
+        raw[_DOTENV_WRITTEN_KEYS] = sorted(accumulated)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(f"Could not record .env write time: {exc}")
+
+
+def _dotenv_written_ms(raw: Dict[str, Any]) -> Optional[int]:
+    try:
+        return int(raw.get(_DOTENV_WRITTEN_KEY))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dotenv_written_keys(raw: Dict[str, Any]) -> set[str]:
+    value = raw.get(_DOTENV_WRITTEN_KEYS)
+    if not isinstance(value, list):
+        return set()
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
 def _runtime_keys_superseded_by_dotenv() -> set[str]:
     """Field names to keep from cwd ``.env`` instead of runtime_settings.json.
 
-    Saving one Settings field must not stamp every other leftover runtime
-    value over a later ``.env`` edit. Compare each field's save time.
-    Legacy rows (no timestamp) never hide a key that ``.env`` defines.
+    A field with no save time yields to ``.env`` (legacy dumps). A field
+    whose key Yaver wrote into ``.env`` stays saved across later rewrites
+    of other keys. A newer ``.env`` still wins for every other field, and
+    for every field after the operator edits the file.
     """
     env_path = _first_dotenv_file()
     if env_path is None:
@@ -1341,14 +1407,41 @@ def _runtime_keys_superseded_by_dotenv() -> set[str]:
     if not raw:
         return set()
     updated = _runtime_updated_map(raw)
+    written_ms = _dotenv_written_ms(raw)
+    written_keys = _dotenv_written_keys(raw)
+    env_ms = int(env_mtime * 1000)
     skip: set[str] = set()
     for field, env_name in _RUNTIME_ENV_MIRROR.items():
         if env_name not in env_keys:
             continue
         saved_at = updated.get(field)
-        if saved_at is None or env_mtime > saved_at:
+        if saved_at is None:
             skip.add(field)
+            continue
+        if env_mtime <= saved_at:
+            continue
+        if (
+            written_ms is not None
+            and env_ms <= written_ms
+            and env_name in written_keys
+        ):
+            continue
+        skip.add(field)
     return skip
+
+
+def _runtime_log_value(key: str, value: Any) -> str:
+    """Startup log text. The saved-project catalog stays out of this line."""
+    if key == "project_repositories":
+        rows: Any = value
+        if isinstance(value, str):
+            try:
+                rows = json.loads(value) if value.strip() else []
+            except json.JSONDecodeError:
+                rows = []
+        count = len(rows) if isinstance(rows, list) else 0
+        return f"{count} saved"
+    return repr(value)
 
 
 def apply_runtime_settings_to(settings_obj: "Settings") -> None:
@@ -1404,7 +1497,9 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
     if applied:
         logger.info(
             "Applied runtime settings overrides: "
-            + ", ".join(f"{k}={applied[k]!r}" for k in sorted(applied))
+            + ", ".join(
+                f"{k}={_runtime_log_value(k, applied[k])}" for k in sorted(applied)
+            )
         )
     if skip_keys:
         logger.info(

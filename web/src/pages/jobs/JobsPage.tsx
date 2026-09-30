@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
-import { shouldRefreshQueueList } from './queueRefresh'
+import {
+  queuePlaceholder,
+  shouldLoadQueueForFilter,
+  shouldRefreshQueueList,
+  waitingQueueRows,
+} from './queueRefresh'
 import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
 import { sortJobsByCreatedAt } from '../../util/jobs'
@@ -15,7 +20,12 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { LiveDot } from '../../ui/LiveDot'
 import { PageHeader } from '../../ui/PageHeader'
 import { StatusBadge } from '../../ui/StatusBadge'
-import { peekJobsPayload, rememberJobsPayload } from '../../app/entityCache'
+import {
+  peekJobsPayload,
+  peekQueuePayload,
+  rememberJobsPayload,
+  rememberQueuePayload,
+} from '../../app/entityCache'
 import { JobsTable } from './JobsTable'
 import { jobsFilterFromPath, jobsFilterPath, jobsPageFromPath } from './jobsFilterUrl'
 import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
@@ -49,8 +59,13 @@ export function JobsPage() {
   const [issueFilter, setIssueFilter] = useState('')
   const [debouncedFilter, setDebouncedFilter] = useState('')
   const [payload, setPayload] = useState<JobsPayload | null>(() => peekJobsPayload())
-  const [queueItems, setQueueItems] = useState<QueueItem[]>([])
-  const [queueQueued, setQueueQueued] = useState(0)
+  const [queueItems, setQueueItems] = useState<QueueItem[]>(() =>
+    waitingQueueRows(peekQueuePayload()?.items),
+  )
+  const [queueQueued, setQueueQueued] = useState(
+    () => peekQueuePayload()?.queued_count ?? 0,
+  )
+  const [queueReady, setQueueReady] = useState(() => peekQueuePayload() != null)
   const [error, setError] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -77,17 +92,17 @@ export function JobsPage() {
     try {
       const q = await fetchQueue({ status: 'queued', limit: 200 })
       if (req !== queueReq.current) return
-      const rows = (q.items || []).filter((r) => r.status === 'queued')
-      rows.sort((a, b) =>
-        String(b.created_at || '').localeCompare(String(a.created_at || '')),
-      )
+      const rows = waitingQueueRows(q.items)
       const count =
         typeof q.queued_count === 'number' ? q.queued_count : rows.length
+      rememberQueuePayload({ ...q, items: rows })
       lastFetchedQueued.current = count
       setQueueItems(rows)
       setQueueQueued(count)
+      setQueueReady(true)
     } catch {
       // A failed refresh must not wipe rows that are already on screen.
+      if (req === queueReq.current) setQueueReady(true)
     }
   }, [])
 
@@ -124,22 +139,30 @@ export function JobsPage() {
   )
 
   useEffect(() => {
+    // The queue list is its own request. Waiting for the jobs page made the
+    // tab look empty until that slower call returned.
+    if (shouldLoadQueueForFilter(statusFilter)) return
     void load({ filter: debouncedFilter, page })
-  }, [debouncedFilter, page, load])
+  }, [debouncedFilter, page, load, statusFilter])
 
   useEffect(() => {
+    if (shouldLoadQueueForFilter(statusFilter)) return
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
     void load()
-  }, [live.generation, load])
+  }, [live.generation, load, statusFilter])
 
   useEffect(() => {
+    if (shouldLoadQueueForFilter(statusFilter)) {
+      void loadQueue()
+      return
+    }
     if (!shouldRefreshQueueList(statusFilter, live.queueQueued, lastFetchedQueued.current)) {
       return
     }
     void loadQueue()
-  }, [statusFilter, live.queueQueued, loadQueue])
+  }, [statusFilter, live.queueQueued, live.generation, loadQueue])
 
   const showQueue = statusFilter === 'queue'
 
@@ -360,7 +383,14 @@ export function JobsPage() {
       )}
 
       {showQueue ? (
-        visibleQueue.length === 0 ? (
+        queuePlaceholder(queueReady, visibleQueue.length) === 'loading' ? (
+          <div
+            className="vd-panel px-5 py-10 text-center text-sm text-text-muted"
+            aria-busy="true"
+          >
+            Loading queue…
+          </div>
+        ) : queuePlaceholder(queueReady, visibleQueue.length) === 'empty' ? (
           <div className="vd-panel px-5 py-10 text-center text-sm text-text-muted">
             Nothing waiting in the queue.
           </div>

@@ -6,12 +6,13 @@ rows so operators can see what is waiting.
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.logger import logger
 
@@ -71,6 +72,11 @@ class WorkQueueStore:
         self.queue_dir = queue_dir or _default_queue_dir()
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # Queued and running rows only. Finished history stays on disk.
+        self._open: Dict[str, Dict[str, Any]] = {}
+        self._open_loaded = False
+        self._epoch = 0
+        self._listeners: List[Callable[[], None]] = []
 
     def _path(self, queue_id: str) -> Path:
         safe = (queue_id or "").replace("/", "_").replace("\\", "_")
@@ -82,6 +88,57 @@ class WorkQueueStore:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(rec, f, indent=2, ensure_ascii=False)
         tmp.replace(path)
+        if not self._open_loaded:
+            return
+        qid = str(rec.get("queue_id") or "")
+        if not qid:
+            return
+        if rec.get("status") in _OPEN:
+            self._open[qid] = copy.deepcopy(rec)
+        else:
+            self._open.pop(qid, None)
+
+    def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Call ``callback`` after a row is queued, claimed, finished, or cancelled."""
+        with self._lock:
+            self._listeners.append(callback)
+
+        def _unsub() -> None:
+            with self._lock:
+                if callback in self._listeners:
+                    self._listeners.remove(callback)
+
+        return _unsub
+
+    def epoch(self) -> int:
+        """Increments on each change so a live socket can refresh without a timer."""
+        with self._lock:
+            return self._epoch
+
+    def _notify(self) -> None:
+        """Caller must not hold ``_lock``. Listeners may list rows."""
+        with self._lock:
+            self._epoch += 1
+            listeners = list(self._listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception as exc:
+                logger.debug(f"Queue listener failed: {exc}")
+
+    def _ensure_open_locked(self) -> None:
+        """Load queued and running rows once. Caller holds ``_lock``."""
+        if self._open_loaded:
+            return
+        found: Dict[str, Dict[str, Any]] = {}
+        for rec in self._iter_records():
+            if rec.get("status") not in _OPEN:
+                continue
+            qid = str(rec.get("queue_id") or "")
+            if qid:
+                found[qid] = rec
+        self._open = found
+        self._open_loaded = True
 
     def get(self, queue_id: str) -> Optional[Dict[str, Any]]:
         path = self._path((queue_id or "").strip())
@@ -156,6 +213,7 @@ class WorkQueueStore:
             f"issue={rec['issue_key']} lock={rec['lock_key'] or '-'} "
             f"job_id={rec.get('job_id') or '-'}"
         )
+        self._notify()
         return rec
 
     def list_items(
@@ -164,23 +222,24 @@ class WorkQueueStore:
         status: Optional[str] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        if not self.queue_dir.is_dir():
-            return items
+        limit_n = max(1, int(limit))
         with self._lock:
-            for path in self.queue_dir.glob("q_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if not isinstance(rec, dict) or not rec.get("queue_id"):
-                    continue
-                if status and rec.get("status") != status:
-                    continue
-                items.append(rec)
+            if status in _OPEN:
+                self._ensure_open_locked()
+                items = [
+                    copy.deepcopy(rec)
+                    for rec in self._open.values()
+                    if rec.get("status") == status
+                ]
+            else:
+                items = []
+                if self.queue_dir.is_dir():
+                    for rec in self._iter_records():
+                        if status and rec.get("status") != status:
+                            continue
+                        items.append(rec)
         items.sort(key=lambda r: (r.get("created_at") or "", r.get("queue_id") or ""))
-        return items[: max(1, int(limit))]
+        return items[:limit_n]
 
     def _iter_records(self) -> List[Dict[str, Any]]:
         """All queue JSON rows (no oldest-N cap). Caller should hold ``_lock``."""
@@ -263,6 +322,7 @@ class WorkQueueStore:
         """
         blocked = {(k or "").strip().upper() for k in (blocked_issue_keys or set()) if k}
         extra_locks = {(k or "").strip() for k in (blocked_locks or set()) if k}
+        claimed: Optional[Dict[str, Any]] = None
         with self._lock:
             running = [
                 r
@@ -296,10 +356,14 @@ class WorkQueueStore:
                     f"Queue claim {live['queue_id']} issue={live.get('issue_key')} "
                     f"job_id={live.get('job_id') or '-'}"
                 )
-                return live
-        return None
+                claimed = live
+                break
+        if claimed is not None:
+            self._notify()
+        return claimed
 
     def update(self, queue_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
+        updated: Optional[Dict[str, Any]] = None
         with self._lock:
             rec = self.get(queue_id)
             if not rec:
@@ -310,7 +374,9 @@ class WorkQueueStore:
                 rec[k] = v
             rec["updated_at"] = _now_iso()
             self._write(rec)
-            return rec
+            updated = rec
+        self._notify()
+        return updated
 
     def finish(
         self,
@@ -322,6 +388,7 @@ class WorkQueueStore:
     ) -> Optional[Dict[str, Any]]:
         if status not in _TERMINAL:
             status = "completed"
+        rec: Optional[Dict[str, Any]] = None
         with self._lock:
             current = self.get(queue_id)
             if current is None:
@@ -329,23 +396,24 @@ class WorkQueueStore:
             held = (current.get("status") or "").strip().lower()
             if held in _TERMINAL:
                 return current
-            patch: Dict[str, Any] = {
-                "status": status,
-                "finished_at": _now_iso(),
-            }
+            # The terminal check and the write share this hold so a second
+            # finish cannot land in between.
+            current["status"] = status
+            current["finished_at"] = _now_iso()
+            current["updated_at"] = current["finished_at"]
             if error_message is not None:
-                patch["error_message"] = (error_message or "")[:2000]
+                current["error_message"] = (error_message or "")[:2000]
             if job_id:
-                patch["job_id"] = job_id
-            # update() re-enters this lock. Keep the terminal check and the
-            # write in one hold so a second finish cannot land in between.
-            rec = self.update(queue_id, **patch)
+                current["job_id"] = job_id
+            self._write(current)
+            rec = current
         if rec:
             logger.info(
                 f"Queue finish {queue_id} status={status} "
                 f"issue={rec.get('issue_key') or '-'} "
                 f"job_id={rec.get('job_id') or job_id or '-'}"
             )
+            self._notify()
         return rec
 
     def finish_open_for_issue(
@@ -424,6 +492,8 @@ class WorkQueueStore:
                     f"job_id={rec.get('job_id') or job_id or '-'} "
                     f"(open-for-issue)"
                 )
+        if n:
+            self._notify()
         return n
 
     def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
@@ -446,6 +516,7 @@ class WorkQueueStore:
         Only ``running`` rows move. A cancelled/completed/skipped row must
         not come back to life if the worker loses a race with Stop.
         """
+        updated: Optional[Dict[str, Any]] = None
         with self._lock:
             rec = self.get(queue_id)
             if not rec or rec.get("status") != "running":
@@ -456,7 +527,9 @@ class WorkQueueStore:
             rec["updated_at"] = _now_iso()
             self._write(rec)
             logger.info(f"Queue requeue {queue_id}: {reason or 'retry later'}")
-            return rec
+            updated = rec
+        self._notify()
+        return updated
 
     def cancel(self, queue_id: str) -> bool:
         """Cancel a row that is still queued.
@@ -464,6 +537,7 @@ class WorkQueueStore:
         The status check and the write share the lock. ``finish`` would
         also cancel a row that ``claim_next`` already marked running.
         """
+        cancelled = False
         with self._lock:
             rec = self.get(queue_id)
             if not rec or rec.get("status") != "queued":
@@ -473,7 +547,10 @@ class WorkQueueStore:
             rec["finished_at"] = now
             rec["updated_at"] = now
             self._write(rec)
-            return True
+            cancelled = True
+        if cancelled:
+            self._notify()
+        return cancelled
 
 
 work_queue_store = WorkQueueStore()
