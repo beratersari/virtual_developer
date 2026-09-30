@@ -1773,6 +1773,22 @@ class JobProcessor:
         forgotten: List[str] = []
         bind_wd: Optional[str] = None
         sids: List[str] = []
+        # Claude ids on any branch. A Codex job must not exec-resume them
+        # just because the UUID shape matches a Codex thread. Untagged
+        # UUIDs with no Claude row stay Codex.
+        claude_ids: set[str] = set()
+        try:
+            from src.backends.base import BACKEND_CLAUDE
+            from src.state.session_bind_store import inferred_bind_backend
+
+            for rec in store.list_binds(limit=500):
+                if inferred_bind_backend(rec) != BACKEND_CLAUDE:
+                    continue
+                saved = str(rec.get("session_id") or "").strip()
+                if saved:
+                    claude_ids.add(saved)
+        except Exception as e:
+            logger.debug(f"claude session scan failed: {e}")
 
         def _add_sid(raw: Any) -> None:
             from src.backends.base import (
@@ -1814,7 +1830,9 @@ class JobProcessor:
                 if want == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                     return
                 if want == BACKEND_CODEX and (
-                    not is_codex_thread_id(sid) or sid in claude_owned
+                    not is_codex_thread_id(sid)
+                    or sid in claude_owned
+                    or sid in claude_ids
                 ):
                     return
                 if want == BACKEND_CLAUDE and sid not in owned and sid not in claude_owned:

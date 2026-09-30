@@ -359,3 +359,210 @@ async def test_daemon_stop_awaits_serve_abort_before_cancelling_tasks(
                     await daemon.stop()
     assert order == ["shutdown", "cancel"]
     assert "ses_stop" in aborted
+
+class _Git:
+    def __init__(self, repo: str, branch: str, target: str = "main"):
+        self.remote_url = repo
+        self.work_branch = branch
+        self.target_branch = target
+        self.repo_checkouts = []
+
+
+def _build_issue(proc, sm, issue: str):
+    from src.state.models import TaskStatus
+
+    sm.create_state(issue, "build", "d")
+    sm.update_state(
+        issue,
+        status=TaskStatus.EXECUTING,
+        metadata={"workflow_type": "execution"},
+    )
+
+
+def test_codex_resume_skips_claude_id_from_another_branch(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    """Same issue, other work branch: resume Codex, never a Claude UUID."""
+    from src.orchestrator.agent_runner import AgentTask
+
+    proc, sm = _processor(tmp_path)
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/app.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-40-requeue",
+        target_branch="main",
+        session_id=CLAUDE_ID,
+        issue_key="KAN-40",
+        kind="build",
+        backend="claude",
+        working_directory=str(tmp_path / "requeue"),
+    )
+    _build_issue(proc, sm, "KAN-40")
+    git = _Git(repo, "feature/KAN-40")
+    proc.git_manager = git
+    task = AgentTask(
+        description="build",
+        prompt="BUILD KIT",
+        agent="derman-build",
+        backend="codex",
+        issue_key="KAN-40",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-40", task, git)
+    assert chosen is None
+    assert task.session_id is None
+    assert task.prompt == "BUILD KIT"
+    assert (
+        store.get(
+            repo,
+            "feature/KAN-40",
+            "main",
+            kind="build",
+            backend="codex",
+        )
+        is None
+    )
+
+
+def test_codex_resume_still_uses_codex_id_from_another_branch(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    proc, sm = _processor(tmp_path)
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/app.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-41-requeue",
+        target_branch="main",
+        session_id=CODEX_ID,
+        issue_key="KAN-41",
+        kind="build",
+        backend="codex",
+        working_directory=str(tmp_path / "requeue"),
+    )
+    _build_issue(proc, sm, "KAN-41")
+    git = _Git(repo, "feature/KAN-41")
+    proc.git_manager = git
+    task = AgentTask(
+        description="build",
+        prompt="BUILD KIT",
+        agent="derman-build",
+        backend="codex",
+        issue_key="KAN-41",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-41", task, git)
+    assert chosen == CODEX_ID
+    assert task.session_id == CODEX_ID
+    saved = store.get(
+        repo, "feature/KAN-41", "main", kind="build", backend="codex"
+    )
+    assert saved is not None
+    assert saved["session_id"] == CODEX_ID
+
+
+def test_untagged_uuid_without_a_claude_row_stays_codex(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    proc, sm = _processor(tmp_path)
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/app.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-42-old",
+        target_branch="main",
+        session_id=UNTAGGED_ID,
+        issue_key="KAN-42",
+        kind="build",
+        working_directory=str(tmp_path / "old"),
+    )
+    _build_issue(proc, sm, "KAN-42")
+    git = _Git(repo, "feature/KAN-42")
+    proc.git_manager = git
+    task = AgentTask(
+        description="build",
+        prompt="BUILD KIT",
+        agent="derman-build",
+        backend="codex",
+        issue_key="KAN-42",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-42", task, git)
+    assert chosen == UNTAGGED_ID
+
+
+def test_codex_does_not_resume_a_row_that_stores_a_claude_id(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    proc, sm = _processor(tmp_path)
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/app.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-43-requeue",
+        target_branch="main",
+        session_id=CLAUDE_ID,
+        issue_key="KAN-43",
+        kind="build",
+        backend="claude",
+    )
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-43",
+        target_branch="main",
+        session_id=CLAUDE_ID,
+        issue_key="KAN-43",
+        kind="build",
+        backend="codex",
+    )
+    _build_issue(proc, sm, "KAN-43")
+    git = _Git(repo, "feature/KAN-43")
+    proc.git_manager = git
+    task = AgentTask(
+        description="build",
+        prompt="BUILD KIT",
+        agent="derman-build",
+        backend="codex",
+        issue_key="KAN-43",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-43", task, git)
+    assert chosen is None
+    assert task.session_id is None
+    assert task.prompt == "BUILD KIT"
+
+
+def test_claude_scan_failure_still_resumes_exact_codex_bind(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    proc, sm = _processor(tmp_path)
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/app.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-44",
+        target_branch="main",
+        session_id=CODEX_ID,
+        issue_key="KAN-44",
+        kind="build",
+        backend="codex",
+    )
+    real_list = store.list_binds
+    calls = {"n": 0}
+
+    def wrapped(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise TypeError("session index unavailable")
+        return real_list(limit=500)
+
+    store.list_binds = wrapped
+    _build_issue(proc, sm, "KAN-44")
+    git = _Git(repo, "feature/KAN-44")
+    task = AgentTask(
+        description="build",
+        prompt="BUILD KIT",
+        agent="derman-build",
+        backend="codex",
+        issue_key="KAN-44",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-44", task, git)
+    assert chosen == CODEX_ID
+    assert calls["n"] >= 2
