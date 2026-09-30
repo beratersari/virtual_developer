@@ -19,6 +19,7 @@ from src.dashboard.webhook_paths import AZURE_WEBHOOK_PATH, GITLAB_WEBHOOK_PATH
 from src.logger import logger
 from src.work_modes import all_modes, apply_saved_modes
 from src.dashboard.project_repos import (
+    merge_project_repositories,
     parse_project_repositories,
     project_repositories_to_json,
 )
@@ -265,7 +266,7 @@ def _settings_temp_dir() -> str:
     return str(resolve_temp_dir_base())
 
 
-def build_settings_view() -> SettingsView:
+def build_settings_view(*, include_projects: bool = True) -> SettingsView:
     """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
 
     Never includes ``jira_api_token`` or ``gitlab_pat`` values — only booleans.
@@ -380,13 +381,23 @@ def build_settings_view() -> SettingsView:
         trigger_mentions=",".join(
             getattr(settings, "trigger_mentions_list", None) or []
         ),
-        project_repositories=_settings_project_repositories(),
+        project_repositories=(
+            _settings_project_repositories() if include_projects else []
+        ),
         repository_sets=_settings_repository_sets(),
         work_modes=[WorkModeItem(**row) for row in all_modes()],
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
     )
+
+
+def settings_response(*, include_projects: bool = False) -> Dict[str, Any]:
+    """Settings JSON for the dashboard. The saved-project list stays out."""
+    payload = build_settings_view(include_projects=include_projects).model_dump()
+    if not include_projects:
+        payload.pop("project_repositories", None)
+    return payload
 
 
 def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) -> ModelOption:
@@ -815,6 +826,17 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         _write_env("agent_backend", settings.agent_backend)
     if "project_repositories" in data and data["project_repositories"] is not None:
         encoded = project_repositories_to_json(data["project_repositories"])
+        settings.project_repositories = encoded
+        runtime_persist["project_repositories"] = encoded
+    if (
+        "project_repositories_append" in data
+        and data["project_repositories_append"] is not None
+    ):
+        merged = merge_project_repositories(
+            settings.project_repositories,
+            data["project_repositories_append"],
+        )
+        encoded = project_repositories_to_json(merged)
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
     if "repository_sets" in data and data["repository_sets"] is not None:
@@ -1797,7 +1819,7 @@ def build_dashboard_payload(
             state_manager=state_manager,
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
-        "settings": build_settings_view().model_dump(),
+        "settings": settings_response(),
         "queue": build_queue(processor=processor).model_dump(),
     }
 

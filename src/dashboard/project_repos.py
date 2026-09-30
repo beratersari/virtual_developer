@@ -8,11 +8,6 @@ from urllib.parse import urlparse
 
 from src.issue_git_spec import _looks_like_git_url, _normalize_branch, _normalize_repo_url
 
-# Saved remotes for the New-issue picker. Large enough for every repo
-# a GitLab or Azure DevOps Server token can read.
-MAX_PROJECT_REPOS = 500
-
-
 def label_from_repo_url(url: str) -> str:
     """Short label: group/repo from https://host/group/repo.git or git@host:group/repo.git."""
     raw = (url or "").strip()
@@ -85,9 +80,22 @@ def parse_project_repositories(raw: Any) -> List[Dict[str, str]]:
             continue
         seen.add(key)
         out.append(item)
-        if len(out) >= MAX_PROJECT_REPOS:
-            break
     return out
+
+
+def merge_project_repositories(stored: Any, extra: Any) -> List[Dict[str, str]]:
+    """Keep stored rows. Extra rows replace the same URL and append new ones."""
+    current = parse_project_repositories(stored)
+    index = {row["url"].rstrip("/").lower(): i for i, row in enumerate(current)}
+    for row in parse_project_repositories(extra):
+        key = row["url"].rstrip("/").lower()
+        slot = index.get(key)
+        if slot is None:
+            index[key] = len(current)
+            current.append(row)
+        else:
+            current[slot] = row
+    return current
 
 
 def project_repositories_to_json(raw: Any) -> str:

@@ -1140,7 +1140,7 @@ class AzureDevOpsClient:
         seen: set[str] = set()
         page = 200
         skip = 0
-        while skip < 5000:
+        while True:
             data = self._get_json(
                 url,
                 params={"$top": page, "$skip": skip, "stateFilter": "wellFormed"},
@@ -1207,7 +1207,7 @@ class AzureDevOpsClient:
         """One repository list, following continuationToken. None on HTTP failure."""
         rows: List[Dict[str, Any]] = []
         token = ""
-        for _ in range(40):
+        while True:
             params = {"continuationToken": token} if token else None
             data = self._get_json(url, params=params)
             if data is None:
@@ -1229,7 +1229,6 @@ class AzureDevOpsClient:
             if not next_token or next_token == token or not page:
                 return rows
             token = next_token
-        return rows
 
     def _saved_repo_from_azure(self, row: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if row.get("isDisabled") is True:

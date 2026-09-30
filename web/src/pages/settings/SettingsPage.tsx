@@ -451,8 +451,10 @@ function ProjectRepoList({
   onSave,
   onRemoveAt,
   onRemoveSelected,
+  emptyText = 'No saved projects yet.',
 }: {
   projects: ProjectRepository[]
+  emptyText?: string
   editor: ProjectEditorState | null
   titleId: string
   status: ReactNode
@@ -544,7 +546,7 @@ function ProjectRepoList({
         </button>
       </p>
       {projects.length === 0 ? (
-        <p className="mt-3 text-xs text-text-muted">No saved projects yet.</p>
+        <p className="mt-3 text-xs text-text-muted">{emptyText}</p>
       ) : (
         <>
           <label className="field mt-3" htmlFor={searchId}>
@@ -753,7 +755,7 @@ export function SettingsPage() {
   settingsRef.current = settings
   const draftRef = useRef(draft)
   draftRef.current = draft
-  const projectsLoaded = useRef(false)
+  const projectsLoaded = useRef(Array.isArray(live.settings?.project_repositories))
   const [projectImport, setProjectImport] = useState<
     | { state: 'idle' | 'loading' }
     | {
@@ -809,21 +811,41 @@ export function SettingsPage() {
   useEffect(() => {
     void fetchSettings()
       .then((s) => {
-        setSettings(s)
-        if (!dirtyRef.current && !projectsLoaded.current) setDraft(fromSettings(s))
+        setSettings((cur) => {
+          if (projectsLoaded.current) {
+            return {
+              ...s,
+              project_repositories:
+                cur?.project_repositories ??
+                draftRef.current?.project_repositories ??
+                [],
+            }
+          }
+          return cur?.project_repositories
+            ? { ...s, project_repositories: cur.project_repositories }
+            : s
+        })
+        if (!dirtyRef.current && !projectsLoaded.current) {
+          setDraft((d) => {
+            const next = fromSettings(s)
+            if (d?.project_repositories?.length) {
+              next.project_repositories = d.project_repositories
+            }
+            return next
+          })
+        }
       })
       .catch((e: Error) => setError(e.message))
   }, [])
 
   const loadProjects = useCallback(async () => {
-    const rows =
-      draftRef.current?.project_repositories ??
-      settingsRef.current?.project_repositories ??
-      []
-    projectsLoaded.current = true
+    const editor = projectsLoaded.current
+      ? (draftRef.current?.project_repositories ?? [])
+      : null
     setProjectImport({ state: 'loading' })
     try {
-      const result = await importAccessibleProjects(rows)
+      const result = await importAccessibleProjects(editor)
+      projectsLoaded.current = true
       const repositories = result.project_repositories ?? []
       setDraft((d) => (d ? { ...d, project_repositories: repositories } : d))
       setSettings((s) => (s ? { ...s, project_repositories: repositories } : s))
@@ -979,14 +1001,32 @@ export function SettingsPage() {
             source_branch: (p.source_branch || '').trim(),
           }))
           .filter((p) => p.url)
+        if (!projectsLoaded.current) {
+          body.project_repositories_append = body.project_repositories
+          delete body.project_repositories
+        }
       }
       if (dirtyKeys.has('jira_api_token') && draft.jira_api_token.trim()) {
         body.jira_api_token = draft.jira_api_token.trim()
       }
       const updated = await patchSettings(body)
-      setSettings(updated)
-      pushSettings(updated)
-      setDraft(fromSettings(updated))
+      const merged: SettingsPayload = { ...updated }
+      delete merged.project_repositories
+      if (projectsLoaded.current) {
+        merged.project_repositories =
+          body.project_repositories ??
+          settings?.project_repositories ??
+          draft.project_repositories
+      }
+      setSettings(merged)
+      pushSettings(merged)
+      setDraft(
+        fromSettings(
+          projectsLoaded.current
+            ? merged
+            : { ...merged, project_repositories: draft.project_repositories },
+        ),
+      )
       setDirtyKeys(new Set())
       setSaved(true)
       window.setTimeout(() => setSaved(false), 1800)
@@ -1596,6 +1636,11 @@ export function SettingsPage() {
       <div key="projects" className="vd-fade space-y-5">
         <ProjectRepoList
           projects={draft.project_repositories}
+          emptyText={
+            Array.isArray(settings.project_repositories)
+              ? 'No saved projects yet.'
+              : 'Press Reload from tokens to load saved projects.'
+          }
           editor={projectEditor}
           titleId={projectTitleId}
           reloadDisabled={projectImport.state === 'loading'}

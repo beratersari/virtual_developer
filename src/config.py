@@ -1286,7 +1286,11 @@ def save_runtime_settings(updates: Dict[str, Any]) -> None:
         _mirror_runtime_to_environ(current)
         logger.info(
             f"Persisted runtime settings to {path}: "
-            + ", ".join(f"{k}={current[k]!r}" for k in sorted(updates) if k in current)
+            + ", ".join(
+                f"{k}={_runtime_log_value(k, current[k])}"
+                for k in sorted(updates)
+                if k in current
+            )
         )
     except Exception as e:
         logger.error(f"Could not save runtime settings {path}: {e}")
@@ -1426,6 +1430,20 @@ def _runtime_keys_superseded_by_dotenv() -> set[str]:
     return skip
 
 
+def _runtime_log_value(key: str, value: Any) -> str:
+    """Startup log text. The saved-project catalog stays out of this line."""
+    if key == "project_repositories":
+        rows: Any = value
+        if isinstance(value, str):
+            try:
+                rows = json.loads(value) if value.strip() else []
+            except json.JSONDecodeError:
+                rows = []
+        count = len(rows) if isinstance(rows, list) else 0
+        return f"{count} saved"
+    return repr(value)
+
+
 def apply_runtime_settings_to(settings_obj: "Settings") -> None:
     """Apply persisted dashboard overrides onto a Settings instance (after env load)."""
     data = load_runtime_settings()
@@ -1479,7 +1497,9 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
     if applied:
         logger.info(
             "Applied runtime settings overrides: "
-            + ", ".join(f"{k}={applied[k]!r}" for k in sorted(applied))
+            + ", ".join(
+                f"{k}={_runtime_log_value(k, applied[k])}" for k in sorted(applied)
+            )
         )
     if skip_keys:
         logger.info(

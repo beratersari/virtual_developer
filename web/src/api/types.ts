@@ -816,6 +816,7 @@ export type SettingsPatch = Partial<
   azure_allowed_hosts?: string
   azure_credentials?: { host: string; pat?: string; previous_host?: string }[]
   gitlab_webhook_secret?: string
+  project_repositories_append?: ProjectRepository[]
 }
 
 export type StorageDisk = {

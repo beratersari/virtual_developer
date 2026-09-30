@@ -48,7 +48,7 @@ from src.dashboard.service import (
     build_models_response,
     build_one_job,
     build_poll_status,
-    build_settings_view,
+    settings_response,
     build_task_detail,
     build_tasks,
     collect_job_chat,
@@ -1477,7 +1477,8 @@ def create_dashboard_app(
 
     @app.get("/api/settings")
     def get_settings() -> dict:
-        return build_settings_view().model_dump()
+        """Dashboard settings. Saved projects are loaded only by Reload from tokens."""
+        return settings_response()
 
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
@@ -1826,7 +1827,7 @@ def create_dashboard_app(
         auth_changed = any(k in dumped for k in auth_keys)
 
         try:
-            view = apply_settings_update(body)
+            apply_settings_update(body)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         email_after = (getattr(settings, "jira_email", "") or "").strip()
@@ -1866,7 +1867,7 @@ def create_dashboard_app(
                 refresh_runtime_jira_clients(processor=proc, poller=poller)
             except Exception as e:
                 logger.warning(f"Jira client refresh after settings update failed: {e}")
-        return view.model_dump()
+        return settings_response()
 
     @app.get("/api/dashboard")
     def dashboard() -> dict:
