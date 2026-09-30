@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.67] — 2026-09-30
+
+The Jobs Queue tab shows waiting items when you open it. Settings keep the values you saved, and saved projects stay hidden until Reload from tokens.
+
+### Fixed
+
+- The Jobs Queue tab shows waiting items when you open it. Switching to Queue keeps the list you already loaded, and a new waiting item shows up without waiting for the next poll. Finished queue history is not read again on each visit.
+- Settings values stay on what you saved. Saving another setting, then restarting Yaver, no longer puts the old `.env` line back for Board ID, poll interval, concurrent jobs, clone age, agent timeout and retries, default model, review model, worker, Jira/GitLab/Azure trigger names, or the Azure webhook switch. An older Jira host stored in Settings does not replace the host in `.env` on that restart.
+- Saved projects stay hidden until you press Reload from tokens. Opening Yaver, Scheduled, or Settings does not load that list. A save before that reload does not replace the stored projects.
+- Code review jobs are counted in the job tables. Merge request cards and the merge request list count ticket work and /yaver follow-ups.
+- Saved projects are no longer capped. A token reload keeps every repository the tokens can read, and saving that list keeps every row.
+
+[0.9.67]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.67
+
 ## [0.9.66] — 2026-09-30
 
 A follow-up on one repository of a multi-repo job keeps every repository on its own branch. Each schedule row can use the issue key, and a resumed chat keeps the new instruction.
