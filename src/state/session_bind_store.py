@@ -16,7 +16,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 from src.logger import logger
@@ -860,11 +860,20 @@ class SessionBindStore:
         return items[: max(1, int(limit))]
 
     def list_workspaces(
-        self, *, limit: Optional[int] = 200
+        self,
+        *,
+        limit: Optional[int] = 200,
+        include: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> List[Dict[str, Any]]:
-        """One row per repo + work/source + target, with kind binds rolled up."""
+        """One row per repo + work/source + target, with kind binds rolled up.
+
+        ``include`` drops binds during this single scan. The default keeps
+        every live bind, including Claude and Codex.
+        """
         buckets: Dict[str, Dict[str, Any]] = {}
         for rec in self.list_binds(limit=None):
+            if include is not None and not include(rec):
+                continue
             wid = workspace_id_for(
                 str(rec.get("repository_url") or rec.get("repository_key") or ""),
                 str(rec.get("branch") or ""),

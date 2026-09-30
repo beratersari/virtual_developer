@@ -1,4 +1,10 @@
-"""Review and test follow-ups stay on their own instruction."""
+"""Session resume, cancel, and the Sessions page.
+
+Review and test retries stay on their own instruction. A Codex live
+capture keeps thread.started. Stopping a serve job aborts that session.
+A Codex job does not resume a Claude chat from another branch. The
+Sessions page lists OpenCode chats and shows which clone a bind uses.
+"""
 
 from __future__ import annotations
 
@@ -148,6 +154,7 @@ def test_review_and_test_retries_keep_the_original_instruction(tmp_path):
     )
     assert claude_build.prompt == DEFAULT_CLAUDE_RESUME_PROMPT
 
+
 def _codex_lines(*lines: str) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
@@ -232,6 +239,7 @@ async def test_codex_live_capture_keeps_thread_started_id(tmp_path, monkeypatch)
     )
     assert chatter_first.session_id == STARTED_ID
     assert chatter_seen == [STARTED_ID]
+
 
 @pytest.mark.asyncio
 async def test_cancel_serve_aborts_when_settings_backend_is_codex(monkeypatch):
@@ -359,6 +367,7 @@ async def test_daemon_stop_awaits_serve_abort_before_cancelling_tasks(
                     await daemon.stop()
     assert order == ["shutdown", "cancel"]
     assert "ses_stop" in aborted
+
 
 class _Git:
     def __init__(self, repo: str, branch: str, target: str = "main"):
@@ -566,3 +575,161 @@ def test_claude_scan_failure_still_resumes_exact_codex_bind(
     chosen = proc._attach_bound_opencode_session("KAN-44", task, git)
     assert chosen == CODEX_ID
     assert calls["n"] >= 2
+
+
+def test_sessions_page_lists_opencode_only_and_keeps_scope(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.api import create_dashboard_app
+    from src.state.manager import JiraStateManager
+    from src.state.session_bind_store import multi_session_scope, workspace_id_for
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example/group/x.git"
+    other = "https://gitlab.example/group/y.git"
+    scope = multi_session_scope([repo, other])
+    work = "feature/KAN-517"
+    target = "main"
+    single = binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=target,
+        session_id="ses_single",
+        issue_key="KAN-517",
+        kind="build",
+        backend="opencode",
+        working_directory=str(tmp_path / "clone_single"),
+    )
+    multi = binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=target,
+        session_id="ses_aabbcc",
+        issue_key="KAN-517",
+        kind="build",
+        backend="opencode",
+        scope=scope,
+        working_directory=str(tmp_path / "multi_ws"),
+    )
+    binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=target,
+        session_id=CLAUDE_ID,
+        issue_key="KAN-517",
+        kind="build",
+        backend="claude",
+        working_directory=str(tmp_path / "claude_ws"),
+    )
+    binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=target,
+        session_id=CODEX_ID,
+        issue_key="KAN-517",
+        kind="build",
+        backend="codex",
+        working_directory=str(tmp_path / "codex_ws"),
+    )
+    claude_repo = "https://gitlab.example/group/only-claude.git"
+    binds.upsert(
+        repository_url=claude_repo,
+        branch="feature/KAN-1",
+        target_branch="main",
+        session_id=CLAUDE_ID,
+        issue_key="KAN-1",
+        kind="build",
+        backend="claude",
+    )
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws")
+    client = TestClient(create_dashboard_app(processor=None, state_manager=sm))
+    wid = workspace_id_for(repo, work, target)
+    stored = binds.list_workspaces(limit=None)
+    stored_row = next(item for item in stored if item["workspace_id"] == wid)
+    reads = {"n": 0}
+    real_list = binds.list_binds
+
+    def _counting_list(*args, **kwargs):
+        reads["n"] += 1
+        return real_list(*args, **kwargs)
+
+    binds.list_binds = _counting_list
+    listing = client.get("/api/opencode-workspaces")
+    binds.list_binds = real_list
+    assert reads["n"] == 1
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["total"] == 1
+    row = body["workspaces"][0]
+    assert row["workspace_id"] == wid
+    assert stored_row["session_count"] == 4
+    assert row["session_count"] == 2
+    hidden = workspace_id_for(claude_repo, "feature/KAN-1", "main")
+    assert hidden not in {item["workspace_id"] for item in body["workspaces"]}
+
+    detail_response = client.get(f"/api/opencode-workspaces/{wid}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    by_id = {item["session_id"]: item for item in detail["sessions"]}
+    assert set(by_id) == {"ses_single", "ses_aabbcc"}
+    assert by_id["ses_aabbcc"]["scope"] == scope
+    assert by_id["ses_aabbcc"]["scope"].startswith("multi:")
+    assert "clone_single" in (by_id["ses_single"]["working_directory"] or "")
+    assert "multi_ws" in (by_id["ses_aabbcc"]["working_directory"] or "")
+    assert detail["workspace"]["session_count"] == 2
+    missing = client.get(f"/api/opencode-workspaces/{hidden}")
+    assert missing.status_code == 404
+
+    raw = client.get("/api/opencode-sessions")
+    assert raw.status_code == 200
+    raw_backend = {
+        item["session_id"]: item.get("backend")
+        for item in raw.json()["sessions"]
+        if item["session_id"] in {"ses_single", "ses_aabbcc", CLAUDE_ID, CODEX_ID}
+    }
+    assert raw_backend["ses_single"] == "opencode"
+    assert raw_backend["ses_aabbcc"] == "opencode"
+    assert raw_backend[CLAUDE_ID] == "claude"
+    assert raw_backend[CODEX_ID] == "codex"
+
+    reset = client.delete(f"/api/opencode-sessions/{multi['bind_id']}")
+    assert reset.status_code == 200
+    again = client.get(f"/api/opencode-workspaces/{wid}")
+    assert again.status_code == 200
+    left = {item["session_id"] for item in again.json()["sessions"]}
+    assert left == {"ses_single"}
+    assert single["bind_id"] != multi["bind_id"]
+    raw_after = {
+        item["session_id"] for item in client.get("/api/opencode-sessions").json()["sessions"]
+    }
+    assert "ses_aabbcc" not in raw_after
+    assert CLAUDE_ID in raw_after
+    assert CODEX_ID in raw_after
+    assert "ses_single" in raw_after
+
+
+def test_session_reset_copy_renders():
+    page = (WEB / "src/pages/sessions/SessionWorkspacePage.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "resetBody(target)" in page
+    assert "Reset ${target.session_id}?" in page
+    assert "' · multi-repo'" in page
+    assert "s.bind_id" in page
+    npx = shutil.which("npx")
+    if not npx:
+        pytest.skip("npx is required to render the session reset copy")
+    proc = subprocess.run(
+        [npx, "--yes", "tsx", "--tsconfig", "tsconfig.app.json", "src/pages/sessions/sessionResetCopy.test.tsx"],
+        cwd=WEB,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"session reset copy failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "sessionResetCopy ok" in proc.stdout

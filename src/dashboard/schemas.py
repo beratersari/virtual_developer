@@ -501,6 +501,7 @@ class OpencodeSessionBind(BaseModel):
     target_branch: str = ""
     session_id: str = ""
     kind: str = ""
+    scope: str = ""
     issue_key: str = ""
     job_id: Optional[str] = None
     working_directory: Optional[str] = None
