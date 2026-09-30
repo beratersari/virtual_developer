@@ -892,8 +892,11 @@ class AgentRunner:
             directory=work_dir,
         )
         # Cancel handle: serve path stores client + session (not a subprocess).
+        # "serve" is not a backend name. Without backend=opencode, cancel
+        # follows settings.agent_backend and a Codex default never aborts.
         serve_handle: Dict[str, Any] = {
             "mode": "serve",
+            "backend": "opencode",
             "client": client,
             "session_id": task.session_id,
             "cancel": False,
@@ -1338,16 +1341,17 @@ class AgentRunner:
             "claude",
         }:
             process["cancel"] = True
+            backend_name = process.get("backend") or process.get("mode")
+            if process.get("mode") == "serve":
+                backend_name = "opencode"
             logger.info(
-                f"Cancelling {process.get('backend') or process.get('mode')} "
+                f"Cancelling {backend_name} "
                 f"task: task_id={task_id}"
             )
             try:
                 from src.backends import get_agent_backend
 
-                get_agent_backend(
-                    process.get("backend") or process.get("mode")
-                ).cancel(process)
+                get_agent_backend(backend_name).cancel(process)
             except Exception as e:
                 logger.debug(f"backend cancel failed: {e}")
             return True

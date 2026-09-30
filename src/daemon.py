@@ -228,6 +228,13 @@ class JiraAgentDaemon:
         if self._dashboard_server:
             self._dashboard_server.should_exit = True
 
+        # Abort live OpenCode sessions and wait. shutdown_processing only
+        # schedules client.abort, and the task cancel below would drop it.
+        try:
+            await self._abort_open_serve_sessions()
+        except Exception as e:
+            logger.exception(f"OpenCode abort before shutdown failed: {e}", e)
+
         # Kill agent subprocesses and write CANCELLED before tearing down asyncio
         try:
             self.processor.shutdown_processing(reason="Daemon stopped (interrupt or shutdown)")
@@ -242,6 +249,25 @@ class JiraAgentDaemon:
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("Daemon stopped.")
         sys.exit(0)
+
+    async def _abort_open_serve_sessions(self) -> None:
+        """POST abort for every live issue and wait for it to finish."""
+        proc = getattr(self, "processor", None)
+        if proc is None:
+            return
+        contexts = getattr(proc, "_contexts", None)
+        if not isinstance(contexts, dict) or not contexts:
+            return
+        abort = getattr(proc, "_abort_serve_sessions_for_issue", None)
+        if not callable(abort):
+            return
+        for issue_key in list(contexts):
+            try:
+                await abort(issue_key)
+            except Exception as e:
+                logger.warning(
+                    f"Could not abort OpenCode session for {issue_key}: {e}"
+                )
 
     async def _start_dashboard(self):
         """Serve FastAPI dashboard (same process as poller/jobs)."""

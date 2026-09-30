@@ -4675,7 +4675,14 @@ class JobProcessor:
                 )
         
         elif cmd_lower.startswith("/cancel"):
-            # Always cancel state and notify Jira; kill live process when registered
+            # Always cancel state and notify Jira; kill live process when registered.
+            # Await the serve abort while the handle still exists. cancel_task
+            # only schedules that HTTP call, and a Codex default used to skip it.
+            if state:
+                try:
+                    await self._abort_serve_sessions_for_issue(issue_key)
+                except Exception as e:
+                    logger.warning(f"{issue_key}: cancel abort failed: {e}")
             if state and state.current_task_id:
                 runner = self._runner_for(issue_key)
                 if runner:

@@ -232,3 +232,130 @@ async def test_codex_live_capture_keeps_thread_started_id(tmp_path, monkeypatch)
     )
     assert chatter_first.session_id == STARTED_ID
     assert chatter_seen == [STARTED_ID]
+
+@pytest.mark.asyncio
+async def test_cancel_serve_aborts_when_settings_backend_is_codex(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "agent_backend", "codex")
+    aborted: list[str] = []
+
+    class Client:
+        async def abort(self, sid: str) -> None:
+            aborted.append(sid)
+
+    runner = AgentRunner()
+    runner._running_tasks["task_serve"] = {
+        "mode": "serve",
+        "client": Client(),
+        "session_id": "ses_live",
+        "cancel": False,
+    }
+    assert runner.cancel_task("task_serve") is True
+    await asyncio.sleep(0)
+    assert aborted == ["ses_live"]
+
+
+def _processor(tmp_path):
+    from src.jira.simulated_client import SimulatedJiraClient
+    from src.processor import JobProcessor
+    from src.state.manager import JiraStateManager
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sim = SimulatedJiraClient(base_url="http://127.0.0.1:1")
+    with patch("src.processor.create_jira_client", return_value=sim):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.jira_client = sim
+    proc.reporter = MagicMock()
+    return proc, sm
+
+
+@pytest.mark.asyncio
+async def test_comment_cancel_awaits_serve_abort(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.state.models import TaskStatus
+
+    monkeypatch.setattr(settings, "agent_backend", "codex")
+    proc, sm = _processor(tmp_path)
+    aborted: list[str] = []
+
+    class Client:
+        async def abort(self, sid: str) -> None:
+            await asyncio.sleep(0)
+            aborted.append(sid)
+
+    runner = AgentRunner()
+    runner._running_tasks["task_9"] = {
+        "mode": "serve",
+        "client": Client(),
+        "session_id": "ses_cancelme",
+    }
+    proc.agent_runner = runner
+    sm.create_state("KAN-7", "cancel me", "d")
+    sm.update_state(
+        "KAN-7",
+        status=TaskStatus.EXECUTING,
+        current_task_id="task_9",
+        current_opencode_session_id="ses_cancelme",
+    )
+    await proc._handle_bot_command("KAN-7", "/cancel")
+    assert "ses_cancelme" in aborted
+    assert sm.get_state("KAN-7").status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_daemon_stop_awaits_serve_abort_before_cancelling_tasks(
+    tmp_path, monkeypatch
+):
+    from src.config import settings
+    from src.daemon import JiraAgentDaemon
+    from src.state.models import TaskStatus
+
+    monkeypatch.setattr(settings, "agent_backend", "codex")
+    proc, sm = _processor(tmp_path)
+    aborted: list[str] = []
+
+    class Client:
+        async def abort(self, sid: str) -> None:
+            await asyncio.sleep(0)
+            aborted.append(sid)
+
+    runner = AgentRunner()
+    runner._running_tasks["task_stop"] = {
+        "mode": "serve",
+        "client": Client(),
+        "session_id": "ses_stop",
+    }
+    proc._contexts["KAN-8"] = {"runner": runner}
+    sm.create_state("KAN-8", "stop me", "d")
+    sm.update_state(
+        "KAN-8",
+        status=TaskStatus.EXECUTING,
+        current_task_id="task_stop",
+        current_opencode_session_id="ses_stop",
+    )
+    order: list[str] = []
+
+    real_shutdown = proc.shutdown_processing
+
+    def shutdown(*, reason: str = "") -> int:
+        order.append("shutdown")
+        assert aborted == ["ses_stop"]
+        return real_shutdown(reason=reason)
+
+    proc.shutdown_processing = shutdown
+    daemon = JiraAgentDaemon.__new__(JiraAgentDaemon)
+    daemon._stopping = False
+    daemon._poller = None
+    daemon._dashboard_server = None
+    daemon.processor = proc
+    fake_task = MagicMock()
+    fake_task.cancel.side_effect = lambda: order.append("cancel")
+    with patch("sys.exit"):
+        with patch("asyncio.all_tasks", return_value=[fake_task]):
+            with patch("asyncio.current_task", return_value=MagicMock()):
+                with patch("asyncio.gather", new_callable=AsyncMock):
+                    await daemon.stop()
+    assert order == ["shutdown", "cancel"]
+    assert "ses_stop" in aborted
