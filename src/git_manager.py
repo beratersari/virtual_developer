@@ -363,35 +363,64 @@ class GitManager:
         raw_refs = getattr(self, "repository_refs", None) or []
         specs: List[Dict[str, str]] = []
         seen: set[str] = set()
+        parent_url = self.normalize_remote_url(self.remote_url or "")
 
-        def _add(url: str, source: str, target: str) -> None:
+        def _add(url: str, source: str, target: str, *, inherit: bool) -> None:
             normalized = self.normalize_remote_url(url)
             if not normalized or normalized in seen:
                 return
             seen.add(normalized)
+            src = (source or "").strip()
+            tgt = (target or "").strip()
+            if inherit:
+                src = src or (self.source_branch or "").strip()
+                tgt = tgt or (self.target_branch or "").strip()
             specs.append(
                 {
                     "url": normalized,
-                    "source_branch": (source or self.source_branch or "").strip(),
-                    "target_branch": (target or self.target_branch or "").strip(),
+                    "source_branch": src,
+                    "target_branch": tgt,
                 }
             )
 
         if isinstance(raw_refs, list):
             for item in raw_refs:
                 if isinstance(item, str):
-                    _add(item, self.source_branch, self.target_branch)
-                elif isinstance(item, dict):
                     _add(
-                        str(item.get("url") or item.get("repository_url") or ""),
-                        str(item.get("source_branch") or self.source_branch or ""),
-                        str(item.get("target_branch") or self.target_branch or ""),
+                        item,
+                        self.source_branch or "",
+                        self.target_branch or "",
+                        inherit=True,
                     )
+                elif isinstance(item, dict):
+                    raw_url = str(item.get("url") or item.get("repository_url") or "")
+                    # A follow-up parent's branches belong to the reviewed
+                    # remote. Another repository keeps its own branches.
+                    inherit = (
+                        self.normalize_remote_url(raw_url) == parent_url
+                        and bool(parent_url)
+                    )
+                    own_source = str(item.get("source_branch") or "").strip()
+                    own_target = str(item.get("target_branch") or "").strip()
+                    if inherit:
+                        _add(
+                            raw_url,
+                            own_source or (self.source_branch or ""),
+                            own_target or (self.target_branch or ""),
+                            inherit=True,
+                        )
+                    else:
+                        _add(raw_url, own_source, own_target, inherit=False)
         if len(specs) < 2:
             specs = []
             seen = set()
             for url in self.repository_urls:
-                _add(url, self.source_branch, self.target_branch)
+                _add(
+                    url,
+                    self.source_branch or "",
+                    self.target_branch or "",
+                    inherit=True,
+                )
         return specs
 
     def _repository_identity_parts(self) -> List[tuple]:

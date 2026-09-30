@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProjectRepository, RepositorySet } from '../../api/types'
 import { SavedRepoSearch } from '../../ui/ProjectSelect'
@@ -9,8 +9,6 @@ export type RepoRow = {
   target: string
   sourceMode: 'issue_key' | 'custom'
 }
-
-const CUSTOM_REPO = '__custom__'
 
 export function emptyRepoRow(): RepoRow {
   return { url: '', source: 'develop', target: 'develop', sourceMode: 'issue_key' }
@@ -36,22 +34,66 @@ export function rowsFromRepositorySet(
   })
 }
 
+export function filledRepoRows(rows: RepoRow[]): RepoRow[] {
+  return rows.filter((row) => row.url.trim())
+}
+
+export function appendRepoRows(
+  current: RepoRow[],
+  incoming: RepoRow[],
+): { rows: RepoRow[]; added: number } {
+  const next = filledRepoRows(current)
+  const seen = new Set(next.map((row) => row.url.trim()))
+  let added = 0
+  for (const row of incoming) {
+    const url = row.url.trim()
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    next.push({ ...row, url })
+    added += 1
+  }
+  return { rows: next, added }
+}
+
+export function repoRowTitle(row: RepoRow, projects: ProjectRepository[]): string {
+  const saved = projects.find((project) => project.url === row.url.trim())
+  return (saved?.label || '').trim() || row.url.trim()
+}
+
+export function repoRowBranches(row: RepoRow): string {
+  const source =
+    row.sourceMode === 'custom'
+      ? row.source.trim() || 'custom branch'
+      : 'feature/<issue key>'
+  return `${source} → ${row.target.trim() || 'develop'}`
+}
+
+export function repoDraftProblem(draft: RepoRow, taken: string[]): string | null {
+  const url = draft.url.trim()
+  if (!url) return 'Enter a repository URL'
+  if (taken.includes(url)) return 'That repository is already in the list'
+  if (draft.sourceMode === 'custom' && !draft.source.trim()) return 'Enter a source branch'
+  if (!draft.target.trim()) return 'Enter a target branch'
+  return null
+}
+
 export function scheduleRepositoryFields(rows: RepoRow[]) {
   const clean = rows
     .map((row) => ({
       url: row.url.trim(),
       sourceMode: row.sourceMode,
-      source_branch: row.sourceMode === 'custom' ? row.source.trim() : 'develop',
+      source_branch: row.sourceMode === 'custom' ? row.source.trim() : '',
       target_branch: row.target.trim(),
     }))
     .filter((row) => row.url)
   const first = clean[0]
   const refs =
     clean.length > 1
-      ? clean.map((row, index) => ({
+      ? clean.map((row) => ({
           url: row.url,
-          source_branch: index === 0 && row.sourceMode === 'issue_key' ? '' : row.source_branch,
+          source_branch: row.source_branch,
           target_branch: row.target_branch,
+          source_branch_mode: row.sourceMode,
         }))
       : undefined
   return {
@@ -62,6 +104,10 @@ export function scheduleRepositoryFields(rows: RepoRow[]) {
     repository_refs: refs,
   }
 }
+
+type RepoDialogState =
+  | { mode: 'add'; draft: RepoRow }
+  | { mode: 'edit'; index: number; draft: RepoRow }
 
 export function RepositoryList({
   rows,
@@ -80,23 +126,45 @@ export function RepositoryList({
   rememberRepo?: boolean
   setRememberRepo?: (value: boolean) => void
 }) {
-  const [setName, setSetName] = useState('')
-  const visible = rows.length > 0 ? rows : [emptyRepoRow()]
+  const [notice, setNotice] = useState('')
+  const [dialog, setDialog] = useState<RepoDialogState | null>(null)
+  const addRef = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef<HTMLElement | null>(null)
+  const wasOpen = useRef(false)
+  const listed = filledRepoRows(rows)
+  const titleId = useId()
 
-  const update = (idx: number, patch: Partial<RepoRow>) => {
-    setRows((cur) => {
-      const base = cur.length > 0 ? cur : [emptyRepoRow()]
-      return base.map((row, i) => (i === idx ? { ...row, ...patch } : row))
-    })
+  const closeDialog = () => setDialog(null)
+
+  useEffect(() => {
+    if (!dialog) {
+      if (!wasOpen.current) return
+      wasOpen.current = false
+      const back = returnFocus.current
+      const timer = window.setTimeout(() => back?.focus(), 0)
+      return () => window.clearTimeout(timer)
+    }
+    wasOpen.current = true
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDialog()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [dialog])
+
+  const openAdd = () => {
+    returnFocus.current = addRef.current
+    setNotice('')
+    setDialog({ mode: 'add', draft: emptyRepoRow() })
   }
 
-  const addRow = (row: RepoRow) => {
-    setRows((cur) => {
-      const base = cur.length > 0 ? cur : [emptyRepoRow()]
-      if (base.some((item) => item.url === row.url)) return base
-      if (base.length === 1 && !base[0].url.trim()) return [row]
-      return [...base, row]
-    })
+  const addFromSet = (name: string) => {
+    setNotice('')
+    const picked = sets.find((row) => row.name === name)
+    if (!picked) return
+    const result = appendRepoRows(rows, rowsFromRepositorySet(picked.repositories, projects))
+    setRows(result.rows)
+    if (result.added === 0) setNotice('Those repositories are already in the list.')
   }
 
   return (
@@ -106,58 +174,82 @@ export function RepositoryList({
         <p className="mt-1 text-xs text-text-muted">
           One repository runs as a single repository. Two or more run together,
           and each one keeps its own source and target. develop or main becomes
-          feature/KEY on that repository. The ticket names only the first one.
+          feature/KEY on that repository. The ticket records each repository's source branch.
         </p>
       </div>
-      {sets.length > 0 ? (
-        <label className="field">
-          <span>Repo set</span>
-          <select
-            value={setName}
-            onChange={(e) => {
-              const name = e.target.value
-              setSetName(name)
-              const picked = sets.find((row) => row.name === name)
-              if (!picked) return
-              const next = rowsFromRepositorySet(picked.repositories, projects)
-              if (next.length > 0) setRows(next)
-            }}
-          >
-            <option value="">Select a saved set</option>
-            {sets.map((row) => (
-              <option key={row.name} value={row.name}>
-                {row.name}
-              </option>
-            ))}
-          </select>
-        </label>
+      <label className="field">
+        <span>Add projects from a set</span>
+        <select
+          value=""
+          disabled={sets.length === 0}
+          onChange={(event) => addFromSet(event.target.value)}
+        >
+          <option value="">{sets.length === 0 ? 'No repo sets yet' : 'Select a set'}</option>
+          {sets.map((row) => (
+            <option key={row.name} value={row.name}>
+              {row.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        ref={addRef}
+        type="button"
+        className="vd-btn vd-btn-secondary"
+        onClick={openAdd}
+      >
+        Add repository
+      </button>
+      {notice ? (
+        <p className="text-xs text-text-muted" role="status">
+          {notice}
+        </p>
       ) : null}
-      {visible.map((row, idx) => (
-        <RepositoryRow
-          key={idx}
-          row={row}
-          projects={projects}
-          taken={visible.map((item) => item.url).filter((url) => url && url !== row.url)}
-          canRemove={visible.length > 1}
-          showRemember={showRemember && idx === 0}
-          rememberRepo={rememberRepo}
-          setRememberRepo={setRememberRepo}
-          onChange={(patch) => update(idx, patch)}
-          onRemove={() => setRows((cur) => cur.filter((_, i) => i !== idx))}
-          add={
-            idx === visible.length - 1 ? (
-              <AddRepository
-                projects={projects}
-                used={visible.map((item) => item.url)}
-                onAdd={(url) => {
-                  const saved = projects.find((p) => p.url === url)
-                  addRow(saved ? rowFromProject(saved) : { ...emptyRepoRow(), url })
-                }}
-              />
-            ) : null
-          }
-        />
-      ))}
+      {listed.length === 0 ? (
+        <p className="text-xs text-text-muted">No repositories yet.</p>
+      ) : (
+        <ul className="divide-y divide-border" aria-label="Repositories">
+          {listed.map((row, index) => {
+            const title = repoRowTitle(row, projects)
+            return (
+              <li key={row.url} className="flex items-center justify-between gap-3 py-2">
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-text">{title}</span>
+                  <span className="block truncate text-xs text-text-muted">
+                    {repoRowBranches(row)}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-3">
+                  <button
+                    type="button"
+                    className="vd-btn-ghost inline-flex h-6 w-6 items-center justify-center"
+                    aria-label={`Edit ${title}`}
+                    onClick={(event) => {
+                      returnFocus.current = event.currentTarget
+                      setNotice('')
+                      setDialog({ mode: 'edit', index, draft: { ...row } })
+                    }}
+                  >
+                    <PencilIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="vd-btn-ghost bad inline-flex h-6 w-6 items-center justify-center"
+                    aria-label={`Remove ${title}`}
+                    onClick={() => {
+                      setNotice('')
+                      setRows(listed.filter((_, item) => item !== index))
+                      window.setTimeout(() => addRef.current?.focus(), 0)
+                    }}
+                  >
+                    <TrashIcon />
+                  </button>
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
       <p className="quiet text-xs">
         Saved remotes live in{' '}
         <Link to="/settings/jira" className="text-accent-text hover:underline">
@@ -165,160 +257,219 @@ export function RepositoryList({
         </Link>
         .
       </p>
+      {dialog ? (
+        <RepositoryDialog
+          titleId={titleId}
+          state={dialog}
+          projects={projects}
+          taken={listed
+            .filter((_, index) => dialog.mode === 'add' || index !== dialog.index)
+            .map((row) => row.url.trim())}
+          showRemember={
+            showRemember && (dialog.mode === 'add' ? listed.length === 0 : dialog.index === 0)
+          }
+          rememberRepo={rememberRepo}
+          onClose={closeDialog}
+          onSave={(draft, remember) => {
+            const committed = {
+              ...draft,
+              url: draft.url.trim(),
+              source: draft.source.trim(),
+              target: draft.target.trim(),
+            }
+            if (dialog.mode === 'add') {
+              setRows(appendRepoRows(rows, [committed]).rows)
+            } else {
+              setRows(listed.map((row, index) => (index === dialog.index ? committed : row)))
+            }
+            if (showRemember && setRememberRepo && (dialog.mode === 'add' ? listed.length === 0 : dialog.index === 0)) {
+              setRememberRepo(remember)
+            }
+            closeDialog()
+          }}
+        />
+      ) : null}
     </div>
   )
 }
 
-function RepositoryRow({
-  row,
+function RepositoryDialog({
+  titleId,
+  state,
   projects,
   taken,
-  canRemove,
   showRemember,
   rememberRepo,
-  setRememberRepo,
-  onChange,
-  onRemove,
-  add,
+  onClose,
+  onSave,
 }: {
-  row: RepoRow
+  titleId: string
+  state: RepoDialogState
   projects: ProjectRepository[]
   taken: string[]
-  canRemove: boolean
   showRemember: boolean
   rememberRepo: boolean
-  setRememberRepo?: (value: boolean) => void
-  onChange: (patch: Partial<RepoRow>) => void
-  onRemove: () => void
-  add?: ReactNode
+  onClose: () => void
+  onSave: (draft: RepoRow, remember: boolean) => void
 }) {
-  const known = projects.some((p) => p.url === row.url)
-  const [otherUrl, setOtherUrl] = useState(false)
+  const [draft, setDraft] = useState(state.draft)
+  const [remember, setRemember] = useState(rememberRepo)
+  const urlRef = useRef<HTMLInputElement>(null)
+  const sourceRef = useRef<HTMLSelectElement>(null)
+  const problem = repoDraftProblem(draft, taken)
+  const known = projects.some((project) => project.url === draft.url.trim())
+  const title = state.mode === 'add' ? 'Add repository' : 'Edit repository'
+
   useEffect(() => {
-    if (known) setOtherUrl(false)
-  }, [known])
-  const showUrl = projects.length === 0 || otherUrl || (!known && Boolean(row.url))
+    if (state.mode === 'add' && projects.length > 0) return
+    const node = state.mode === 'edit' ? sourceRef.current : urlRef.current
+    node?.focus()
+  }, [projects.length, state.mode])
+
+  const save = () => {
+    if (problem) return
+    onSave(draft, remember)
+  }
+
   return (
-    <div className="space-y-2">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          {projects.length > 0 ? (
-            <SavedRepoSearch
-              label="Repository"
-              projects={projects}
-              exclude={taken}
-              selectedUrl={known ? row.url : ''}
-              trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
-              onPick={(url) => {
-                if (url === CUSTOM_REPO) {
-                  setOtherUrl(true)
-                  onChange({ url: '' })
-                  return
-                }
-                setOtherUrl(false)
-                const saved = projects.find((p) => p.url === url)
-                if (saved) onChange(rowFromProject(saved))
-              }}
-            />
-          ) : null}
-          {showUrl ? (
-            <label className="field">
-              {projects.length === 0 ? <span>Repository</span> : <span>Git URL</span>}
-              <input
-                value={row.url}
-                onChange={(e) => onChange({ url: e.target.value })}
-                placeholder="https://gitlab.com/group/repo.git"
-                required
-              />
-            </label>
-          ) : null}
-        </div>
-        {canRemove ? (
-          <button type="button" className="vd-btn-ghost mt-6 text-danger-text" onClick={onRemove}>
-            Remove
-          </button>
-        ) : null}
-      </div>
-      {showRemember && setRememberRepo && row.url && !known ? (
-        <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <input
-            type="checkbox"
-            checked={rememberRepo}
-            onChange={(e) => setRememberRepo(e.target.checked)}
-          />
-          <span style={{ margin: 0 }}>Remember this project</span>
-        </label>
-      ) : null}
-      <label className="field">
-        <span>Source</span>
-        <select
-          value={row.sourceMode}
-          onChange={(e) =>
-            onChange({ sourceMode: e.target.value === 'custom' ? 'custom' : 'issue_key' })
+    <div
+      className="vd-modal-backdrop"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="vd-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter') return
+          event.preventDefault()
+          event.stopPropagation()
+          const target = event.target
+          if (target instanceof HTMLInputElement && target.getAttribute('role') === 'combobox') {
+            return
           }
-        >
-          <option value="issue_key">feature/&lt;issue key&gt;</option>
-          <option value="custom">custom branch</option>
-        </select>
-      </label>
-      {row.sourceMode === 'custom' ? (
+          save()
+        }}
+      >
+        <h3 id={titleId} className="vd-modal-title">
+          {title}
+        </h3>
+        {projects.length > 0 ? (
+          <SavedRepoSearch
+            label="Saved repository"
+            projects={projects}
+            exclude={taken}
+            selectedUrl={known ? draft.url.trim() : ''}
+            autoFocus={state.mode === 'add'}
+            onPick={(url) => {
+              const saved = projects.find((project) => project.url === url)
+              if (!saved) return
+              setDraft(rowFromProject(saved))
+            }}
+          />
+        ) : null}
         <label className="field">
-          <span>Branch</span>
+          <span>Repository URL</span>
           <input
-            value={row.source}
-            onChange={(e) => onChange({ source: e.target.value })}
+            ref={urlRef}
+            value={draft.url}
+            spellCheck={false}
+            placeholder="https://gitlab.com/group/repo.git"
+            aria-invalid={problem === 'That repository is already in the list'}
+            onChange={(event) => setDraft({ ...draft, url: event.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>Source branch</span>
+          <select
+            ref={sourceRef}
+            value={draft.sourceMode}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                sourceMode: event.target.value === 'custom' ? 'custom' : 'issue_key',
+              })
+            }
+          >
+            <option value="issue_key">feature/&lt;issue key&gt;</option>
+            <option value="custom">Custom branch</option>
+          </select>
+        </label>
+        {draft.sourceMode === 'custom' ? (
+          <label className="field">
+            <span>Branch name</span>
+            <input
+              value={draft.source}
+              spellCheck={false}
+              onChange={(event) => setDraft({ ...draft, source: event.target.value })}
+              required
+            />
+          </label>
+        ) : null}
+        <label className="field">
+          <span>Target branch</span>
+          <input
+            value={draft.target}
+            spellCheck={false}
+            onChange={(event) => setDraft({ ...draft, target: event.target.value })}
             required
           />
         </label>
-      ) : null}
-      <label className="field">
-        <span>Target</span>
-        <input value={row.target} onChange={(e) => onChange({ target: e.target.value })} required />
-      </label>
-      {add}
+        {showRemember && draft.url.trim() && !known ? (
+          <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(event) => setRemember(event.target.checked)}
+            />
+            <span style={{ margin: 0 }}>Remember this project</span>
+          </label>
+        ) : null}
+        {problem && draft.url.trim() ? (
+          <p className="text-xs text-danger-text" role="alert">
+            {problem}
+          </p>
+        ) : null}
+        <div className="vd-modal-actions">
+          <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="vd-btn vd-btn-primary" disabled={Boolean(problem)} onClick={save}>
+            {state.mode === 'add' ? 'Add' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
 
-function AddRepository({
-  projects,
-  used,
-  onAdd,
-}: {
-  projects: ProjectRepository[]
-  used: string[]
-  onAdd: (url: string) => void
-}) {
-  const [addRepoUrl, setAddRepoUrl] = useState('')
+function PencilIcon() {
   return (
-    <div className="mt-3 space-y-2">
-      {projects.some((project) => project.url) ? (
-        <SavedRepoSearch
-          label="Add a repository"
-          projects={projects}
-          exclude={used}
-          onPick={onAdd}
-        />
-      ) : null}
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          value={addRepoUrl}
-          onChange={(e) => setAddRepoUrl(e.target.value)}
-          placeholder="https://gitlab.example.com/group/repo.git"
-          className="min-w-[16rem] flex-1"
-        />
-        <button
-          type="button"
-          className="vd-btn vd-btn-secondary"
-          disabled={!addRepoUrl.trim()}
-          onClick={() => {
-            onAdd(addRepoUrl.trim())
-            setAddRepoUrl('')
-          }}
-        >
-          Add URL
-        </button>
-      </div>
-    </div>
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
+      <path
+        d="M9.2 2.8l4 4M2.5 13.5l.7-3.2 7.2-7.2a1.2 1.2 0 0 1 1.7 0l.8.8a1.2 1.2 0 0 1 0 1.7l-7.2 7.2-3.2.7z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
+      <path
+        d="M3.2 4.5h9.6M6.4 4.5V3.4a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.1M4.6 4.5l.55 8a1 1 0 0 0 1 .9h3.7a1 1 0 0 0 1-.9l.55-8"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   )
 }

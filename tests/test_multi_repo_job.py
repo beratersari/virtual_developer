@@ -180,6 +180,284 @@ def test_schedule_keeps_a_branch_for_each_repository(tmp_path):
     assert refs[0]["url"].endswith("/api.git")
 
 
+def _latest_jira_description(client) -> str:
+    if client.update_issue.called:
+        fields = client.update_issue.call_args.kwargs.get("fields") or {}
+        return str(fields.get("description") or "")
+    return str(client.create_issue.call_args.kwargs.get("description") or "")
+
+
+def test_issue_key_source_is_feature_key_on_every_repository(tmp_path):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-22"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Both from the issue",
+        description="add the field",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds"),
+        project_key="KAN",
+        source_branch_mode="issue_key",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "",
+                "target_branch": "develop",
+                "source_branch_mode": "issue_key",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "develop",
+                "target_branch": "main",
+                "source_branch_mode": "issue_key",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert [row["source_branch"] for row in refs] == [
+        "feature/KAN-22",
+        "feature/KAN-22",
+    ]
+    assert refs[1]["target_branch"] == "main"
+    text = _latest_jira_description(client)
+    assert text.count("Source branch: feature/KAN-22") == 2
+    assert "Source branch: develop" not in text
+
+
+def test_mixed_custom_and_issue_key_sources_stay_on_their_repositories(tmp_path):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-23"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Mixed sources",
+        description="add the field",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="release",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds"),
+        project_key="KAN",
+        source_branch_mode="custom",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "release",
+                "target_branch": "develop",
+                "source_branch_mode": "custom",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "develop",
+                "target_branch": "main",
+                "source_branch_mode": "from_issue",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert refs[0]["source_branch"] == "release"
+    assert refs[1]["source_branch"] == "feature/KAN-23"
+    assert refs[1]["target_branch"] == "main"
+    text = _latest_jira_description(client)
+    assert "Source branch: release" in text
+    assert "Source branch: feature/KAN-23" in text
+    assert "Source branch: develop" not in text
+    assert out["schedule"]["issue_description"] == text
+
+
+def test_issue_key_then_custom_keeps_each_repository_source(tmp_path):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-24"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Issue key then custom",
+        description="add the field",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds"),
+        project_key="KAN",
+        source_branch_mode="issue_key",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "develop",
+                "target_branch": "develop",
+                "source_branch_mode": "issue_key",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "hotfix",
+                "target_branch": "main",
+                "source_branch_mode": "custom",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert refs[0]["source_branch"] == "feature/KAN-24"
+    assert refs[1]["source_branch"] == "hotfix"
+    text = _latest_jira_description(client)
+    assert "Source branch: feature/KAN-24" in text
+    assert "Source branch: hotfix" in text
+    assert "Source branch: develop" not in text
+
+
+def test_existing_issue_records_issue_key_source_for_every_repository(tmp_path):
+    from src.scheduler.service import schedule_existing_issue
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = {
+        "key": "KAN-5",
+        "fields": {
+            "summary": "Existing",
+            "description": "plain prompt",
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Task"},
+            "labels": [],
+        },
+    }
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    out = schedule_existing_issue(
+        "KAN-5",
+        scheduled_at="2026-12-01T10:00:00",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="release",
+        target_branch="develop",
+        mode="build",
+        source_branch_mode="custom",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "release",
+                "target_branch": "develop",
+                "source_branch_mode": "custom",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "develop",
+                "target_branch": "main",
+                "source_branch_mode": "issue_key",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert refs[0]["source_branch"] == "release"
+    assert refs[1]["source_branch"] == "feature/KAN-5"
+    text = out["schedule"]["issue_description"]
+    assert "Source branch: release" in text
+    assert "Source branch: feature/KAN-5" in text
+    assert "Source branch: develop" not in text
+
+
+def test_azure_issue_key_source_is_feature_key_on_every_repository(tmp_path, monkeypatch):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    updates: list = []
+
+    def _create(self, project, wtype, fields):
+        return {"id": 99, "rev": 1, "fields": {"System.Title": "Both"}}
+
+    def _update(self, project, iid, fields):
+        updates.append(dict(fields))
+        return {"ok": True}
+
+    monkeypatch.setattr("src.azure.client.AzureDevOpsClient.create_work_item", _create)
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.update_work_item_fields", _update
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
+        lambda *a, **k: True,
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+        lambda *a, **k: True,
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.fetch_pat_myself",
+        lambda **_k: {
+            "name": "CORP\\Yaver",
+            "uniqueName": "CORP\\Yaver",
+            "displayName": "Yaver Bot",
+            "key": "guid-1",
+            "names": ["Yaver Bot", "CORP\\Yaver"],
+        },
+    )
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    out = create_scheduled_job(
+        title="Azure both",
+        description="add the field",
+        repository_url="https://tfs.example.com/tfs/DefaultCollection/Demo/_git/api",
+        source_branch="release",
+        target_branch="develop",
+        mode="build",
+        scheduled_at="2099-01-01T10:00:00",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        azure_project="Demo",
+        source_branch_mode="custom",
+        repository_refs=[
+            {
+                "url": "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/api",
+                "source_branch": "release",
+                "target_branch": "develop",
+                "source_branch_mode": "custom",
+            },
+            {
+                "url": "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/web",
+                "source_branch": "develop",
+                "target_branch": "main",
+                "source_branch_mode": "issue_key",
+            },
+        ],
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert refs[0]["source_branch"] == "release"
+    assert refs[1]["source_branch"] == "feature/WIT-DEMO-99"
+    text = out["schedule"]["issue_description"]
+    assert "Source branch: release" in text
+    assert "Source branch: feature/WIT-DEMO-99" in text
+    assert "Source branch: develop" not in text
+    assert updates
+    assert "feature/WIT-DEMO-99" in str(updates[-1])
+
+
 def test_existing_issue_schedule_keeps_each_repository_branch(tmp_path):
     from src.scheduler.service import schedule_existing_issue
     from src.state.schedule_store import ScheduleStore

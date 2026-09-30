@@ -862,7 +862,12 @@ export function scheduleExistingIssue(body: {
   target_branch?: string
   mode?: string
   source_branch_mode?: 'custom' | 'issue_key'
-  repository_refs?: { url: string; source_branch: string; target_branch: string }[]
+  repository_refs?: {
+    url: string
+    source_branch: string
+    target_branch: string
+    source_branch_mode?: 'custom' | 'issue_key'
+  }[]
 }) {
   const payload: Record<string, unknown> = {
     issue_key: body.issue_key,

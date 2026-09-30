@@ -2529,6 +2529,30 @@ async def test_compact_loop_aborts_then_continues_same_session():
 
 
 @pytest.mark.asyncio
+async def test_plan_compact_loop_continue_stays_on_the_plan_file():
+    """A plan compact loop must not be told to implement or deliver a branch."""
+    from src.opencode_serve import DEFAULT_PLAN_COMPACT_LOOP_CONTINUE_PROMPT
+
+    backend = _CompactLoopBackend()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=5.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+        compact_loop_cycles=3,
+    )
+    result = await orch.run(
+        prompt="Write the plan file only.",
+        title="KAN-PLAN-LOOP",
+        agent="derman-plan",
+    )
+    assert result.returncode == 0, result.stderr
+    assert backend.prompts[1] == DEFAULT_PLAN_COMPACT_LOOP_CONTINUE_PROMPT
+    assert "resume implementation" not in backend.prompts[1].lower()
+    assert DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT not in backend.prompts
+
+
+@pytest.mark.asyncio
 async def test_compact_loop_again_after_continue_is_incomplete():
     """One same-session Continue only. A second loop fails (last resort)."""
     backend = _CompactLoopBackend(keep_looping_after_abort=True)

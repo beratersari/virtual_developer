@@ -161,6 +161,7 @@ class ScheduleCreateRequest(BaseModel):
     # Extra clones for this dashboard job only. The Jira description stays one repo.
     repository_urls: List[str] = Field(default_factory=list, max_length=12)
     # Per-repository source and target. Omitted branches copy the job branches.
+    # source_branch_mode "issue_key" on a row is stored as feature/{KEY}.
     repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
@@ -205,6 +206,7 @@ class ScheduleExistingRequest(BaseModel):
     mode: str = ""
     source_branch_mode: str = ""
     repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    # source_branch_mode "issue_key" on a row is stored as feature/{KEY}.
     repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 

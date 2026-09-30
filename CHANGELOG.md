@@ -8,6 +8,25 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.66] — 2026-09-30
+
+A follow-up on one repository of a multi-repo job keeps every repository on its own branch. Each schedule row can use the issue key, and a resumed chat keeps the new instruction.
+
+### Added
+
+- Schedule repositories are a list. The pencil edits one row, the trash icon removes it, and adding a repo set appends to the repositories already on the form.
+
+### Fixed
+
+- Schedule dispatch keeps each repository's source and target. A follow-up on a later merge request or pull request prepares the other repositories on their own branches, in the same shared folder.
+- A job that already stored a blank first row fills those branches from the issue description on the next follow-up.
+- A GitLab or Azure follow-up names the reviewed repository's branch in the prompt and records that branch. The prompt lists each clone.
+- A repository marked with the issue key gets `feature/{KEY}` on every repository, including ones after the first. This applies to new tickets, existing tickets, and Azure work items.
+- A plan timeout or compact continue keeps the plan instruction.
+- A plan revise, a review comment, a test run, and a merge-request follow-up keep that instruction when Codex or Claude Code resumes the chat. A second run of the same build still uses the short continue line.
+
+[0.9.66]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.66
+
 ## [0.9.65] — 2026-09-29
 
 A review comment on a multi-repo job delivers only that repository. Settings can search and delete saved projects, and Analytics uses the width of the page.

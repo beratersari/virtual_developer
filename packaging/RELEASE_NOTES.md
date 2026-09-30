@@ -1,3 +1,11 @@
+# Yaver 0.9.66
+
+A follow-up on one repository of a multi-repo job keeps every repository on its own branch, in the same shared folder. Scheduling the job stores each repository's source and target. A job that already saved the first repository with empty branches fills those branches from the ticket description the next time you comment on a review. The prompt names the branch of the merge request or pull request you commented on, and it lists each clone with that clone's own work branch and target.
+
+On a schedule, repositories are a list. The pencil edits one repository, the trash icon removes it, and adding a repo set appends those repositories to the ones already on the form. A repository set to the issue key uses feature/{KEY} on every repository, including the later ones.
+
+A plan job that hits a timeout or a compact continue stays on the plan. Revising a plan, commenting on a review, running tests, or following up a merge request keeps that new instruction when the chat resumes on Codex or Claude Code. A second run of the same build still uses the short continue line.
+
 # Yaver 0.9.65
 
 A follow-up comment on one merge request or pull request of a multi-repo job pushes only that repository and reuses that review. The other repositories stay local. A push of the shared folder fails, because that folder is not a git repository. A later run that names one repository drops the previous set, including when a schedule sends an empty list while the ticket text still names the old pair. A description that does not parse, and that does not send a repository list, leaves the stored set in place.

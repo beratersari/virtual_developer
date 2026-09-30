@@ -145,6 +145,47 @@ def work_branch_for_issue_key(issue_key: str) -> str:
     return f"feature/{safe}"
 
 
+def _ref_source_mode(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    key = str(raw.get("source_branch_mode") or "").strip().lower().replace("-", "_")
+    if key in ("issue", "jira", "jira_key", "from_issue", "new_issue"):
+        key = _SOURCE_MODE_ISSUE_KEY
+    if key in _SOURCE_MODES:
+        return key
+    return ""
+
+
+def refs_with_issue_key_branches(refs: Optional[list], branch: str) -> Optional[list]:
+    """Copy refs. A row marked ``issue_key`` takes ``branch`` as its source.
+
+    An empty source later copies the first repository's source. A later
+    feature/KEY choice has to be written here, or a custom first row
+    would be copied onto it.
+    """
+    if not isinstance(refs, list):
+        return refs
+    named = (branch or "").strip()
+    if not named:
+        return refs
+    out: list = []
+    for raw in refs:
+        if not isinstance(raw, dict):
+            out.append(raw)
+            continue
+        row = dict(raw)
+        if _ref_source_mode(row) == _SOURCE_MODE_ISSUE_KEY:
+            row["source_branch"] = named
+        out.append(row)
+    return out
+
+
+def _any_issue_key_ref(refs: Optional[list]) -> bool:
+    if not isinstance(refs, list):
+        return False
+    return any(_ref_source_mode(row) == _SOURCE_MODE_ISSUE_KEY for row in refs)
+
+
 def _canonical_source_branch_mode(raw: Optional[str]) -> str:
     key = (raw or _SOURCE_MODE_CUSTOM).strip().lower().replace("-", "_")
     if key in ("issue", "jira", "jira_key", "from_issue", "new_issue"):
@@ -604,6 +645,12 @@ def schedule_existing_issue(
         if not mode_c:
             mode_c = preview.get("mode") or "build"
 
+        ref_input = repository_refs if repository_refs else repository_urls
+        if _any_issue_key_ref(ref_input):
+            ref_input = refs_with_issue_key_branches(
+                ref_input, work_branch_for_issue_key(key)
+            )
+
         operator_desc = (description or "").strip()
         live_desc = preview.get("description") or ""
         if picker_used:
@@ -635,7 +682,7 @@ def schedule_existing_issue(
                 source_branch=src,
                 target_branch=tgt,
                 mode=mode_c,
-                repository_refs=repository_refs or repository_urls,
+                repository_refs=ref_input,
             ):
                 desc = live_desc
                 if mid:
@@ -651,7 +698,7 @@ def schedule_existing_issue(
                     mode=mode_c,
                     model=mid,
                     backend=bid,
-                    repository_refs=repository_refs or repository_urls,
+                    repository_refs=ref_input,
                 )
         else:
             desc = operator_desc or live_desc
@@ -750,7 +797,6 @@ def schedule_existing_issue(
 
         from src.dashboard.repo_sets import normalize_repository_refs
 
-        ref_input = repository_refs if repository_refs else repository_urls
         repo_refs = normalize_repository_refs(repo, src, tgt, ref_input)
         if repo_refs:
             repo_refs[0]["source_branch"] = src
@@ -1201,6 +1247,11 @@ def _create_scheduled_azure_work_item(
     src = source_branch
     if source_branch_mode == _SOURCE_MODE_ISSUE_KEY:
         src = "feature/__pending__"
+    described_refs = repository_refs if repository_refs else repository_urls
+    if _any_issue_key_ref(described_refs):
+        described_refs = refs_with_issue_key_branches(
+            described_refs, "feature/__pending__"
+        )
     issue_description = build_issue_description(
         description=description,
         repository_url=repository_url,
@@ -1209,7 +1260,7 @@ def _create_scheduled_azure_work_item(
         mode=mode,
         model=model,
         backend=backend,
-        repository_refs=repository_refs or repository_urls,
+        repository_refs=described_refs,
     )
     from src.azure.comment_html import work_item_description_html
 
@@ -1252,8 +1303,15 @@ def _create_scheduled_azure_work_item(
     except (TypeError, ValueError):
         return {"ok": False, "error": "Azure created a work item without a numeric id"}
     issue_key = azure_work_item_key(project, iid)
-    if source_branch_mode == _SOURCE_MODE_ISSUE_KEY:
-        src = work_branch_for_issue_key(issue_key)
+    if source_branch_mode == _SOURCE_MODE_ISSUE_KEY or _any_issue_key_ref(
+        repository_refs
+    ):
+        if source_branch_mode == _SOURCE_MODE_ISSUE_KEY:
+            src = work_branch_for_issue_key(issue_key)
+        if _any_issue_key_ref(repository_refs):
+            described_refs = refs_with_issue_key_branches(
+                repository_refs, work_branch_for_issue_key(issue_key)
+            )
         issue_description = build_issue_description(
             description=description,
             repository_url=repository_url,
@@ -1262,7 +1320,7 @@ def _create_scheduled_azure_work_item(
             mode=mode,
             model=model,
             backend=backend,
-            repository_refs=repository_refs or repository_urls,
+            repository_refs=described_refs,
         )
         ado.update_work_item_fields(
             project,
@@ -1309,9 +1367,8 @@ def _create_scheduled_azure_work_item(
         }
     from src.dashboard.repo_sets import normalize_repository_refs
 
-    ref_input = repository_refs if repository_refs else repository_urls
     repo_refs = normalize_repository_refs(
-        repository_url, src, target_branch, ref_input
+        repository_url, src, target_branch, described_refs
     )
     if repo_refs:
         repo_refs[0]["source_branch"] = src
@@ -1457,6 +1514,12 @@ def create_scheduled_job(
             repository_refs=repo_refs_input,
         )
 
+    described_refs = repo_refs_input
+    if _any_issue_key_ref(described_refs):
+        described_refs = refs_with_issue_key_branches(
+            described_refs, "feature/__pending__"
+        )
+
     project = (project_key or "").strip() or (
         settings.jira_projects_list[0] if settings.jira_projects_list else ""
     )
@@ -1470,7 +1533,7 @@ def create_scheduled_job(
         mode=mode_c,
         model=mid,
         backend=bid,
-        repository_refs=repo_refs_input,
+        repository_refs=described_refs,
     )
 
     client = jira_client
@@ -1502,8 +1565,13 @@ def create_scheduled_job(
             }
         issue_key = str(created["key"]).strip().upper()
 
-        if src_mode == _SOURCE_MODE_ISSUE_KEY:
-            src = work_branch_for_issue_key(issue_key)
+        if src_mode == _SOURCE_MODE_ISSUE_KEY or _any_issue_key_ref(repo_refs_input):
+            if src_mode == _SOURCE_MODE_ISSUE_KEY:
+                src = work_branch_for_issue_key(issue_key)
+            if _any_issue_key_ref(repo_refs_input):
+                described_refs = refs_with_issue_key_branches(
+                    repo_refs_input, work_branch_for_issue_key(issue_key)
+                )
             issue_description = build_issue_description(
                 description=description,
                 repository_url=repo,
@@ -1512,7 +1580,7 @@ def create_scheduled_job(
                 mode=mode_c,
                 model=mid,
                 backend=bid,
-                repository_refs=repo_refs_input,
+                repository_refs=described_refs,
             )
             # Soft: rewrite description so agents see feature/KEY (not __pending__)
             try:
@@ -1521,10 +1589,16 @@ def create_scheduled_job(
                         issue_key, fields={"description": issue_description}
                     )
                     if ok_upd:
-                        logger.info(
-                            f"{issue_key}: source branch set to {src} "
-                            f"(source_branch_mode=issue_key)"
-                        )
+                        if src_mode == _SOURCE_MODE_ISSUE_KEY:
+                            logger.info(
+                                f"{issue_key}: source branch set to {src} "
+                                f"(source_branch_mode=issue_key)"
+                            )
+                        else:
+                            logger.info(
+                                f"{issue_key}: repository source set to "
+                                f"{work_branch_for_issue_key(issue_key)}"
+                            )
                     else:
                         logger.warning(
                             f"{issue_key}: could not update description with "
@@ -1562,7 +1636,7 @@ def create_scheduled_job(
 
         from src.dashboard.repo_sets import normalize_repository_refs
 
-        repo_refs = normalize_repository_refs(repo, src, tgt, repo_refs_input)
+        repo_refs = normalize_repository_refs(repo, src, tgt, described_refs)
         if repo_refs:
             repo_refs[0]["source_branch"] = src
             repo_refs[0]["target_branch"] = tgt
