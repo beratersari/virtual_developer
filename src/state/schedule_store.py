@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
 from datetime import datetime
@@ -41,10 +40,11 @@ def _as_local_aware(dt: datetime) -> datetime:
 
 
 class ScheduleStore:
-    """File-backed store of scheduled agent jobs (one JSON per schedule).
+    """Scheduled agent jobs stored in yaver.sqlite.
 
-    ``schedules.sqlite`` next to the folder is the list/count/due index.
-    JSON remains the full record; ``get`` always reads it.
+    ``get`` reads the document column. Leftover ``sched_*.json`` is imported
+    once by ``ensure_index``, then deleted. A failed write does not fall
+    back to a JSON file.
     """
 
     def __init__(self, schedules_dir: Optional[Path] = None) -> None:
@@ -53,17 +53,19 @@ class ScheduleStore:
         self._lock = threading.RLock()
         self._index = None
         self._index_ready = False
-        self._index_stale = False
         try:
             from src.state.schedule_index import ScheduleIndex, default_index_path
 
             self._index = ScheduleIndex(default_index_path(self.schedules_dir))
         except Exception as e:
-            logger.warning(f"Schedule SQLite index unavailable: {e}")
+            logger.warning(f"Schedule database unavailable: {e}")
             self._index = None
 
     def ensure_index(self) -> int:
-        """Create/open schedules.sqlite and insert JSON files not yet indexed."""
+        """Import leftover schedule JSON once. Later calls do not scan.
+
+        A failed import leaves the flag unset so the next call can retry.
+        """
         if self._index is None:
             return 0
         with self._lock:
@@ -72,13 +74,11 @@ class ScheduleStore:
             try:
                 n = self._index.reconcile(self.schedules_dir)
             except Exception as e:
-                logger.warning(f"Schedule index backfill failed: {e}")
-                self._index_stale = True
+                logger.warning(f"Schedule import failed: {e}")
                 return 0
-            self._index_stale = False
             self._index_ready = True
             if n:
-                logger.info(f"Schedule index backfilled {n} schedule(s) from JSON")
+                logger.info(f"Imported {n} schedule(s) into yaver.sqlite")
             return n
 
     def _path(self, schedule_id: str) -> Path:
@@ -86,23 +86,11 @@ class ScheduleStore:
         return self.schedules_dir / f"{safe}.json"
 
     def _write(self, rec: Dict[str, Any]) -> None:
-        sid = rec["schedule_id"]
-        path = self._path(sid)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, indent=2, ensure_ascii=False)
-        tmp.replace(path)
-        if self._index is not None:
-            try:
-                self._index.upsert(rec)
-            except Exception as e:
-                self._index_stale = True
-                logger.warning(
-                    f"Schedule index upsert failed for {rec.get('schedule_id')}: {e}"
-                )
-
-    def _index_ok(self) -> bool:
-        return self._index is not None and not self._index_stale
+        if self._index is None:
+            raise RuntimeError(
+                f"schedule database unavailable for {rec.get('schedule_id')}"
+            )
+        self._index.upsert(rec)
 
     def create(
         self,
@@ -195,12 +183,12 @@ class ScheduleStore:
         return rec
 
     def get(self, schedule_id: str) -> Optional[Dict[str, Any]]:
-        path = self._path((schedule_id or "").strip())
-        if not path.is_file():
+        sid = (schedule_id or "").strip()
+        if not sid or self._index is None:
             return None
+        self.ensure_index()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return self._index.get(sid)
         except Exception as e:
             logger.error(f"Error loading schedule {schedule_id}: {e}")
             return None
@@ -239,7 +227,11 @@ class ScheduleStore:
                     continue
                 rec[key] = value
             rec["updated_at"] = _now_iso()
-            self._write(rec)
+            try:
+                self._write(rec)
+            except Exception as e:
+                logger.error(f"Error saving schedule {schedule_id}: {e}")
+                return None
             return rec
 
     def claim_due(self, schedule_id: str) -> Optional[Dict[str, Any]]:
@@ -250,7 +242,11 @@ class ScheduleStore:
                 return None
             rec["status"] = "dispatching"
             rec["updated_at"] = _now_iso()
-            self._write(rec)
+            try:
+                self._write(rec)
+            except Exception as e:
+                logger.error(f"Error saving schedule {schedule_id}: {e}")
+                return None
             return rec
 
     def claim_for_dispatch(self, schedule_id: str) -> Optional[Dict[str, Any]]:
@@ -264,7 +260,11 @@ class ScheduleStore:
             rec["status"] = "dispatching"
             rec["error_message"] = None
             rec["updated_at"] = _now_iso()
-            self._write(rec)
+            try:
+                self._write(rec)
+            except Exception as e:
+                logger.error(f"Error saving schedule {schedule_id}: {e}")
+                return None
             return rec
 
     def recover_stuck_dispatching(
@@ -295,22 +295,15 @@ class ScheduleStore:
         }
         recovered = 0
         self.ensure_index()
-        paths = None
-        if self._index_ok():
-            try:
-                paths = [self._path(sid) for sid in self._index.ids_with_status("dispatching")]
-            except Exception as e:
-                logger.warning(f"Schedule index dispatching lookup failed: {e}")
-                paths = None
-        if paths is None:
-            paths = list(self.schedules_dir.glob("sched_*.json"))
+        if self._index is None:
+            return 0
+        try:
+            rows = self._index.records_with_status("dispatching")
+        except Exception as e:
+            logger.warning(f"Schedule dispatching lookup failed: {e}")
+            return 0
         with self._lock:
-            for path in paths:
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
+            for rec in rows:
                 if (rec.get("status") or "").lower() != "dispatching":
                     continue
                 sid = rec.get("schedule_id") or ""
@@ -356,63 +349,24 @@ class ScheduleStore:
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         self.ensure_index()
-        if self._index_ok():
-            try:
-                ids = self._index.list_ids(status=status, limit=limit, offset=offset)
-                items: List[Dict[str, Any]] = []
-                for sid in ids:
-                    rec = self.get(sid)
-                    if rec is None:
-                        continue
-                    if status and (rec.get("status") or "") != status:
-                        continue
-                    items.append(rec)
-                return items
-            except Exception as e:
-                logger.warning(f"Schedule index list failed: {e}")
-        items = []
-        cap = None if limit is None else max(0, int(limit))
-        start = max(0, int(offset or 0))
-        with self._lock:
-            for path in self.schedules_dir.glob("sched_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if status and (rec.get("status") or "") != status:
-                    continue
-                items.append(rec)
-        # Newest scheduled_at first (list UI). Slice after sort so an older
-        # waiting row is not dropped behind newer dispatched files.
-        items.sort(
-            key=lambda r: r.get("scheduled_at") or r.get("created_at") or "",
-            reverse=True,
-        )
-        if cap is None:
-            return items[start:]
-        return items[start : start + cap]
+        if self._index is None:
+            return []
+        try:
+            return self._index.list_records(status=status, limit=limit, offset=offset)
+        except Exception as e:
+            logger.warning(f"Schedule list failed: {e}")
+            return []
 
     def count_schedules(self, *, status: Optional[str] = None) -> int:
         """How many schedules match *status* (all rows when unset)."""
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.count(status=status)
-            except Exception as e:
-                logger.warning(f"Schedule index count failed: {e}")
-        n = 0
-        with self._lock:
-            for path in self.schedules_dir.glob("sched_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if status and (rec.get("status") or "") != status:
-                    continue
-                n += 1
-        return n
+        if self._index is None:
+            return 0
+        try:
+            return self._index.count(status=status)
+        except Exception as e:
+            logger.warning(f"Schedule count failed: {e}")
+            return 0
 
     def has_open_for_issue(
         self,
@@ -428,23 +382,13 @@ class ScheduleStore:
         if not want:
             return False
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.has_issue_status(key, want)
-            except Exception as e:
-                logger.warning(f"Schedule index issue lookup failed: {e}")
-        with self._lock:
-            for path in self.schedules_dir.glob("sched_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if (rec.get("status") or "").strip().lower() not in want:
-                    continue
-                if (rec.get("issue_key") or "").strip().upper() == key:
-                    return True
-        return False
+        if self._index is None:
+            return False
+        try:
+            return self._index.has_issue_status(key, want)
+        except Exception as e:
+            logger.warning(f"Schedule issue lookup failed: {e}")
+            return False
 
     def list_due(self, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Return schedules with status=scheduled and scheduled_at <= now."""

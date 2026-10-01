@@ -20,16 +20,61 @@ function mrStateLabel(state?: string | null): string {
   return raw
 }
 
-function mrShortLabel(url: string): string {
+function reviewRepoName(url: string): string {
+  const gl = /\/([^/?#]+)\/-\/merge_requests\/\d+/i.exec(url)
+  if (gl) return gl[1]
+  const az = /\/_git\/([^/?#]+)\/pullrequest\/\d+/i.exec(url)
+  if (az) return az[1]
+  return ''
+}
+
+function mrShortLabel(url: string, withRepo = false): string {
   const gl = /\/merge_requests\/(\d+)/i.exec(url)
-  if (gl) return `!${gl[1]}`
   const az = /\/pullrequest\/(\d+)/i.exec(url)
-  if (az) return `!${az[1]}`
-  return 'MR'
+  const n = gl?.[1] || az?.[1]
+  if (!n) return 'MR'
+  if (!withRepo) return `!${n}`
+  const repo = reviewRepoName(url)
+  return repo ? `${repo} !${n}` : `!${n}`
+}
+
+function folderReviews(folder: StorageFolder): { url: string; state?: string | null }[] {
+  const listed = (folder.merge_requests || [])
+    .map((row) => ({ url: (row.url || '').trim(), state: row.state }))
+    .filter((row) => row.url)
+  if (listed.length) return listed
+  const url = (folder.merge_request_url || '').trim()
+  if (!url) return []
+  return [{ url, state: folder.merge_request_state }]
 }
 
 function hasLinkedReview(folder: StorageFolder): boolean {
-  return Boolean((folder.merge_request_url || '').trim())
+  return folderReviews(folder).length > 0
+}
+
+function ReviewLinks({ folder }: { folder: StorageFolder }) {
+  const reviews = folderReviews(folder)
+  if (!reviews.length) return null
+  const withRepo = reviews.length > 1
+  return (
+    <>
+      {reviews.map((review) => (
+        <span key={review.url} className="inline-flex items-baseline gap-1">
+          <a
+            href={review.url}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-xs text-accent-text hover:underline"
+          >
+            {mrShortLabel(review.url, withRepo)}
+          </a>
+          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+            {mrStateLabel(review.state)}
+          </span>
+        </span>
+      ))}
+    </>
+  )
 }
 
 function folderLabel(folder: StorageFolder): string {
@@ -74,6 +119,7 @@ function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]):
       job_id: null,
       merge_request_url: null,
       merge_request_state: null,
+      merge_requests: [],
       delete: { status: job.status, percent: job.percent, error: job.error },
     })
   }
@@ -143,21 +189,7 @@ function StorageList({
                       {folder.summary ? (
                         <span className="min-w-0 truncate text-sm text-text">{folder.summary}</span>
                       ) : null}
-                      {folder.merge_request_url ? (
-                        <>
-                          <a
-                            href={folder.merge_request_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="font-mono text-xs text-accent-text hover:underline"
-                          >
-                            {mrShortLabel(folder.merge_request_url)}
-                          </a>
-                          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-                            {mrStateLabel(folder.merge_request_state)}
-                          </span>
-                        </>
-                      ) : null}
+                      <ReviewLinks folder={folder} />
                     </div>
                     <div className="truncate font-mono text-[11px] text-text-muted">
                       {folder.name}
@@ -166,21 +198,7 @@ function StorageList({
                 ) : (
                   <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
                     <span className="font-mono text-sm font-semibold text-text">{folder.name}</span>
-                    {folder.merge_request_url ? (
-                      <>
-                        <a
-                          href={folder.merge_request_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-mono text-xs text-accent-text hover:underline"
-                        >
-                          {mrShortLabel(folder.merge_request_url)}
-                        </a>
-                        <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-                          {mrStateLabel(folder.merge_request_state)}
-                        </span>
-                      </>
-                    ) : null}
+                    <ReviewLinks folder={folder} />
                   </div>
                 )}
                 <div className="truncate font-mono text-[11px] text-text-muted">{folder.path}</div>

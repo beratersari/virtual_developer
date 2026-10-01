@@ -766,13 +766,20 @@ class JobProcessor:
             if updated is None:
                 cur = self.state_manager.get_state(issue_key)
                 if cur is None:
-                    # No local state file — still surface the error on Jira
+                    # No local state file — still surface the error on Jira.
+                    # The jobs list is keyed by the job row, so close that too.
                     if not forge_job:
                         self.reporter.post_comment_response(
                             issue_key,
                             f"An error occurred while processing this issue:\n\n"
                             f"{{code}}\n{error_text}\n{{code}}",
                         )
+                    self._finish_job_record(
+                        issue_key,
+                        status="error",
+                        error_message=error_text,
+                        progress_percentage=0,
+                    )
                     return
                 logger.info(
                     f"_fail_issue CAS skip for {issue_key}: "
@@ -2916,6 +2923,105 @@ class JobProcessor:
             meta["current_job_id"] = None
         self.state_manager.update_state(issue_key, metadata=meta)
 
+    def _close_open_job_rows(
+        self,
+        issue_key: str,
+        *,
+        status: str,
+        error_message: str,
+    ) -> int:
+        """Mark every in-flight job row for this issue terminal.
+
+        ``_finish_job_record`` closes one row. A review can have a live
+        pointer and an older executing row, so keep going until none remain.
+        """
+        open_status = {"running", "planning", "executing", "pending"}
+        closed = 0
+        for _ in range(20):
+            jid = self._active_jobs.get(issue_key) or self._open_job_id(issue_key)
+            if not jid:
+                break
+            self._finish_job_record(
+                issue_key,
+                status=status,
+                error_message=error_message,
+            )
+            row = self.job_store.get_job(jid)
+            if row and str(row.get("status") or "") in open_status:
+                break
+            closed += 1
+        return closed
+
+    def _stoppable_without_state(self, issue_key: str) -> bool:
+        """True when Stop still has a job row or a live runner to cancel."""
+        if issue_key in self._contexts or issue_key in self._active_jobs:
+            return True
+        return self._open_job_id(issue_key) is not None
+
+    async def _cancel_open_job_without_state(
+        self, issue_key: str, *, reason: str
+    ) -> dict:
+        """Cancel a jobs-list row whose issue-state row is already gone.
+
+        Merge cleanup deletes that state and used to leave the job executing.
+        Stop must still kill the runner and mark the row cancelled.
+        """
+        self._cancelling.add(issue_key)
+        killed = False
+        try:
+            live_job_id = self._active_jobs.get(issue_key) or self._open_job_id(
+                issue_key
+            )
+            self._close_open_job_rows(
+                issue_key, status="cancelled", error_message=reason
+            )
+            try:
+                await self._abort_serve_sessions_for_issue(issue_key)
+                runner = self._runner_for(issue_key)
+                if runner and hasattr(runner, "cancel_all_tasks"):
+                    n = runner.cancel_all_tasks()
+                    if n:
+                        killed = True
+                self._kill_children_for_issue(issue_key)
+                if self._kill_git_for_issue(issue_key):
+                    killed = True
+            except Exception as e:
+                logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
+            try:
+                nq = self.queue_store.finish_open_for_issue(
+                    issue_key,
+                    status="cancelled",
+                    error_message=reason,
+                    job_id=live_job_id,
+                    include_queued=True,
+                    include_running=True,
+                    queued_sources={"jira"},
+                    started_before=None,
+                )
+                if nq:
+                    logger.info(
+                        f"Job cancelled via API: {issue_key} closed {nq} queue row(s)"
+                    )
+            except Exception as e:
+                logger.warning(f"cancel_job queue finish failed for {issue_key}: {e}")
+            try:
+                self._release_context(issue_key, success=False)
+            except Exception as e:
+                logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
+            logger.info(
+                f"Job cancelled via API: {issue_key} killed={killed} "
+                f"job_id={live_job_id or '-'}"
+            )
+            return {
+                "ok": True,
+                "issue_key": issue_key,
+                "status": "cancelled",
+                "process_signalled": killed,
+                "message": reason,
+            }
+        finally:
+            self._cancelling.discard(issue_key)
+
     async def cancel_job(
         self, issue_key: str, *, reason: str = "Cancelled from dashboard"
     ) -> dict:
@@ -2925,9 +3031,15 @@ class JobProcessor:
         the entire agent run). Writes CANCELLED first so a clone that returns
         None during the kill await cannot stamp ERROR. Then kills children.
         ``plan_ready`` is refused — there is no running agent to stop.
+        A missing issue-state row still cancels when an open job or a live
+        runner remains. The missing-state error is only for a key with neither.
         """
         state = self.state_manager.get_state(issue_key)
         if not state:
+            if self._stoppable_without_state(issue_key):
+                return await self._cancel_open_job_without_state(
+                    issue_key, reason=reason
+                )
             return {
                 "ok": False,
                 "error": "No local state for this issue",
@@ -4195,12 +4307,59 @@ class JobProcessor:
             logger.exception(f"Failed to finalise interrupted state for {issue_key}: {e}", e)
             return False
 
+    def _recover_open_jobs_without_state(self) -> int:
+        """Close executing job rows whose issue-state row is already gone.
+
+        Startup recovery walks issue states. Merge cleanup deletes that row
+        and keeps the job for Analytics, so a restart never saw these.
+        """
+        open_status = {"running", "planning", "executing", "pending"}
+        try:
+            rows = self.job_store.iter_jobs()
+        except Exception as e:
+            logger.debug(f"Orphan job scan failed: {e}")
+            return 0
+        pending: List[tuple] = []
+        seen: set[str] = set()
+        for job in rows:
+            if str(job.get("status") or "") not in open_status:
+                continue
+            key = str(job.get("issue_key") or "").strip()
+            folded = key.upper()
+            if not key or folded in seen:
+                continue
+            if self.state_manager.get_state(key) is not None:
+                seen.add(folded)
+                continue
+            seen.add(folded)
+            pending.append((key, str(job.get("status") or "executing")))
+        closed = 0
+        for key, status_name in pending:
+            logger.warning(
+                f"Orphaned in-flight job for {key} ({status_name}) "
+                "with no issue state; recovering to ERROR"
+            )
+            n = self._close_open_job_rows(
+                key,
+                status="error",
+                error_message=(
+                    f"Daemon started with leftover status '{status_name}' "
+                    "but no local issue state and no live agent process. "
+                    "The previous run was interrupted or crashed. "
+                    "Marking as error so work can be re-queued from To Do."
+                ),
+            )
+            if n:
+                closed += 1
+        return closed
+
     def recover_orphaned_in_flight(self) -> int:
         """On cold start: disk PENDING/PLANNING/EXECUTING cannot be live.
 
         In-memory cache is empty after a process restart, so any leftover
         accept-window or in-flight status is orphaned (no child process).
-        Mark ERROR so poller can re-queue from To Do.
+        Mark ERROR so poller can re-queue from To Do. Job rows whose issue
+        state was already deleted are closed the same way.
         """
         recovered = 0
         for state in self.state_manager.get_active_issues():
@@ -4220,6 +4379,7 @@ class JobProcessor:
                 status=TaskStatus.ERROR,
             )
             recovered += 1
+        recovered += self._recover_open_jobs_without_state()
         if recovered:
             logger.info(f"Recovered {recovered} orphaned in-flight issue(s) on startup")
         return recovered
@@ -6284,26 +6444,15 @@ class JobProcessor:
                     job, mr_url=url, project_path=path, mr_iid=mr_iid
                 ):
                     continue
-                patch: Dict[str, Any] = {"merge_request_state": state}
-                deliveries = []
-                for row in job.get("deliveries") or []:
-                    if not isinstance(row, dict):
-                        deliveries.append(row)
-                        continue
-                    row_url = str(row.get("merge_request_url") or "").rstrip("/")
-                    if url and row_url == url:
-                        row = dict(row)
-                        row["merge_request_state"] = state
-                    deliveries.append(row)
-                if deliveries:
-                    patch["deliveries"] = deliveries
-                if url:
-                    patch["merge_request_url"] = url
-                if path:
-                    patch["gitlab_project"] = path
-                if mr_iid:
-                    patch["gitlab_mr_iid"] = int(mr_iid)
-                self.job_store.update_job(str(job.get("job_id") or ""), **patch)
+                # Do not write this snapshot's delivery list back. It can
+                # predate the other repository's merge request.
+                self.job_store.apply_review_state(
+                    str(job.get("job_id") or ""),
+                    state=state,
+                    mr_url=url,
+                    project_path=path,
+                    mr_iid=int(mr_iid or 0),
+                )
         except Exception as e:
             logger.warning(f"Could not persist MR state on jobs: {e}")
         if key:

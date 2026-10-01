@@ -50,7 +50,6 @@ import {
 import {
   RepositoryList,
   emptyRepoRow,
-  rowFromProject,
   scheduleRepositoryFields,
   type RepoRow,
 } from './MoreRepositories'
@@ -1202,7 +1201,6 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(true)
-  const seeded = useRef(false)
 
   useEffect(() => {
     if (collection || !collections.length) return
@@ -1232,19 +1230,8 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     const rows = live.settings?.project_repositories
     if (!rows) return
+    // Saved projects stay in the Add repository picker. The list starts empty.
     setProjects(rows)
-    if (seeded.current) return
-    seeded.current = true
-    const last = (() => {
-      try {
-        return window.localStorage.getItem(LAST_REPO_KEY) || ''
-      } catch {
-        return ''
-      }
-    })()
-    const preferred =
-      rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
-    if (preferred) setRepos([rowFromProject(preferred)])
   }, [live.settings])
 
   const selectable = useMemo(() => types.filter((t) => !t.subtask), [types])

@@ -511,28 +511,48 @@ def test_read_version_oserror(monkeypatch, tmp_path):
 
 
 def test_state_manager_set_state_cleanup_tmp(tmp_path):
+    import sqlite3
+
     from src.state.manager import JiraStateManager
     from src.state.models import JiraAgentState
 
     sm = JiraStateManager(state_dir=tmp_path)
     st = JiraAgentState(issue_key="T-1", issue_summary="s")
-    # force write failure mid-way
-    with patch("builtins.open", side_effect=OSError("disk full")):
-        sm.set_state(st)  # should not raise
-    # delete error
+    real = sm._conn
+
+    class _FailWrites:
+        def execute(self, sql, *args, **kwargs):
+            text = sql if isinstance(sql, str) else ""
+            if text.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+                raise sqlite3.OperationalError("disk full")
+            return real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    failed = _FailWrites()
+    with patch.object(sm, "_conn", failed):
+        assert sm.set_state(st) is False
     sm.create_state("T-2", "s")
-    with patch.object(Path, "unlink", side_effect=OSError("x")):
-        sm.delete_state("T-2")
+    with patch.object(sm, "_conn", failed):
+        assert sm.delete_state("T-2") is False
+    assert sm.get_state("T-2") is not None
 
 
 def test_job_store_write_errors(tmp_path):
+    import sqlite3
+
     from src.state.job_store import JobStore
 
     store = JobStore(jobs_dir=tmp_path)
     j = store.create_job(issue_key="J-1", status="running")
-    # update with bad dir
-    with patch("os.replace", side_effect=OSError("x")):
-        store.update_job(j["job_id"], status="error")
+
+    def boom(_job):
+        raise sqlite3.OperationalError("disk full")
+
+    store._index.upsert = boom  # type: ignore[method-assign]
+    assert store.update_job(j["job_id"], status="error") is None
+    assert store.get_job(j["job_id"])["status"] == "running"
 
 
 def test_agent_runner_kill_edges():

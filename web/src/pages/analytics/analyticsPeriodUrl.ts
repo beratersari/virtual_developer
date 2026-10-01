@@ -2,6 +2,17 @@ export const ANALYTICS_PERIODS = ['24h', '7d', '30d', '90d', '1y', 'all', 'custo
 
 export type AnalyticsPeriod = (typeof ANALYTICS_PERIODS)[number]
 
+/** Labels on the Analytics period control. The document title uses the same words. */
+export const ANALYTICS_PERIOD_LABELS: Record<AnalyticsPeriod, string> = {
+  '24h': '24 hours',
+  '7d': '7 days',
+  '30d': '30 days',
+  '90d': '90 days',
+  '1y': '1 year',
+  all: 'All',
+  custom: 'Custom',
+}
+
 const DEFAULT_PERIOD: AnalyticsPeriod = '30d'
 
 export function analyticsPeriodFromParam(section: string | undefined): AnalyticsPeriod | null {

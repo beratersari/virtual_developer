@@ -1,3 +1,17 @@
+# Yaver 0.9.69
+
+Jobs, the queue, schedules, session binds, and issue state now live in one yaver.sqlite file in the Yaver data folder. The first start imports the JSON files that were already there. Plans, session logs, and clone folders stay on disk. Analytics still counts a run after a merged review deletes the issue state, because the job row remains.
+
+The storage page lists every merge request on a multi-repo folder. Each delivery keeps its own link and state, and updating one review does not drop the others.
+
+The job log lists the commits that are about to be pushed, then the text git prints while the push runs.
+
+Stopping a review whose local issue was already removed still cancels that job. After a restart, that row is no longer left executing. The job row stays so Analytics can count it.
+
+Saved projects and repo sets stay in saved_catalog.json. The dashboard shows that list after a refresh, and saving another setting does not replace it. Reload from tokens still imports the repositories the GitLab and Azure tokens can read.
+
+Copying a dashboard address pastes the page you have open. A job link uses that job's title, an issue link uses the issue title, and the other screens use their own names, such as New issue, Settings - Jira, Jobs - In flight, and Analytics.
+
 # Yaver 0.9.68
 
 A review or a test that hits a timeout, an error retry, a clarifying question, or an idle continue stays on that job. The review follow-up finishes the review. The test follow-up finishes the unit tests and may commit those tests. A build job still receives the build continue line.

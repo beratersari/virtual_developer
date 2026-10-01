@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
@@ -1477,7 +1477,7 @@ def create_dashboard_app(
 
     @app.get("/api/settings")
     def get_settings() -> dict:
-        """Dashboard settings. Saved projects are loaded only by Reload from tokens."""
+        """Dashboard settings, including the stored project list and repo sets."""
         return settings_response()
 
     @app.get("/api/opencode-agents")
@@ -1974,15 +1974,58 @@ def create_dashboard_app(
                 f"Dashboard SPA missing assets/ under {static} — UI will be blank"
             )
 
-        def _spa_index() -> FileResponse:
-            # Always revalidate HTML so browsers pick up new hashed asset names
-            return FileResponse(
-                static / "index.html",
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache",
-                    "Expires": "0",
-                },
+        _spa_headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+
+        def _record_name(path: str) -> Optional[str]:
+            from src.dashboard.page_title import spa_record_ref
+
+            ref = spa_record_ref(path)
+            if ref is None:
+                return None
+            kind, ident = ref
+            try:
+                if kind == "job":
+                    job = job_store.get_job(ident)
+                    if not job:
+                        return None
+                    summary = " ".join(str(job.get("summary") or "").split())
+                    key = " ".join(str(job.get("issue_key") or "").split())
+                    return summary or key or None
+                if kind == "issue":
+                    state = sm.get_state(ident)
+                    if state is None:
+                        return None
+                    summary = " ".join(str(state.issue_summary or "").split())
+                    return summary or None
+            except Exception as exc:
+                logger.debug(f"SPA title lookup failed: {exc}")
+            return None
+
+        def _spa_index(request: Request) -> Response:
+            # Always revalidate HTML so browsers pick up new hashed asset names.
+            # The title is the name a copied link shows when it is pasted.
+            html_path = static / "index.html"
+            try:
+                raw = html_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning(f"Could not read SPA index: {exc}")
+                return FileResponse(html_path, headers=_spa_headers)
+            if "<title" not in raw.lower():
+                return FileResponse(html_path, headers=_spa_headers)
+            from src.dashboard.page_title import apply_document_title, document_title
+
+            title = document_title(
+                request.url.path,
+                request.url.query,
+                record_name=_record_name(request.url.path),
+            )
+            return HTMLResponse(
+                content=apply_document_title(raw, title),
+                headers=_spa_headers,
             )
 
         def _static_file(path: Path) -> FileResponse:
@@ -2010,11 +2053,11 @@ def create_dashboard_app(
             return FileResponse(**kwargs)
 
         @app.get("/")
-        def index() -> FileResponse:
-            return _spa_index()
+        def index(request: Request) -> Response:
+            return _spa_index(request)
 
         @app.get("/{full_path:path}")
-        def spa_fallback(full_path: str) -> Any:
+        def spa_fallback(full_path: str, request: Request) -> Any:
             # Never serve files outside web/dist (blocks ../ path traversal)
             # Do not SPA-fallback reserved API/docs/asset paths
             low = (full_path or "").lstrip("/").lower()
@@ -2030,7 +2073,7 @@ def create_dashboard_app(
             safe = _safe_under_static(static, full_path)
             if safe is not None:
                 return _static_file(safe)
-            return _spa_index()
+            return _spa_index(request)
     else:
         logger.warning(
             "Dashboard SPA not found (web/dist/index.html). "

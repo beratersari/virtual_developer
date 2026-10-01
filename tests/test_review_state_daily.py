@@ -6,7 +6,6 @@ means current code loses or lies about that transition.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 
@@ -62,6 +61,31 @@ def test_analytics_search_treats_percent_and_underscore_as_literal(tmp_path: Pat
     idx.close()
 
 
+class _FailWrites:
+    """Connection stand-in. sqlite3.Connection.execute cannot be patched."""
+
+    def __init__(self, real: sqlite3.Connection, prefixes: tuple[str, ...]) -> None:
+        self._real = real
+        self._prefixes = prefixes
+
+    def execute(self, sql, *args, **kwargs):
+        text = sql if isinstance(sql, str) else ""
+        if text.lstrip().upper().startswith(self._prefixes):
+            raise sqlite3.OperationalError("disk full")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _fail_sql_writes(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        owner,
+        "_conn",
+        _FailWrites(owner._conn, ("INSERT", "UPDATE", "DELETE")),
+    )
+
+
 def test_create_state_does_not_return_pending_when_first_write_fails(
     tmp_path: Path, monkeypatch
 ):
@@ -69,52 +93,39 @@ def test_create_state_does_not_return_pending_when_first_write_fails(
     so a later poll would start a second run if the caller kept the return.
     """
     sm = JiraStateManager(state_dir=tmp_path / "state")
-
-    def boom_replace(src, dst):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(os, "replace", boom_replace)
-    monkeypatch.setattr("src.state.manager.os.replace", boom_replace)
+    _fail_sql_writes(sm, monkeypatch)
     returned = sm.create_state("NEW-1", "first accept")
-    monkeypatch.undo()
     assert sm.get_state("NEW-1") is None
     assert returned is None
 
 
-def test_create_job_does_not_look_saved_when_disk_write_fails(
-    tmp_path: Path, monkeypatch
-):
+def test_create_job_does_not_look_saved_when_disk_write_fails(tmp_path: Path):
     store = JobStore(jobs_dir=tmp_path / "jobs")
-    real = Path.replace
 
-    def boom(self: Path, target):
-        if self.name.endswith(".tmp") and "job_" in self.name:
-            raise OSError("disk full")
-        return real(self, target)
+    def boom(_job):
+        raise sqlite3.OperationalError("disk full")
 
-    monkeypatch.setattr(Path, "replace", boom)
+    assert store._index is not None
+    store._index.upsert = boom  # type: ignore[method-assign]
     job = store.create_job(issue_key="KAN-1", summary="run", status="running")
-    assert job is None or store.get_job(job["job_id"]) is not None
+    assert job is None
+    assert store.count_jobs() == 0
 
 
-def test_update_job_does_not_report_completed_when_disk_write_fails(
-    tmp_path: Path, monkeypatch
-):
+def test_update_job_does_not_report_completed_when_disk_write_fails(tmp_path: Path):
     store = JobStore(jobs_dir=tmp_path / "jobs")
     job = store.create_job(issue_key="KAN-1", summary="run", status="running")
-    real = Path.replace
 
-    def boom(self: Path, target):
-        if self.name.endswith(".tmp") and job["job_id"] in self.name:
-            raise OSError("disk full")
-        return real(self, target)
+    def boom(_job):
+        raise sqlite3.OperationalError("disk full")
 
-    monkeypatch.setattr(Path, "replace", boom)
+    assert store._index is not None
+    store._index.upsert = boom  # type: ignore[method-assign]
     returned = store.update_job(job["job_id"], status="completed")
     disk = store.get_job(job["job_id"])
     assert disk is not None
     assert disk["status"] == "running"
-    assert returned is None or returned["status"] == disk["status"]
+    assert returned is None
 
 
 def test_queue_finish_does_not_overwrite_cancelled(tmp_path: Path):
@@ -131,9 +142,9 @@ def test_queue_finish_does_not_overwrite_cancelled(tmp_path: Path):
     assert late is None or late["status"] == "cancelled"
 
 
-def test_job_index_status_matches_json_after_upsert_error(tmp_path: Path):
-    """Daemon already reconciled. A later index upsert failure must not
-    leave Analytics/Jobs on the old status while JSON says completed.
+def test_job_write_stays_running_when_upsert_fails(tmp_path: Path):
+    """A failed job write leaves the stored status. Analytics must not
+    show completed when the row is still running.
     """
     store = JobStore(jobs_dir=tmp_path / "jobs")
     store.ensure_index()
@@ -144,17 +155,17 @@ def test_job_index_status_matches_json_after_upsert_error(tmp_path: Path):
 
     assert store._index is not None
     store._index.upsert = boom  # type: ignore[method-assign]
-    store.update_job(job["job_id"], status="completed")
+    returned = store.update_job(job["job_id"], status="completed")
+    assert returned is None
     disk = store.get_job(job["job_id"])
-    assert disk is not None and disk["status"] == "completed"
+    assert disk is not None and disk["status"] == "running"
     rows = store.query_jobs(status="completed")
-    assert any(r["job_id"] == job["job_id"] for r in rows)
+    assert all(r["job_id"] != job["job_id"] for r in rows)
 
 
-def test_schedule_open_flag_matches_json_after_upsert_error(tmp_path: Path):
-    """Poller skips intake while has_open_for_issue is true. After dispatch
-    the JSON is terminal, so the flag must be false even if the index write
-    failed (daemon already ran ensure_index).
+def test_schedule_stays_open_when_upsert_fails(tmp_path: Path):
+    """Poller skips intake while has_open_for_issue is true. A failed
+    dispatch write keeps the row dispatching.
     """
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     store.ensure_index()
@@ -182,18 +193,17 @@ def test_schedule_open_flag_matches_json_after_upsert_error(tmp_path: Path):
         expected_status="dispatching",
         status="dispatched",
     )
-    assert updated is not None
+    assert updated is None
     disk = store.get(rec["schedule_id"])
-    assert disk is not None and disk["status"] == "dispatched"
-    assert store.has_open_for_issue("KAN-7") is False
-    assert store.count_schedules(status="dispatched") == 1
+    assert disk is not None and disk["status"] == "dispatching"
+    assert store.has_open_for_issue("KAN-7") is True
+    assert store.count_schedules(status="dispatched") == 0
+    assert store.count_schedules(status="dispatching") == 1
     assert store.count_schedules(status="scheduled") == 0
 
 
-def test_session_list_matches_json_after_upsert_error(tmp_path: Path):
-    """Sessions page reads the index. After a failed upsert the listed
-    session id must still be the one just written to JSON.
-    """
+def test_session_list_keeps_previous_id_when_upsert_fails(tmp_path: Path):
+    """A failed session write must not list the id that was not stored."""
     store = SessionBindStore(binds_dir=tmp_path / "binds")
     store.ensure_index()
     first = store.upsert(
@@ -219,7 +229,7 @@ def test_session_list_matches_json_after_upsert_error(tmp_path: Path):
         issue_key="KAN-3",
         kind="build",
     )
-    assert second is not None and second["session_id"] == "ses_new"
+    assert second is None
     listed = store.list_binds(limit=None)
     ids = {r["bind_id"]: r["session_id"] for r in listed}
-    assert ids.get(second["bind_id"]) == "ses_new"
+    assert ids.get(first["bind_id"]) == "ses_old"

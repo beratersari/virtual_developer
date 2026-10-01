@@ -156,8 +156,8 @@ def test_append_keeps_projects_the_editor_has_not_loaded(tmp_path, monkeypatch):
     assert renamed[1]["label"] == "other"
 
 
-def test_settings_responses_omit_saved_projects_until_import(monkeypatch):
-    """Settings, dashboard, and a normal save must not send the saved-project list."""
+def test_settings_responses_include_saved_projects_without_token_import(monkeypatch):
+    """Settings and the dashboard return the stored list. They do not call GitLab or Azure."""
     from fastapi.testclient import TestClient
 
     from src import config as config_mod
@@ -216,16 +216,17 @@ def test_settings_responses_omit_saved_projects_until_import(monkeypatch):
     client = TestClient(create_dashboard_app())
     boot = client.get("/api/settings")
     assert boot.status_code == 200
-    assert "project_repositories" not in boot.json()
+    assert boot.json()["project_repositories"][0]["label"] == "demo"
+    assert "repository_sets" in boot.json()
     listed = client.get("/api/settings", params={"projects": "true"})
     assert listed.status_code == 200
-    assert "project_repositories" not in listed.json()
+    assert listed.json()["project_repositories"][0]["label"] == "demo"
     patched = client.patch("/api/settings", json={"jira_trigger_label": "bot"})
     assert patched.status_code == 200
-    assert "project_repositories" not in patched.json()
+    assert patched.json()["project_repositories"][0]["label"] == "demo"
     dashboard = client.get("/api/dashboard")
     assert dashboard.status_code == 200
-    assert "project_repositories" not in dashboard.json()["settings"]
+    assert dashboard.json()["settings"]["project_repositories"][0]["label"] == "demo"
     assert calls == []
     imported = client.post("/api/settings/projects/import", json={})
     assert imported.status_code == 200

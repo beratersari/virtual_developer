@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { fetchMeta } from '../api/client'
 import { Spinner } from '../ui/Spinner'
+import { applyDocumentTitle } from '../util/pageTitle'
 import {
   isUnauthorized,
   loginDashboard,
@@ -74,6 +75,11 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
   const [slow, setSlow] = useState(false)
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
+
+  useLayoutEffect(() => {
+    if (!needLogin) return
+    applyDocumentTitle('Sign in')
+  }, [needLogin])
 
   useEffect(() => {
     setUnauthorizedHandler(() => {

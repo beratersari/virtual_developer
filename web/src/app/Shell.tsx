@@ -4,6 +4,7 @@ import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
+import { PageTitleRoot } from './pageTitleContext'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
@@ -98,6 +99,7 @@ export function Shell() {
   const localClock = formatDashboardClock(now)
 
   return (
+    <PageTitleRoot>
     <div className="vd-app">
       <aside className="vd-sidebar">
         <div className="vd-brand">
@@ -194,5 +196,6 @@ export function Shell() {
         </div>
       </main>
     </div>
+    </PageTitleRoot>
   )
 }

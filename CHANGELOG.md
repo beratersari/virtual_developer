@@ -8,6 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.69] — 2026-10-02
+
+Jobs, schedules, and issue state live in one database. The storage page lists every merge request on a multi-repo folder, and copying a dashboard address pastes the page you have open.
+
+### Added
+
+- Jobs, the queue, schedules, session binds, and issue state are stored in `yaver.sqlite` in the Yaver data folder. The first start imports the JSON files that were already there. Plans, session logs, and clone folders stay on disk. Analytics still counts a run after merge cleanup deletes the issue state, because the job row remains.
+
+### Fixed
+
+- Copying a dashboard address pastes the page you are on. A job link uses that job's title, an issue link uses the issue title, and the other screens use their own names, such as New issue, Settings - Jira, Jobs - In flight, and Analytics.
+- Saved projects and repo sets are stored in `saved_catalog.json` in the Yaver data folder. The dashboard shows that list after a refresh. Saving another setting does not replace it. Reload from tokens still imports the repositories the GitLab and Azure tokens can read.
+- The storage page lists every merge request on a multi-repo folder. Each delivery keeps its own link and state. Updating one review does not drop the others.
+- The job log lists the commits that are about to be pushed, then the text git prints while the push runs.
+- Stopping a review whose issue state was removed by merge cleanup cancels that job. A restart no longer leaves the row executing. The job row stays for Analytics.
+
+[0.9.69]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.69
+
 ## [0.9.68] — 2026-09-30
 
 Review and test follow-ups stay on their own job. The Sessions page lists OpenCode chats, and stopping a job aborts the OpenCode session.

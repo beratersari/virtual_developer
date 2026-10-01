@@ -10,7 +10,7 @@ from src.state.job_index import JobIndex, default_index_path, row_params
 
 def test_default_index_path_sits_beside_jobs_dir(tmp_path: Path):
     jobs = tmp_path / "yaver" / "jobs"
-    assert default_index_path(jobs) == tmp_path / "yaver" / "jobs.sqlite"
+    assert default_index_path(jobs) == tmp_path / "yaver" / "yaver.sqlite"
 
 
 def test_upsert_list_count_delete(tmp_path: Path):
@@ -57,8 +57,8 @@ def test_upsert_skips_blank_job_id(tmp_path: Path):
     idx.close()
 
 
-def test_reconcile_fills_missing_job_id_and_refreshes_stale_rows(tmp_path: Path):
-    """Old files name the id. A newer JSON must replace a stale index row."""
+def test_reconcile_fills_missing_job_id_once(tmp_path: Path):
+    """Old files name the id. A file written after the import flag is ignored."""
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()
     (jobs_dir / "job_oldname.json").write_text(
@@ -74,8 +74,10 @@ def test_reconcile_fills_missing_job_id_and_refreshes_stale_rows(tmp_path: Path)
     )
     idx = JobIndex(tmp_path / "jobs.sqlite")
     assert idx.reconcile(jobs_dir) == 1
+    assert not (jobs_dir / "job_oldname.json").is_file()
     assert idx.all_ids() == {"job_oldname"}
     row = idx.iter_jobs()[0]
+    assert row["job_id"] == "job_oldname"
     assert row["started_at"] == "2025-11-01T09:00:00"
     (jobs_dir / "job_oldname.json").write_text(
         json.dumps(
@@ -84,20 +86,19 @@ def test_reconcile_fills_missing_job_id_and_refreshes_stale_rows(tmp_path: Path)
                 "issue_key": "KAN-3",
                 "summary": "edited on disk",
                 "status": "error",
-                "error_message": "push failed",
                 "started_at": "2025-11-01T09:00:00",
             }
         ),
         encoding="utf-8",
     )
-    assert idx.reconcile(jobs_dir) == 1
+    assert idx.reconcile(jobs_dir) == 0
     rows = idx.iter_jobs()
-    assert rows[0]["summary"] == "edited on disk"
-    assert rows[0]["status"] == "error"
+    assert rows[0]["summary"] == "first write"
+    assert rows[0]["status"] == "completed"
     idx.close()
 
 
-def test_reconcile_inserts_json_and_drops_orphan_rows(tmp_path: Path):
+def test_reconcile_inserts_json_and_keeps_rows_whose_file_is_gone(tmp_path: Path):
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()
     raw = {
@@ -113,10 +114,12 @@ def test_reconcile_inserts_json_and_drops_orphan_rows(tmp_path: Path):
     idx.upsert({"job_id": "job_gone", "issue_key": "KAN-0", "status": "error"})
     added = idx.reconcile(jobs_dir)
     assert added == 1
-    assert idx.count() == 1
-    assert idx.all_ids() == {"job_legacy01"}
-    rows = idx.iter_jobs()
-    assert rows[0]["summary"] == "from disk"
+    assert not (jobs_dir / "job_legacy01.json").is_file()
+    assert idx.reconcile(jobs_dir) == 0
+    assert idx.count() == 2
+    assert idx.all_ids() == {"job_legacy01", "job_gone"}
+    rows = {row["job_id"]: row for row in idx.iter_jobs()}
+    assert rows["job_legacy01"]["summary"] == "from disk"
     idx.close()
 
 

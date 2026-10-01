@@ -15,9 +15,62 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.logger import logger
+from src.state.record_db import connect, database_path, dumps, import_json_once, loads
 
 _OPEN = frozenset({"queued", "running"})
 _TERMINAL = frozenset({"completed", "cancelled", "error", "skipped"})
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS queue_items (
+    queue_id TEXT PRIMARY KEY,
+    issue_key TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    repository_url TEXT NOT NULL DEFAULT '',
+    merge_request_url TEXT NOT NULL DEFAULT '',
+    working_directory TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    gitlab_note_id TEXT NOT NULL DEFAULT '',
+    azure_comment_id TEXT NOT NULL DEFAULT '',
+    jira_event_id TEXT NOT NULL DEFAULT '',
+    document TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_queue_issue ON queue_items(issue_key, status);
+CREATE INDEX IF NOT EXISTS idx_queue_status_created
+    ON queue_items(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_queue_repo ON queue_items(repository_url);
+CREATE INDEX IF NOT EXISTS idx_queue_mr ON queue_items(merge_request_url);
+CREATE INDEX IF NOT EXISTS idx_queue_workdir ON queue_items(working_directory);
+CREATE INDEX IF NOT EXISTS idx_queue_note ON queue_items(gitlab_note_id);
+CREATE INDEX IF NOT EXISTS idx_queue_azure ON queue_items(azure_comment_id);
+CREATE INDEX IF NOT EXISTS idx_queue_jira_event ON queue_items(jira_event_id);
+"""
+
+_UPSERT = """
+INSERT INTO queue_items (
+    queue_id, issue_key, status, source, repository_url, merge_request_url,
+    working_directory, created_at, updated_at, gitlab_note_id, azure_comment_id,
+    jira_event_id, document
+) VALUES (
+    :queue_id, :issue_key, :status, :source, :repository_url, :merge_request_url,
+    :working_directory, :created_at, :updated_at, :gitlab_note_id,
+    :azure_comment_id, :jira_event_id, :document
+)
+ON CONFLICT(queue_id) DO UPDATE SET
+    issue_key=excluded.issue_key,
+    status=excluded.status,
+    source=excluded.source,
+    repository_url=excluded.repository_url,
+    merge_request_url=excluded.merge_request_url,
+    working_directory=excluded.working_directory,
+    created_at=excluded.created_at,
+    updated_at=excluded.updated_at,
+    gitlab_note_id=excluded.gitlab_note_id,
+    azure_comment_id=excluded.azure_comment_id,
+    jira_event_id=excluded.jira_event_id,
+    document=excluded.document
+"""
 
 
 def _default_queue_dir() -> Path:
@@ -65,38 +118,111 @@ def workspace_lock_key(
     return f"lock_{repo}::{work.lower()}"
 
 
+def _col(rec: Dict[str, Any], key: str) -> str:
+    return str(rec.get(key) or "").strip()
+
+
 class WorkQueueStore:
-    """One JSON file per queue item (``q_<12 hex>.json``)."""
+    """Queue rows in yaver.sqlite. Open rows stay cached in memory.
+
+    Leftover ``q_*.json`` is imported on the first read or write, then
+    deleted. Later calls do not scan that folder.
+    """
 
     def __init__(self, queue_dir: Optional[Path] = None) -> None:
         self.queue_dir = queue_dir or _default_queue_dir()
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        # Queued and running rows only. Finished history stays on disk.
+        # Queued and running rows only. Finished history stays in the database.
         self._open: Dict[str, Dict[str, Any]] = {}
         self._open_loaded = False
+        self._imported = False
         self._epoch = 0
         self._listeners: List[Callable[[], None]] = []
+        self._conn = None
+        try:
+            conn = connect(database_path(self.queue_dir))
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            self._conn = conn
+        except Exception as exc:
+            logger.warning(f"Queue database unavailable: {exc}")
+            self._conn = None
 
     def _path(self, queue_id: str) -> Path:
         safe = (queue_id or "").replace("/", "_").replace("\\", "_")
         return self.queue_dir / f"{safe}.json"
 
-    def _write(self, rec: Dict[str, Any]) -> None:
-        path = self._path(rec["queue_id"])
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, indent=2, ensure_ascii=False)
-        tmp.replace(path)
+    def _params(self, rec: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "queue_id": _col(rec, "queue_id"),
+            "issue_key": _col(rec, "issue_key"),
+            "status": _col(rec, "status"),
+            "source": _col(rec, "source"),
+            "repository_url": _col(rec, "repository_url"),
+            "merge_request_url": _col(rec, "merge_request_url"),
+            "working_directory": _col(rec, "working_directory"),
+            "created_at": _col(rec, "created_at"),
+            "updated_at": _col(rec, "updated_at"),
+            "gitlab_note_id": _col(rec, "gitlab_note_id"),
+            "azure_comment_id": _col(rec, "azure_comment_id"),
+            "jira_event_id": _col(rec, "jira_event_id"),
+            "document": dumps(rec),
+        }
+
+    def _upsert_locked(self, rec: Dict[str, Any]) -> None:
+        """Caller holds ``_lock``. Does not import."""
+        if self._conn is None:
+            raise RuntimeError(
+                f"queue database unavailable for {rec.get('queue_id')}"
+            )
+        params = self._params(rec)
+        if not params["queue_id"]:
+            raise RuntimeError("queue row is missing queue_id")
+        self._conn.execute(_UPSERT, params)
+        self._conn.commit()
         if not self._open_loaded:
             return
-        qid = str(rec.get("queue_id") or "")
-        if not qid:
-            return
+        qid = params["queue_id"]
         if rec.get("status") in _OPEN:
             self._open[qid] = copy.deepcopy(rec)
         else:
             self._open.pop(qid, None)
+
+    def _consume_file(self, path: Path) -> str:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+            logger.warning(f"Queue import skip {path.name}: {exc}")
+            return "bad"
+        if not isinstance(raw, dict):
+            logger.warning(f"Queue import skip {path.name}: not an object")
+            return "bad"
+        rec = dict(raw)
+        qid = str(rec.get("queue_id") or "").strip() or path.stem
+        if not qid.startswith("q_"):
+            return "skip"
+        rec["queue_id"] = qid
+        self._upsert_locked(rec)
+        return "ok"
+
+    def _ensure_imported_locked(self) -> None:
+        """One-shot import. Caller holds ``_lock``. A glob error retries later."""
+        if self._imported or self._conn is None:
+            return
+        import_json_once(
+            self._conn,
+            self.queue_dir,
+            flag="queue_json_imported",
+            pattern="q_*.json",
+            consume=self._consume_file,
+        )
+        self._imported = True
+
+    def _write(self, rec: Dict[str, Any]) -> None:
+        """Caller holds ``_lock``."""
+        self._ensure_imported_locked()
+        self._upsert_locked(rec)
 
     def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Call ``callback`` after a row is queued, claimed, finished, or cancelled."""
@@ -130,27 +256,46 @@ class WorkQueueStore:
         """Load queued and running rows once. Caller holds ``_lock``."""
         if self._open_loaded:
             return
+        self._ensure_imported_locked()
         found: Dict[str, Dict[str, Any]] = {}
-        for rec in self._iter_records():
-            if rec.get("status") not in _OPEN:
-                continue
-            qid = str(rec.get("queue_id") or "")
-            if qid:
-                found[qid] = rec
+        if self._conn is not None:
+            rows = self._conn.execute(
+                "SELECT document FROM queue_items "
+                "WHERE status IN ('queued', 'running')"
+            ).fetchall()
+            for row in rows:
+                rec = loads(row["document"])
+                if not rec or rec.get("status") not in _OPEN:
+                    continue
+                qid = str(rec.get("queue_id") or "")
+                if qid:
+                    found[qid] = rec
         self._open = found
         self._open_loaded = True
 
+    def _load_one_locked(self, queue_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_imported_locked()
+        if self._conn is None:
+            return None
+        row = self._conn.execute(
+            "SELECT document FROM queue_items WHERE queue_id = ?",
+            (queue_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        rec = loads(row["document"])
+        return copy.deepcopy(rec) if rec else None
+
     def get(self, queue_id: str) -> Optional[Dict[str, Any]]:
-        path = self._path((queue_id or "").strip())
-        if not path.is_file():
+        qid = (queue_id or "").strip()
+        if not qid:
             return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                rec = json.load(f)
-            return rec if isinstance(rec, dict) else None
-        except Exception as e:
-            logger.debug(f"Could not read queue item {queue_id}: {e}")
-            return None
+        with self._lock:
+            try:
+                return self._load_one_locked(qid)
+            except Exception as exc:
+                logger.debug(f"Could not read queue item {queue_id}: {exc}")
+                return None
 
     def enqueue(
         self,
@@ -233,80 +378,89 @@ class WorkQueueStore:
                 ]
             else:
                 items = []
-                if self.queue_dir.is_dir():
-                    for rec in self._iter_records():
-                        if status and rec.get("status") != status:
-                            continue
-                        items.append(rec)
+                for rec in self._iter_records():
+                    if status and rec.get("status") != status:
+                        continue
+                    items.append(rec)
         items.sort(key=lambda r: (r.get("created_at") or "", r.get("queue_id") or ""))
         return items[:limit_n]
 
     def _iter_records(self) -> List[Dict[str, Any]]:
-        """All queue JSON rows (no oldest-N cap). Caller should hold ``_lock``."""
-        items: List[Dict[str, Any]] = []
-        if not self.queue_dir.is_dir():
-            return items
-        for path in self.queue_dir.glob("q_*.json"):
+        """Every queue document. Takes the store lock (callers may not)."""
+        with self._lock:
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    rec = json.load(f)
-            except Exception:
-                continue
-            if isinstance(rec, dict) and rec.get("queue_id"):
+                self._ensure_imported_locked()
+            except OSError as exc:
+                logger.warning(f"Queue import failed: {exc}")
+                return []
+            if self._conn is None:
+                return []
+            try:
+                rows = self._conn.execute(
+                    "SELECT document FROM queue_items"
+                ).fetchall()
+            except Exception as exc:
+                logger.warning(f"Queue list failed: {exc}")
+                return []
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            rec = loads(row["document"])
+            if rec and rec.get("queue_id"):
                 items.append(rec)
         return items
+
+    def _newest_document(self, sql: str, args: tuple) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            try:
+                self._ensure_imported_locked()
+            except OSError as exc:
+                logger.warning(f"Queue import failed: {exc}")
+                return None
+            if self._conn is None:
+                return None
+            try:
+                row = self._conn.execute(sql, args).fetchone()
+            except Exception as exc:
+                logger.debug(f"Queue lookup failed: {exc}")
+                return None
+        if row is None:
+            return None
+        rec = loads(row["document"])
+        return copy.deepcopy(rec) if rec else None
 
     def find_open_jira(self, issue_key: str) -> Optional[Dict[str, Any]]:
         key = (issue_key or "").strip().upper()
         if not key:
             return None
-        best: Optional[Dict[str, Any]] = None
-        with self._lock:
-            for rec in self._iter_records():
-                if rec.get("status") not in _OPEN:
-                    continue
-                if rec.get("source") != "jira":
-                    continue
-                if (rec.get("issue_key") or "").strip().upper() != key:
-                    continue
-                if best is None or (rec.get("created_at") or "") >= (
-                    best.get("created_at") or ""
-                ):
-                    best = rec
-        return best
+        return self._newest_document(
+            "SELECT document FROM queue_items "
+            "WHERE status IN ('queued', 'running') AND source = 'jira' "
+            "AND UPPER(issue_key) = ? "
+            "ORDER BY created_at DESC, queue_id DESC LIMIT 1",
+            (key,),
+        )
 
     def find_note(self, note_id: str) -> Optional[Dict[str, Any]]:
         nid = (note_id or "").strip()
         if not nid:
             return None
-        best: Optional[Dict[str, Any]] = None
-        with self._lock:
-            for rec in self._iter_records():
-                if str(rec.get("gitlab_note_id") or "") != nid and str(
-                    rec.get("azure_comment_id") or ""
-                ) != nid:
-                    continue
-                if best is None or (rec.get("created_at") or "") >= (
-                    best.get("created_at") or ""
-                ):
-                    best = rec
-        return best
+        return self._newest_document(
+            "SELECT document FROM queue_items "
+            "WHERE gitlab_note_id = ? OR azure_comment_id = ? "
+            "ORDER BY created_at DESC, queue_id DESC LIMIT 1",
+            (nid, nid),
+        )
 
     def find_jira_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         """Return a queue row for this Jira webhook event id (dedup retries)."""
         eid = (event_id or "").strip()
         if not eid:
             return None
-        best: Optional[Dict[str, Any]] = None
-        with self._lock:
-            for rec in self._iter_records():
-                if str(rec.get("jira_event_id") or "") != eid:
-                    continue
-                if best is None or (rec.get("created_at") or "") >= (
-                    best.get("created_at") or ""
-                ):
-                    best = rec
-        return best
+        return self._newest_document(
+            "SELECT document FROM queue_items WHERE jira_event_id = ? "
+            "ORDER BY created_at DESC, queue_id DESC LIMIT 1",
+            (eid,),
+        )
 
     def claim_next(
         self,
@@ -473,7 +627,7 @@ class WorkQueueStore:
                         if row_status == "running"
                         else rec.get("created_at")
                     )
-                    if str(stamp or "") >= cutoff:
+                    if str(stamp or "") > cutoff:
                         continue
                 qid = rec.get("queue_id")
                 if not qid:

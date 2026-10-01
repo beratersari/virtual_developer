@@ -1,4 +1,4 @@
-"""GET /api/analytics — real HTTP, job JSON plus local jobs.sqlite index."""
+"""GET /api/analytics — real HTTP against job rows in yaver.sqlite."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def test_analytics_counts_and_filters(tmp_path, isolate_jira_agent_artifacts, mo
     )
     jobs.update_job(d["job_id"], started_at=_stamp(40), status="completed")
 
-    sqlite = isolate_jira_agent_artifacts["jobs_dir"].parent / "jobs.sqlite"
+    sqlite = isolate_jira_agent_artifacts["jobs_dir"].parent / "yaver.sqlite"
     assert sqlite.is_file()
     assert jobs.count_jobs() == 4
 
@@ -914,7 +914,7 @@ def test_uvicorn_analytics_and_jobs_after_json_backfill(
 
     store = JobStore(jobs_dir=jobs_dir)
     assert store.ensure_index() == 2
-    sqlite = jobs_dir.parent / "jobs.sqlite"
+    sqlite = jobs_dir.parent / "yaver.sqlite"
     assert sqlite.is_file()
     monkeypatch.setattr("src.dashboard.analytics.default_job_store", store)
     monkeypatch.setattr("src.state.job_store.job_store", store)
@@ -958,6 +958,6 @@ def test_uvicorn_analytics_and_jobs_after_json_backfill(
         )
         assert detail.status_code == 200, detail.text
         assert detail.json()["job"]["description"] == "write the plan"
-        assert (jobs_dir / "job_e2ea0001.json").is_file()
+        assert not (jobs_dir / "job_e2ea0001.json").is_file()
     finally:
         server.should_exit = True

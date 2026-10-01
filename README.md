@@ -174,7 +174,7 @@ MR title: `feat(KAN-12): rate limit login`
 
 Yaver clones with the host PAT, resumes the **build** session for that repo + branches when one exists, replies on the same discussion, and opens/updates the MR if the agent committed.
 
-When the MR is **merged** or **closed**, Yaver deletes the matching temp clone, unlinks `{YAVER_DATA_DIR}/plans/{KEY}.md` for the key parsed from the title (`feat(KAN-12): …` → `KAN-12`), and drops that key's local issue state. Job JSON stays for Analytics. This is intentional even if the Jira ticket is still `plan_ready` or executing.
+When the MR is **merged** or **closed**, Yaver deletes the matching temp clone, unlinks `{YAVER_DATA_DIR}/plans/{KEY}.md` for the key parsed from the title (`feat(KAN-12): …` → `KAN-12`), and drops that key's local issue state. The job row stays in yaver.sqlite so Analytics still counts the run. This is intentional even if the Jira ticket is still `plan_ready` or executing.
 
 ---
 

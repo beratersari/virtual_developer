@@ -804,6 +804,9 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (settings || !live.settings) return
+    if (Array.isArray(live.settings.project_repositories)) {
+      projectsLoaded.current = true
+    }
     setSettings(live.settings)
     setDraft(fromSettings(live.settings))
   }, [live.settings, settings])
@@ -811,24 +814,18 @@ export function SettingsPage() {
   useEffect(() => {
     void fetchSettings()
       .then((s) => {
+        const serverHasList = Array.isArray(s.project_repositories)
+        if (serverHasList) projectsLoaded.current = true
         setSettings((cur) => {
-          if (projectsLoaded.current) {
-            return {
-              ...s,
-              project_repositories:
-                cur?.project_repositories ??
-                draftRef.current?.project_repositories ??
-                [],
-            }
+          if (!serverHasList && Array.isArray(cur?.project_repositories)) {
+            return { ...s, project_repositories: cur.project_repositories }
           }
-          return cur?.project_repositories
-            ? { ...s, project_repositories: cur.project_repositories }
-            : s
+          return s
         })
-        if (!dirtyRef.current && !projectsLoaded.current) {
+        if (!dirtyRef.current) {
           setDraft((d) => {
             const next = fromSettings(s)
-            if (d?.project_repositories?.length) {
+            if (!serverHasList && d?.project_repositories?.length) {
               next.project_repositories = d.project_repositories
             }
             return next

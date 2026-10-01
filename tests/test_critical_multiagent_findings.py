@@ -131,26 +131,32 @@ def test_s1_daemon_shares_processor_state_manager():
 
 
 def test_s2_update_state_if_must_fail_when_disk_write_fails(tmp_path, monkeypatch):
+    import sqlite3
+
     mgr = JiraStateManager(state_dir=tmp_path / "state")
     mgr.create_state("DISK-1", "s", "d")
     mgr.update_state("DISK-1", status=TaskStatus.EXECUTING)
 
-    real_replace = os.replace
+    real = mgr._conn
 
-    def boom_replace(src, dst):
-        raise OSError("simulated disk full")
+    class _FailWrites:
+        def execute(self, sql, *args, **kwargs):
+            text = sql if isinstance(sql, str) else ""
+            if text.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+                raise sqlite3.OperationalError("simulated disk full")
+            return real.execute(sql, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", boom_replace)
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(mgr, "_conn", _FailWrites())
     result = mgr.update_state_if(
         "DISK-1",
         expected_statuses={TaskStatus.EXECUTING},
         status=TaskStatus.COMPLETED,
         completed_at=datetime.now(),
     )
-    # Restore so we can read what is actually on disk
-    monkeypatch.setattr(os, "replace", real_replace)
 
-    # Correct: CAS must not claim success when persistence failed
     assert result is None, (
         "update_state_if must return None when set_state cannot persist"
     )

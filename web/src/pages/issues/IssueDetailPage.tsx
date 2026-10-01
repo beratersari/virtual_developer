@@ -12,6 +12,8 @@ import { MetaCard } from '../../ui/MetaCard'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { JobsTable } from '../jobs/JobsTable'
+import { usePageTitle } from '../../app/pageTitleContext'
+import { issuePageName } from '../../util/pageTitle'
 import { issueTabFromSection, issueTabPath, type IssueTab } from './issueTabUrl'
 import { groupDeliveries } from '../jobs/repoDeliveries'
 
@@ -38,6 +40,11 @@ export function IssueDetailPage() {
   const live = useLive()
   const cached = peekTask(issueKey.trim().toUpperCase())
   const [detail, setDetail] = useState<TaskDetail | null>(cached)
+  usePageTitle(
+    detail
+      ? issuePageName(detail.summary, detail.issue_key || issueKey, section)
+      : issuePageName(null, null, section),
+  )
   const [loading, setLoading] = useState(!cached)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)

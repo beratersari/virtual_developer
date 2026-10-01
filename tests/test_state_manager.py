@@ -60,20 +60,32 @@ def test_create_state_defaults_pending(state_manager):
 
 def test_legacy_hyphen_folded_file_still_loads(tmp_path):
     """KAN-12 stored as KAN_12.json (old sanitizer) must still be found."""
+    import json
+
     from src.state.manager import JiraStateManager
 
-    sm = JiraStateManager(state_dir=tmp_path / "state")
-    sm.create_state("KAN-12", "legacy name")
-    sm.update_state("KAN-12", status=TaskStatus.COMPLETED)
-    primary = sm._get_state_file("KAN-12")
-    legacy = sm._legacy_state_file("KAN-12")
-    if primary.exists() and primary != legacy:
-        legacy.write_text(primary.read_text(encoding="utf-8"), encoding="utf-8")
-        primary.unlink()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    legacy = state_dir / "KAN_12.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "issue_key": "KAN-12",
+                "issue_summary": "legacy name",
+                "description": "",
+                "status": "completed",
+                "metadata": {},
+                "retry_history": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sm = JiraStateManager(state_dir=state_dir)
     loaded = sm.get_state("KAN-12")
     assert loaded is not None
     assert loaded.issue_key == "KAN-12"
     assert loaded.status == TaskStatus.COMPLETED
+    assert not legacy.is_file()
 
 
 def test_create_state_returns_disk_state_when_write_refused(state_manager):

@@ -12,17 +12,18 @@ import { LineChart, type LineSeries } from '../../ui/LineChart'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { jobsFilterPath } from '../jobs/jobsFilterUrl'
-import { analyticsPeriodFromParam, analyticsPeriodPath } from './analyticsPeriodUrl'
+import {
+  ANALYTICS_PERIOD_LABELS,
+  ANALYTICS_PERIODS,
+  analyticsPeriodFromParam,
+  analyticsPeriodPath,
+  type AnalyticsPeriod,
+} from './analyticsPeriodUrl'
 
-const PERIODS = [
-  { id: '24h', label: '24 hours' },
-  { id: '7d', label: '7 days' },
-  { id: '30d', label: '30 days' },
-  { id: '90d', label: '90 days' },
-  { id: '1y', label: '1 year' },
-  { id: 'all', label: 'All' },
-  { id: 'custom', label: 'Custom' },
-] as const
+const PERIODS: { id: AnalyticsPeriod; label: string }[] = ANALYTICS_PERIODS.map((id) => ({
+  id,
+  label: ANALYTICS_PERIOD_LABELS[id],
+}))
 
 type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 

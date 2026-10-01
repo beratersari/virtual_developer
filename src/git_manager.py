@@ -358,6 +358,39 @@ class GitManager:
             self._unregister_live()
             raise
 
+    def _source_for_checkout(
+        self,
+        own_source: str,
+        own_target: str,
+        *,
+        reviewed: bool,
+    ) -> str:
+        """Follow-up source for one clone.
+
+        A stored primary base is the ticket text. The build already cut
+        ``feature/{KEY}`` from it, and the merge request uses that branch.
+        ``keep_source`` must not check the base out again. A sibling whose
+        source is a real branch, or an explicit base the event did not
+        replace, stays as given.
+        """
+        own = (own_source or "").strip()
+        if not self.keep_source_work_branch or not self._is_primary_base(own):
+            return own
+        event = (self.source_branch or "").strip()
+        if not event or self._is_primary_base(event):
+            return own
+        feature = self.resolve_work_branch_name(
+            self.issue_key,
+            own,
+            own_target,
+            keep_source=False,
+        )
+        if event == feature:
+            return feature
+        if reviewed:
+            return event
+        return own
+
     def _repository_specs(self) -> List[Dict[str, str]]:
         """One entry per clone: url, source branch, target branch."""
         raw_refs = getattr(self, "repository_refs", None) or []
@@ -403,14 +436,29 @@ class GitManager:
                     own_source = str(item.get("source_branch") or "").strip()
                     own_target = str(item.get("target_branch") or "").strip()
                     if inherit:
+                        chosen_target = own_target or (self.target_branch or "")
+                        chosen_source = self._source_for_checkout(
+                            own_source or (self.source_branch or ""),
+                            chosen_target,
+                            reviewed=True,
+                        )
                         _add(
                             raw_url,
-                            own_source or (self.source_branch or ""),
-                            own_target or (self.target_branch or ""),
+                            chosen_source,
+                            chosen_target,
                             inherit=True,
                         )
                     else:
-                        _add(raw_url, own_source, own_target, inherit=False)
+                        _add(
+                            raw_url,
+                            self._source_for_checkout(
+                                own_source,
+                                own_target,
+                                reviewed=False,
+                            ),
+                            own_target,
+                            inherit=False,
+                        )
         if len(specs) < 2:
             specs = []
             seen = set()
@@ -1948,6 +1996,7 @@ class GitManager:
         auth: bool = False,
         timeout: Optional[int] = None,
         ignore_cancel: bool = False,
+        quiet: bool = False,
     ) -> subprocess.CompletedProcess:
         """Run a git command in the temp working directory.
 
@@ -2089,7 +2138,7 @@ class GitManager:
                 logger.debug(
                     f"Git ref missing (probe): git {' '.join(safe_args)} — {safe_err.strip()}"
                 )
-            else:
+            elif not quiet:
                 logger.error(
                     f"Git command failed: git {' '.join(safe_args)}\n{safe_err}"
                 )
@@ -3016,6 +3065,133 @@ class GitManager:
             logger.debug(f"head_is_on_remote check failed for {branch}: {e}")
             return False
 
+    @classmethod
+    def _visible_git_lines(cls, text: str) -> list[str]:
+        """Terminal-shaped git lines: drop ``\\r`` progress updates, keep the final text."""
+        redacted = cls._redact_secret_text(text or "")
+        redacted = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", redacted)
+        kept: list[str] = []
+        for raw in redacted.replace("\r\n", "\n").split("\n"):
+            parts = raw.split("\r")
+            for index, part in enumerate(parts):
+                piece = part.strip()
+                if not piece:
+                    continue
+                last = index == len(parts) - 1
+                # ``git push --progress`` rewrites the same line with ``\\r``.
+                # Keep a finished stage (``done.``) and the last update only.
+                if not last and "%" in piece and "done" not in piece.lower():
+                    continue
+                kept.append(piece)
+        return kept
+
+    def _commits_ahead_for_push(self, branch: str) -> tuple[list[str], str]:
+        """Commits this push will send, as ``sha subject`` lines.
+
+        ``origin/{branch}..HEAD`` is what ``git push`` sends. A branch that
+        is not on the remote yet is listed against the target instead.
+        """
+        remote = f"origin/{branch}"
+        result = self._run_git(
+            ["log", "--format=%h %s", f"{remote}..HEAD"],
+            check=False,
+            quiet=True,
+        )
+        base = remote
+        if int(getattr(result, "returncode", 1) or 0) != 0:
+            target = (self.target_branch or "").strip()
+            if target and target != branch:
+                base = (
+                    f"origin/{target} (origin/{branch} is not on the remote yet)"
+                )
+                result = self._run_git(
+                    ["log", "--format=%h %s", f"origin/{target}..HEAD"],
+                    check=False,
+                    quiet=True,
+                )
+        if int(getattr(result, "returncode", 1) or 0) != 0:
+            return [], base
+        lines: list[str] = []
+        for raw in (getattr(result, "stdout", "") or "").splitlines():
+            line = self._redact_secret_text(raw.strip())
+            if line:
+                lines.append(line)
+        return lines, base
+
+    def _log_commits_ahead_of_push(self, branch: str) -> None:
+        """Write the unpushed commits into the daemon job log before ``git push``."""
+        try:
+            lines, base = self._commits_ahead_for_push(branch)
+        except GitCancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Could not list commits ahead of origin/{branch}: "
+                f"{self._redact_secret_text(str(exc))}"
+            )
+            return
+        remote = self._redact_secret_text((self.remote_url or "").strip())
+        where = f"`{branch}`"
+        if remote:
+            where = f"`{branch}` ({remote})"
+        if not lines:
+            logger.info(f"Push {where}: no commits ahead of {base}")
+            return
+        logger.info(f"Push {where}: {len(lines)} commit(s) ahead of {base}")
+        cap = 100
+        for line in lines[:cap]:
+            logger.info(f"  {line}")
+        extra = len(lines) - cap
+        if extra > 0:
+            logger.info(f"  … {extra} more commit(s)")
+
+    def _log_push_output(self, branch: str, result: subprocess.CompletedProcess) -> None:
+        """Copy git push stdout/stderr into the daemon job log, one line each."""
+        stderr = str(getattr(result, "stderr", "") or "")
+        stdout = str(getattr(result, "stdout", "") or "")
+        lines = self._visible_git_lines(stderr)
+        for line in self._visible_git_lines(stdout):
+            if line not in lines:
+                lines.append(line)
+        header = f"git push --progress -u origin -- {branch}"
+        if not lines:
+            logger.info(f"{header}: (no output)")
+            return
+        logger.info(header)
+        cap = 200
+        for line in lines[:cap]:
+            logger.info(line)
+        extra = len(lines) - cap
+        if extra > 0:
+            logger.info(f"… {extra} more git push line(s)")
+
+    def _push_branch(self, branch: str) -> None:
+        """Push ``branch`` and record git's own text on the job log.
+
+        Raises ``RuntimeError`` when git exits non-zero so the caller can
+        rebase and retry. ``GitCancelledError`` propagates.
+        """
+        self._log_commits_ahead_of_push(branch)
+        result = self._run_git(
+            ["push", "--progress", "-u", "origin", "--", branch],
+            auth=True,
+            check=False,
+        )
+        self._log_push_output(branch, result)
+        rc = getattr(result, "returncode", 1)
+        try:
+            failed = int(rc) != 0
+        except (TypeError, ValueError):
+            failed = True
+        if failed:
+            detail = self._redact_secret_text(
+                f"{getattr(result, 'stderr', '') or ''}\n"
+                f"{getattr(result, 'stdout', '') or ''}"
+            ).strip()
+            raise RuntimeError(
+                f"Git command failed: git push --progress -u origin -- {branch}\n{detail}"
+            )
+
     def push(self, branch_name: Optional[str] = None) -> bool:
         """Push work branch to origin.
 
@@ -3066,7 +3242,7 @@ class GitManager:
             try:
                 if not self._integrate_remote_before_push(branch):
                     return False
-                self._run_git(["push", "-u", "origin", "--", branch], auth=True)
+                self._push_branch(branch)
                 logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
             except GitCancelledError:
@@ -3082,7 +3258,7 @@ class GitManager:
                                 summarize_git_error(e1) or str(e1).strip()
                             ) or "git push failed"
                         return False
-                    self._run_git(["push", "-u", "origin", "--", branch], auth=True)
+                    self._push_branch(branch)
                     logger.info(
                         f"Pushed branch '{branch}' after rebase onto origin."
                     )

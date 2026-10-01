@@ -1,6 +1,6 @@
 """Upgrade path: months of job JSON plus a real OpenCode session DB, over TCP.
 
-The new exe creates jobs.sqlite on first Analytics/Jobs request. These tests
+The new exe creates yaver.sqlite on first Analytics/Jobs request. These tests
 do not call ensure_index themselves. uvicorn + httpx is the same request a
 browser sends. The OpenCode session table is the real lookup schema, not a
 stand-in for find_sessions_for_issue.
@@ -169,7 +169,7 @@ def test_http_backfill_old_jobs_and_real_opencode_session(
     (jobs_dir / "job_corrupt.json").write_text("{not json", encoding="utf-8")
 
     store: JobStore = isolate_jira_agent_artifacts["job_store"]
-    # JobStore opens an empty jobs.sqlite in __init__. Rows appear on the
+    # JobStore opens an empty yaver.sqlite in __init__. Rows appear on the
     # first Analytics request, which is what a new exe does at startup.
     monkeypatch.setattr("src.dashboard.analytics.default_job_store", store)
     monkeypatch.setattr("src.dashboard.service.default_job_store", store)
@@ -224,7 +224,9 @@ def test_http_backfill_old_jobs_and_real_opencode_session(
         assert body["totals"]["jobs"] == 2
         assert body["totals"]["error"] == 1
         assert body["totals"]["completed"] == 1
-        assert (jobs_dir.parent / "jobs.sqlite").is_file()
+        assert (jobs_dir.parent / "yaver.sqlite").is_file()
+        assert (jobs_dir / "job_corrupt.json").is_file()
+        assert not (jobs_dir / "job_legacy77.json").is_file()
 
         everything = httpx.get(
             f"{base}/api/analytics",

@@ -38,6 +38,8 @@ import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
 import { JobChatTab } from './JobChatTab'
+import { usePageTitle } from '../../app/pageTitleContext'
+import { jobPageName } from '../../util/pageTitle'
 import { jobTabFromSection, jobTabPath, type JobTab } from './jobTabUrl'
 
 export function JobDetailPage() {
@@ -47,6 +49,7 @@ export function JobDetailPage() {
   const live = useLive()
   const cached = peekJob(jobId.trim())
   const [job, setJob] = useState<JobItem | null>(cached)
+  usePageTitle(jobPageName(job?.summary, section, job?.issue_key))
   const [prompts, setPrompts] = useState<TextArtifact[]>([])
   const [sessionLogs, setSessionLogs] = useState<TextArtifact[]>([])
   const [systemLogs, setSystemLogs] = useState<SystemLogLine[]>([])

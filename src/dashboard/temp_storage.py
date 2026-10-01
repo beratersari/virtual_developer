@@ -308,12 +308,18 @@ def _scan_mr_states_once() -> None:
     seen: Set[str] = set()
     try:
         for rec in _clone_issue_index().values():
-            url = str(rec.get("merge_request_url") or "").strip()
-            key = _norm_mr_url(url)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            urls.append(url)
+            candidates: List[str] = []
+            for link in rec.get("merge_requests") or []:
+                if isinstance(link, dict):
+                    candidates.append(str(link.get("url") or ""))
+            candidates.append(str(rec.get("merge_request_url") or ""))
+            for url in candidates:
+                url = url.strip()
+                key = _norm_mr_url(url)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                urls.append(url)
     except Exception as e:
         logger.debug(f"Storage MR index failed: {e}")
         return
@@ -349,15 +355,39 @@ def _persist_job_mr_state(url: str, state: str) -> None:
 
 
 def _apply_live_mr_state(row: Dict[str, Any]) -> bool:
-    """Overlay cached GitLab state. Returns True if a fetch is still needed."""
+    """Overlay cached review state on every link.
+
+    Returns True when any linked review still needs a fetch. A stored
+    state stays visible while that fetch is pending.
+    """
+    pending = False
+    seen: Set[str] = set()
+    links = row.get("merge_requests")
+    if not isinstance(links, list):
+        links = []
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("url") or "").strip()
+        key = _norm_mr_url(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        live = _cached_mr_state(url)
+        if live:
+            link["state"] = live
+        else:
+            pending = True
     url = str(row.get("merge_request_url") or "").strip()
-    if not url:
-        return False
+    key = _norm_mr_url(url)
+    if not key:
+        return pending
     live = _cached_mr_state(url)
     if live:
         row["merge_request_state"] = live
-        return False
-    return True
+    elif key not in seen:
+        pending = True
+    return pending
 
 
 def _cached_size(name: str, mtime: float | None) -> int | None:
@@ -546,6 +576,70 @@ def _job_session_ids(job: Dict[str, Any]) -> List[str]:
 
 
 _LIVE_JOB_STATUSES = frozenset({"running", "planning", "executing", "pending"})
+_REVIEW_WORKFLOWS = frozenset(
+    {
+        "review",
+        "gitlab-review",
+        "azure-review",
+        "gitlab_review",
+        "azure_review",
+    }
+)
+
+
+def _job_belongs_to_merged_review(
+    job: Dict[str, Any], *, want: str, key: str
+) -> bool:
+    """True when this job is the merged review, not another run on the same key."""
+    if want:
+        for url in _job_review_urls(job):
+            if _norm_mr_url(url) == want:
+                return True
+    if key and str(job.get("issue_key") or "").strip().upper() == key:
+        workflow = str(job.get("workflow_type") or "").strip().lower()
+        if workflow in _REVIEW_WORKFLOWS:
+            return True
+    return False
+
+
+def _close_open_jobs_after_review_merge(
+    job_store: Any, *, want: str, key: str
+) -> None:
+    """Stop counting a merged review as in flight. The row stays for Analytics."""
+    if job_store is None or not (want or key):
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    message = "Merge request merged or closed while this job was still open."
+    try:
+        rows = job_store.iter_jobs()
+    except Exception as e:
+        logger.debug(f"MR-merge could not list jobs to close: {e}")
+        return
+    seen: Set[str] = set()
+    for job in rows:
+        jid = str(job.get("job_id") or "").strip()
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        status = str(job.get("status") or "").strip().lower()
+        if status not in _LIVE_JOB_STATUSES:
+            continue
+        if not _job_belongs_to_merged_review(job, want=want, key=key):
+            continue
+        try:
+            updated = job_store.update_job(
+                jid,
+                status="cancelled",
+                completed_at=now,
+                error_message=message,
+            )
+        except Exception as e:
+            logger.debug(f"MR-merge could not close job {jid}: {e}")
+            continue
+        if updated is None:
+            continue
+        issue = str(job.get("issue_key") or "").strip() or "-"
+        logger.info(f"MR-merge closed open job {jid} issue={issue}")
 
 
 def _purge_merged_review_artifacts(
@@ -556,15 +650,17 @@ def _purge_merged_review_artifacts(
 ) -> None:
     """Remove clone logs, plan, issue state, and OpenCode rows for this review.
 
-    Keeps ``job_*.json`` so Analytics still counts the run. Manual Jobs →
-    Delete removes the store file. Does not touch the shared daemon log.
-    Live jobs skip session-log delete.
+    The job row stays in yaver.sqlite so Analytics still counts the run.
+    An in-flight row is marked cancelled after the session-log pass, so the
+    jobs list stops counting it. Manual Jobs → Delete removes that row.
+    Does not touch the shared daemon log. Live jobs skip session-log delete.
 
     The issue key comes from the MR/PR title (``feat(KAN-12)`` → ``KAN-12``).
     Unlinking that plan file and local state is intentional, including when
     the Jira ticket is still ``plan_ready`` or executing.
     """
     want = _norm_mr_url(mr_url)
+    key = (issue_key or "").strip().upper()
     sids: List[str] = []
     if clone is not None:
         sids.extend(_forget_binds_for_clone(clone))
@@ -595,7 +691,9 @@ def _purge_merged_review_artifacts(
                 delete_job_session_artifacts(job)
             except Exception as e:
                 logger.debug(f"MR-merge could not delete session logs for {jid}: {e}")
-    key = (issue_key or "").strip().upper()
+    # After the log pass: a live status above kept its session log.
+    if job_store is not None:
+        _close_open_jobs_after_review_merge(job_store, want=want, key=key)
     if key:
         try:
             from src.paths import plans_dir
@@ -664,6 +762,59 @@ def _path_lookup_keys(raw: Any) -> List[str]:
     return out
 
 
+def _copy_review_links(raw: Any) -> List[Dict[str, Any]]:
+    """Copy ``{url, state}`` rows. Empty input stays empty."""
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        key = _norm_mr_url(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        state = str(item.get("state") or "").strip() or None
+        out.append({"url": url, "state": state})
+    return out
+
+
+def _reviews_for_job(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Deliveries first, then the job URL when it is not already listed.
+
+    A delivery's own state wins. The job-level state applies only to the
+    job-level URL.
+    """
+    top_url = str(job.get("merge_request_url") or "").strip()
+    top_key = _norm_mr_url(top_url)
+    top_state = str(job.get("merge_request_state") or "").strip() or None
+    rows: List[Any] = list(job.get("deliveries") or [])
+    if top_url:
+        rows.append(
+            {
+                "merge_request_url": top_url,
+                "merge_request_state": top_state or "",
+            }
+        )
+    links: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("merge_request_url") or "").strip()
+        key = _norm_mr_url(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        state = str(row.get("merge_request_state") or "").strip() or None
+        if state is None and key == top_key:
+            state = top_state
+        links.append({"url": raw, "state": state})
+    return links
+
+
 def _put_clone_issue(
     index: Dict[str, Dict[str, Any]],
     path: Any,
@@ -673,6 +824,7 @@ def _put_clone_issue(
     job_id: str = "",
     merge_request_url: str = "",
     merge_request_state: str = "",
+    merge_requests: Any = None,
     when: str = "",
     prefer: bool = False,
 ) -> None:
@@ -685,6 +837,7 @@ def _put_clone_issue(
         "job_id": (job_id or "").strip() or None,
         "merge_request_url": (merge_request_url or "").strip() or None,
         "merge_request_state": (merge_request_state or "").strip() or None,
+        "merge_requests": _copy_review_links(merge_requests),
         "_when": (when or "").strip(),
     }
     for lookup in _path_lookup_keys(path):
@@ -704,6 +857,10 @@ def _put_clone_issue(
                     rec["merge_request_url"] = prev.get("merge_request_url")
                 if not rec["merge_request_state"]:
                     rec["merge_request_state"] = prev.get("merge_request_state")
+                if not rec["merge_requests"]:
+                    rec["merge_requests"] = _copy_review_links(
+                        prev.get("merge_requests")
+                    )
                 if not rec["_when"]:
                     rec["_when"] = prev.get("_when") or ""
             index[lookup] = rec
@@ -716,6 +873,8 @@ def _put_clone_issue(
             prev["merge_request_url"] = rec["merge_request_url"]
         if not prev.get("merge_request_state") and rec["merge_request_state"]:
             prev["merge_request_state"] = rec["merge_request_state"]
+        if not prev.get("merge_requests") and rec["merge_requests"]:
+            prev["merge_requests"] = _copy_review_links(rec["merge_requests"])
         if not prev.get("_when") and rec["_when"]:
             prev["_when"] = rec["_when"]
 
@@ -782,6 +941,7 @@ def _build_clone_issue_index() -> Dict[str, Dict[str, Any]]:
                 job_id=str(job.get("job_id") or ""),
                 merge_request_url=str(job.get("merge_request_url") or ""),
                 merge_request_state=str(job.get("merge_request_state") or ""),
+                merge_requests=_reviews_for_job(job),
                 when=str(
                     job.get("started_at") or job.get("updated_at") or ""
                 ),
@@ -830,12 +990,12 @@ def _build_clone_issue_index() -> Dict[str, Dict[str, Any]]:
 
 
 def _fill_missing_mr(index: Dict[str, Dict[str, Any]]) -> None:
-    """Copy review *state* onto a folder that already has that review URL.
+    """Copy review *state* onto a folder link that already has that URL.
 
     Do not copy the issue's merge_request_url onto every clone for that
     Jira key. A GitLab/Azure comment job for ``feat(KAN-12)`` would
     otherwise paint the Jira KAN-12 plan folder as that PR and sweep
-    would delete it.
+    would delete it. One metadata URL fills only the matching link.
     """
     try:
         from src.state.manager import JiraStateManager
@@ -843,7 +1003,17 @@ def _fill_missing_mr(index: Dict[str, Dict[str, Any]]) -> None:
         sm = JiraStateManager()
         for rec in index.values():
             url = str(rec.get("merge_request_url") or "").strip()
-            if not url or rec.get("merge_request_state"):
+            links = rec.get("merge_requests") or []
+            if not isinstance(links, list):
+                links = []
+            needs_top = bool(url) and not rec.get("merge_request_state")
+            needs_link = any(
+                isinstance(link, dict)
+                and str(link.get("url") or "").strip()
+                and not str(link.get("state") or "").strip()
+                for link in links
+            )
+            if not needs_top and not needs_link:
                 continue
             ik = (rec.get("issue_key") or "").strip().upper()
             if not ik:
@@ -852,8 +1022,17 @@ def _fill_missing_mr(index: Dict[str, Dict[str, Any]]) -> None:
             meta = (st.metadata or {}) if st else {}
             meta_url = str(meta.get("merge_request_url") or "").strip()
             state = str(meta.get("merge_request_state") or "").strip()
-            if state and _same_review_url(url, meta_url):
+            if not state or not meta_url:
+                continue
+            if needs_top and _same_review_url(url, meta_url):
                 rec["merge_request_state"] = state
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                if str(link.get("state") or "").strip():
+                    continue
+                if _same_review_url(str(link.get("url") or ""), meta_url):
+                    link["state"] = state
     except Exception as e:
         logger.debug(f"storage MR fill from state failed: {e}")
 
@@ -864,12 +1043,24 @@ def _issue_fields_for(
     for lookup in _path_lookup_keys(path) + _path_lookup_keys(name):
         hit = index.get(lookup)
         if hit:
+            links = _copy_review_links(hit.get("merge_requests"))
+            if not links:
+                lone = str(hit.get("merge_request_url") or "").strip()
+                if lone:
+                    links = [
+                        {
+                            "url": lone,
+                            "state": str(hit.get("merge_request_state") or "").strip()
+                            or None,
+                        }
+                    ]
             return {
                 "issue_key": hit.get("issue_key"),
                 "summary": hit.get("summary") or "",
                 "job_id": hit.get("job_id"),
                 "merge_request_url": hit.get("merge_request_url"),
                 "merge_request_state": hit.get("merge_request_state"),
+                "merge_requests": links,
             }
     return {
         "issue_key": None,
@@ -877,6 +1068,7 @@ def _issue_fields_for(
         "job_id": None,
         "merge_request_url": None,
         "merge_request_state": None,
+        "merge_requests": [],
     }
 
 
@@ -1408,20 +1600,7 @@ def _recorded_azure_matches(
 
 def _job_review_urls(job: Dict[str, Any]) -> List[str]:
     """Every merge-request URL stored on this job, including each delivery."""
-    urls: List[str] = []
-    seen: Set[str] = set()
-    rows: List[Any] = list(job.get("deliveries") or [])
-    rows.append({"merge_request_url": job.get("merge_request_url")})
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        raw = str(row.get("merge_request_url") or "").strip()
-        key = _norm_mr_url(raw)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        urls.append(raw)
-    return urls
+    return [str(row["url"]) for row in _reviews_for_job(job)]
 
 
 def _job_matches_review(

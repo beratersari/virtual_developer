@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
 import { analyticsBackHref } from './analyticsPeriodUrl'
+import { reviewsPageName } from '../../util/pageTitle'
 import { ApiError, fetchAnalyticsReviews } from '../../api/client'
 import type { AnalyticsReviewsPayload } from '../../api/types'
 import { Alert } from '../../ui/Alert'
@@ -22,19 +23,6 @@ const ORIGINS: { id: string; label: string }[] = [
   { id: 'contributed', label: 'Contributed' },
   { id: 'all', label: 'All' },
 ]
-
-function titleFor(origin: string, state: string) {
-  const who =
-    origin === 'ours'
-      ? 'Opened by us'
-      : origin === 'contributed'
-        ? 'Contributed'
-        : 'Merge requests'
-  if (state === 'opened') return `${who} · open`
-  if (state === 'merged') return `${who} · merged`
-  if (state === 'closed') return `${who} · closed`
-  return who
-}
 
 function fallbackLabel(row: {
   url: string
@@ -155,7 +143,7 @@ export function AnalyticsReviewsPage() {
     <section className="space-y-5">
       <PageHeader
         kicker="Workbench"
-        title={titleFor(origin, state)}
+        title={reviewsPageName(origin, state)}
         description={
           <>
             Unique GitLab MRs and Azure PRs from ticket work and /yaver

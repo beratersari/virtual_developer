@@ -159,7 +159,7 @@ def test_progress_percent_clamped():
     assert 0 <= runner._parse_progress("Progress: 150%") <= 100
 
 
-def test_queue_count_must_not_double_count_listed_rows():
+def test_queue_count_must_not_double_count_listed_rows(tmp_path):
     """Jobs nav badge uses queued_count. build_queue currently adds
     list_items(limit=500) *and* increments again per returned row.
     Three waiting items must report 3, not 6.
@@ -167,11 +167,8 @@ def test_queue_count_must_not_double_count_listed_rows():
     from src.dashboard.service import build_queue
     from src.state.queue_store import WorkQueueStore
 
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory() as td:
-        store = WorkQueueStore(queue_dir=Path(td))
+    store = WorkQueueStore(queue_dir=tmp_path / "queue")
+    try:
         for i in range(3):
             store.enqueue(
                 source="jira",
@@ -187,6 +184,11 @@ def test_queue_count_must_not_double_count_listed_rows():
             f"queued_count={payload.queued_count} for 3 queued rows "
             "(double-count in build_queue)"
         )
+    finally:
+        conn = store._conn
+        store._conn = None
+        if conn is not None:
+            conn.close()
 
 
 def test_adf_cloud_description_must_still_parse_params():

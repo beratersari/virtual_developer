@@ -174,7 +174,7 @@ MR başlığı: `feat(KAN-12): giriş hız sınırı`
 
 Yaver ev sahibi PAT ile klonlar, o depo + dallar için **build** oturumu varsa onu sürdürür, aynı tartışmada yanıtlar, ajan commitlediyse MR’yi açar veya günceller.
 
-MR **birleşince** veya **kapanınca** eşleşen geçici kopya silinir; başlıktan okunan anahtar için `{YAVER_DATA_DIR}/plans/{KEY}.md` ve yerel iş durumu da silinir (`feat(KAN-12): …` → `KAN-12`). Jira işi hâlâ `plan_ready` veya çalışıyor olsa da bu **bilinçli** temizliktir. Analytics için iş JSON’u kalır.
+MR **birleşince** veya **kapanınca** eşleşen geçici kopya silinir; başlıktan okunan anahtar için `{YAVER_DATA_DIR}/plans/{KEY}.md` ve yerel iş durumu da silinir (`feat(KAN-12): …` → `KAN-12`). Jira işi hâlâ `plan_ready` veya çalışıyor olsa da bu **bilinçli** temizliktir. Analytics sayımı için iş satırı yaver.sqlite içinde kalır.
 
 ---
 

@@ -392,8 +392,12 @@ def build_settings_view(*, include_projects: bool = True) -> SettingsView:
     )
 
 
-def settings_response(*, include_projects: bool = False) -> Dict[str, Any]:
-    """Settings JSON for the dashboard. The saved-project list stays out."""
+def settings_response(*, include_projects: bool = True) -> Dict[str, Any]:
+    """Settings JSON for the dashboard, including saved projects and repo sets.
+
+    The lists come from ``saved_catalog.json``. This does not call GitLab
+    or Azure. Reload from tokens is the import.
+    """
     payload = build_settings_view(include_projects=include_projects).model_dump()
     if not include_projects:
         payload.pop("project_repositories", None)
@@ -1564,7 +1568,7 @@ def build_jobs(
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
 
-    # JobStore SQLite index — do not hydrate every job_*.json for the list.
+    # Jobs are documents in yaver.sqlite. Do not scan a jobs folder for the list.
     # Retries live under the parent job (session_log_paths / retry_attempts).
     raw = js.iter_jobs()
     raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
@@ -1594,8 +1598,8 @@ def build_jobs(
 
     total = len(raw)
     page_raw = raw[offset : offset + size]
-    # Index rows omit error text, session ids, and delivery. Open JSON only
-    # for this page so a months-old history still shows those fields.
+    # Reload each visible row so the page shows the stored document
+    # (error text, session ids, and delivery).
     page_jobs: List[Dict[str, Any]] = []
     for j in page_raw:
         full = None

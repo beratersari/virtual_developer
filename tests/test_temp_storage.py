@@ -169,6 +169,226 @@ def test_storage_view_shows_live_mr_state(tmp_path: Path, monkeypatch: pytest.Mo
     assert view2["mr_states_pending"] is False
 
 
+def test_storage_view_lists_every_merge_request_on_a_multi_repo_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A multi_* workspace records one merge request per repository.
+
+    The job's top-level URL is only the latest delivery. Storage has to
+    list every delivery, with that delivery's own state.
+    """
+    from src.config import settings
+    from src.dashboard.temp_storage import build_storage_view, reset_size_cache
+    from src.state.job_store import job_store
+
+    reset_size_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "multi_abc123def456"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.setattr(
+        "src.dashboard.temp_storage._ensure_mr_state_scan", lambda: None
+    )
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    job = job_store.create_job(issue_key="KAN-12", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=two,
+        merge_request_state="merged",
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+                "merge_request_state": "opened",
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+                "merge_request_state": "merged",
+            },
+        ],
+    )
+    view = build_storage_view()
+    folder = view["folders"][0]
+    urls = [row["url"] for row in folder["merge_requests"]]
+    assert urls == [one, two]
+    assert folder["merge_request_url"] == two
+    by_url = {row["url"]: row["state"] for row in folder["merge_requests"]}
+    assert by_url[one] == "opened"
+    assert by_url[two] == "merged"
+
+
+def test_storage_scan_looks_up_every_merge_request_on_a_multi_repo_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        _scan_mr_states_once,
+        build_storage_view,
+        reset_size_cache,
+    )
+    from src.state.job_store import job_store
+
+    reset_size_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "multi_scanmrs"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    job = job_store.create_job(issue_key="KAN-13", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=two,
+        merge_request_state="opened",
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+                "merge_request_state": "opened",
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+                "merge_request_state": "opened",
+            },
+        ],
+    )
+    called: list[str] = []
+
+    def _lookup(url: str) -> str:
+        called.append(url.rstrip("/"))
+        if url.rstrip("/").endswith("/1"):
+            return "opened"
+        return "merged"
+
+    monkeypatch.setattr("src.dashboard.temp_storage._lookup_review_state", _lookup)
+    _scan_mr_states_once()
+    assert one in called
+    assert two in called
+    view = build_storage_view()
+    folder = view["folders"][0]
+    by_url = {row["url"]: row["state"] for row in folder["merge_requests"]}
+    assert by_url[one] == "opened"
+    assert by_url[two] == "merged"
+    assert folder["merge_request_url"] == two
+    assert view["mr_states_pending"] is False
+
+
+def test_storage_view_keeps_merge_requests_while_the_clone_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A live git registration has no review URL. It must not hide deliveries."""
+    from types import SimpleNamespace
+
+    from src.config import settings
+    from src.dashboard.temp_storage import build_storage_view, reset_size_cache
+    from src.git_manager import GitManager
+    from src.state.job_store import job_store
+
+    reset_size_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "multi_livekeep"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.setattr(
+        "src.dashboard.temp_storage._ensure_mr_state_scan", lambda: None
+    )
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    job = job_store.create_job(issue_key="KAN-14", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=two,
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+                "merge_request_state": "opened",
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+                "merge_request_state": "opened",
+            },
+        ],
+    )
+    previous = GitManager._live_by_issue.get("KAN-14")
+    GitManager._live_by_issue["KAN-14"] = SimpleNamespace(temp_dir=clone)
+    try:
+        view = build_storage_view()
+    finally:
+        if previous is None:
+            GitManager._live_by_issue.pop("KAN-14", None)
+        else:
+            GitManager._live_by_issue["KAN-14"] = previous
+    folder = view["folders"][0]
+    urls = [row["url"] for row in folder["merge_requests"]]
+    assert urls == [one, two]
+    assert folder["merge_request_url"] == two
+
+
+def test_storage_view_uses_the_newer_jobs_merge_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The newer job's deliveries are the whole list. Older URLs stay off it."""
+    from src.config import settings
+    from src.dashboard.temp_storage import build_storage_view, reset_size_cache
+    from src.state.job_store import job_store
+
+    reset_size_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "multi_newer"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.setattr(
+        "src.dashboard.temp_storage._ensure_mr_state_scan", lambda: None
+    )
+    stale = "https://gitlab.example/group/stale/-/merge_requests/9"
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    older = job_store.create_job(issue_key="KAN-15", summary="old")
+    job_store.update_job(
+        older["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=stale,
+        started_at="2020-01-01T00:00:00",
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/stale.git",
+                "merge_request_url": stale,
+                "merge_request_state": "opened",
+            }
+        ],
+    )
+    newer = job_store.create_job(issue_key="KAN-15", summary="new")
+    job_store.update_job(
+        newer["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=two,
+        started_at="2026-01-01T00:00:00",
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+                "merge_request_state": "opened",
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+                "merge_request_state": "merged",
+            },
+        ],
+    )
+    view = build_storage_view()
+    urls = [row["url"] for row in view["folders"][0]["merge_requests"]]
+    assert urls == [one, two]
+
+
 def test_storage_view_resolves_azure_pr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from src.config import settings
     from src.dashboard.temp_storage import (
@@ -611,6 +831,58 @@ def test_fill_missing_mr_does_not_paint_jira_clone_with_pr_url(
             break
     assert rec is not None
     assert not rec.get("merge_request_url")
+    assert rec.get("merge_requests") in (None, [])
+
+
+def test_fill_missing_mr_state_only_on_the_matching_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    """Issue metadata fills the one review it names, not every delivery."""
+    from src.dashboard.temp_storage import _build_clone_issue_index
+    from src.state.job_store import job_store
+    from src.state.manager import JiraStateManager
+
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    clone = tmp_path / "multi_fill"
+    clone.mkdir()
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    monkeypatch.setattr("src.state.manager.JiraStateManager", lambda *a, **k: sm)
+    sm.create_state("KAN-16", "multi", "d")
+    sm.update_state(
+        "KAN-16",
+        metadata={
+            "merge_request_url": one,
+            "merge_request_state": "merged",
+        },
+    )
+    job = job_store.create_job(issue_key="KAN-16", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=two,
+        deliveries=[
+            {
+                "repository_url": "https://gitlab.example/group/one.git",
+                "merge_request_url": one,
+            },
+            {
+                "repository_url": "https://gitlab.example/group/two.git",
+                "merge_request_url": two,
+            },
+        ],
+    )
+    index = _build_clone_issue_index()
+    rec = next(
+        row
+        for row in index.values()
+        if str(row.get("issue_key") or "").upper() == "KAN-16"
+    )
+    by_url = {row["url"]: row.get("state") for row in rec["merge_requests"]}
+    assert by_url[one] == "merged"
+    assert not by_url[two]
+    assert rec.get("merge_request_url") == two
+    assert not rec.get("merge_request_state")
 
 
 def test_sweep_merged_skips_missing_names_and_deletes_existing_azure_pr(

@@ -277,8 +277,6 @@ def _write_schedule(store, *, issue_key: str, scheduled_at: str, mtime: float):
         issue_key=issue_key,
         issue_description="x",
     )
-    path = store._path(rec["schedule_id"])
-    os.utime(path, (mtime, mtime))
     return rec
 
 
