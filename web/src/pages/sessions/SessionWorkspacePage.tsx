@@ -12,6 +12,8 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { MarkdownBody } from '../../ui/MarkdownBody'
 import { PageHeader } from '../../ui/PageHeader'
 import { JobsTable } from '../jobs/JobsTable'
+import { usePageTitle } from '../../app/pageTitleContext'
+import { workspacePageName } from '../../util/pageTitle'
 import {
   cloneFolder,
   kindLabel,
@@ -55,6 +57,7 @@ export function SessionWorkspacePage() {
   }, [live.generation, workspaceId])
 
   const w = detail?.workspace
+  usePageTitle(workspacePageName(w?.branch, w?.target_branch))
   const target = detail?.sessions.find((s) => s.bind_id === resetId)
   const targetKind = kindLabel(target?.kind)
 

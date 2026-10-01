@@ -19,7 +19,7 @@ from typing import Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -239,14 +239,39 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
             except Exception:
                 pass
 
-    def _spa_index() -> FileResponse:
-        return FileResponse(
-            dist / "index.html",
+    def _spa_index(request: Request) -> Response:
+        html_path = dist / "index.html"
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        }
+        try:
+            raw = html_path.read_text(encoding="utf-8")
+        except OSError:
+            return FileResponse(
+                html_path,
+                media_type="text/html; charset=utf-8",
+                headers=headers,
+            )
+        if "<title" not in raw.lower():
+            return FileResponse(
+                html_path,
+                media_type="text/html; charset=utf-8",
+                headers=headers,
+            )
+        try:
+            from src.dashboard.page_title import apply_document_title, document_title
+        except Exception:
+            return FileResponse(
+                html_path,
+                media_type="text/html; charset=utf-8",
+                headers=headers,
+            )
+        title = document_title(request.url.path, request.url.query)
+        return HTMLResponse(
+            content=apply_document_title(raw, title),
             media_type="text/html; charset=utf-8",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-            },
+            headers=headers,
         )
 
     def _file_response(path: Path) -> FileResponse:
@@ -265,11 +290,11 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
         return FileResponse(**kwargs)
 
     @app.get("/")
-    def index() -> FileResponse:
-        return _spa_index()
+    def index(request: Request) -> Response:
+        return _spa_index(request)
 
     @app.get("/{full_path:path}")
-    def spa_or_file(full_path: str) -> FileResponse:
+    def spa_or_file(full_path: str, request: Request) -> Response:
         low = (full_path or "").lstrip("/").lower()
         if low.startswith("api/") or low == "ws" or low.startswith("ws/"):
             from fastapi import HTTPException
@@ -279,10 +304,10 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
         try:
             candidate.relative_to(dist.resolve())
         except ValueError:
-            return _spa_index()
+            return _spa_index(request)
         if candidate.is_file():
             return _file_response(candidate)
-        return _spa_index()
+        return _spa_index(request)
 
     return app
 
