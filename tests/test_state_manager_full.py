@@ -1,6 +1,7 @@
 """Full branch coverage for JiraStateManager."""
 
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import mock_open, patch
 
@@ -34,15 +35,31 @@ def test_set_state_same_status_no_transition_log(state_manager):
     assert state_manager.get_state("TR-2").status == TaskStatus.PENDING
 
 
+class _FailWrites:
+    def __init__(self, real: sqlite3.Connection, prefixes: tuple[str, ...]) -> None:
+        self._real = real
+        self._prefixes = prefixes
+
+    def execute(self, sql, *args, **kwargs):
+        text = sql if isinstance(sql, str) else ""
+        if text.lstrip().upper().startswith(self._prefixes):
+            raise sqlite3.OperationalError("disk full")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
 def test_set_state_write_error(state_manager, monkeypatch):
     s = state_manager.create_state("TR-3", "s", "d")
-
-    def boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr("builtins.open", boom)
-    # should not raise
-    state_manager.set_state(s)
+    s.status = TaskStatus.PLANNING
+    monkeypatch.setattr(
+        state_manager,
+        "_conn",
+        _FailWrites(state_manager._conn, ("INSERT", "UPDATE", "DELETE")),
+    )
+    assert state_manager.set_state(s) is False
+    assert state_manager.get_state("TR-3").status == TaskStatus.PENDING
 
 
 def test_update_unknown_field_warns(state_manager):
@@ -80,17 +97,13 @@ def test_delete_state_exists_and_missing(state_manager):
 
 def test_delete_state_unlink_error(state_manager, monkeypatch):
     state_manager.create_state("DEL-2", "s", "d")
-    path = state_manager._get_state_file("DEL-2")
-
-    class BoomPath:
-        def exists(self):
-            return True
-
-        def unlink(self):
-            raise OSError("perm")
-
-    monkeypatch.setattr(state_manager, "_get_state_file", lambda k: BoomPath())
+    monkeypatch.setattr(
+        state_manager,
+        "_conn",
+        _FailWrites(state_manager._conn, ("DELETE",)),
+    )
     assert state_manager.delete_state("DEL-2") is False
+    assert state_manager.get_state("DEL-2") is not None
 
 
 def test_safe_key_sanitization(state_manager):

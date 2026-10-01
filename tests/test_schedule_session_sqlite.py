@@ -30,7 +30,8 @@ def test_schedule_list_and_count_use_sqlite(tmp_path):
     _schedule(store, issue_key="KAN-1", when="2026-12-01T10:00:00", title="later")
     _schedule(store, issue_key="KAN-2", when="2026-12-03T10:00:00", title="newest")
     _schedule(store, issue_key="KAN-3", when="2026-12-02T10:00:00", title="middle")
-    assert (tmp_path / "schedules.sqlite").is_file()
+    assert (tmp_path / "yaver.sqlite").is_file()
+    assert list((tmp_path / "schedules").glob("sched_*.json")) == []
     assert store.count_schedules() == 3
     assert store.count_schedules(status="scheduled") == 3
     page = store.list_schedules(limit=2, offset=0)
@@ -71,6 +72,8 @@ def test_schedule_index_backfills_existing_json(tmp_path):
     )
     store = ScheduleStore(schedules_dir=folder)
     assert store.ensure_index() == 1
+    assert not (folder / "sched_legacy01.json").is_file()
+    assert store.ensure_index() == 0
     assert store.count_schedules(status="scheduled") == 1
     listed = store.list_schedules(status="scheduled", limit=10)
     assert listed[0]["issue_key"] == "OLD-1"
@@ -97,7 +100,8 @@ def test_session_workspaces_come_from_sqlite(tmp_path):
         issue_key="KAN-1",
         kind="build",
     )
-    assert (tmp_path / "opencode-binds.sqlite").is_file()
+    assert (tmp_path / "binds" / "yaver.sqlite").is_file()
+    assert list((tmp_path / "binds").glob("osb_*.json")) == []
     rows = store.list_workspaces(limit=None)
     assert len(rows) == 1
     assert rows[0]["session_count"] == 2
@@ -134,26 +138,28 @@ def test_session_index_backfills_existing_json(tmp_path):
     (folder / "osb_legacybind01.json").write_text(json.dumps(rec), encoding="utf-8")
     store = SessionBindStore(binds_dir=folder)
     assert store.ensure_index() == 1
+    assert not (folder / "osb_legacybind01.json").is_file()
+    assert store.ensure_index() == 0
     rows = store.list_workspaces(limit=None)
     assert len(rows) == 1
     assert rows[0]["issue_key"] == "OLD-2"
     assert store.find_by_issue_key("OLD-2")["session_id"] == "ses_old"
 
 
-def test_schedule_index_drops_row_when_json_file_is_gone(tmp_path):
+def test_schedule_row_remains_when_json_file_is_absent(tmp_path):
     folder = tmp_path / "schedules"
     first = ScheduleStore(schedules_dir=folder)
     rec = _schedule(first, issue_key="GONE-1", when="2026-12-01T10:00:00", title="gone")
-    first._path(rec["schedule_id"]).unlink()
+    assert not first._path(rec["schedule_id"]).is_file()
     first._index.close()
     restarted = ScheduleStore(schedules_dir=folder)
     assert restarted.ensure_index() == 0
-    assert restarted.count_schedules() == 0
-    assert restarted.list_schedules() == []
-    assert restarted.has_open_for_issue("GONE-1") is False
+    assert restarted.count_schedules() == 1
+    assert restarted.has_open_for_issue("GONE-1") is True
+    assert restarted.get(rec["schedule_id"])["title"] == "gone"
 
 
-def test_session_index_drops_row_when_json_file_is_gone(tmp_path):
+def test_session_row_remains_when_json_file_is_absent(tmp_path):
     folder = tmp_path / "binds"
     first = SessionBindStore(binds_dir=folder)
     rec = first.upsert(
@@ -164,35 +170,34 @@ def test_session_index_drops_row_when_json_file_is_gone(tmp_path):
         issue_key="GONE-1",
         kind="build",
     )
-    first._path(rec["bind_id"]).unlink()
+    assert not first._path(rec["bind_id"]).is_file()
     first._index.close()
     restarted = SessionBindStore(binds_dir=folder)
     assert restarted.ensure_index() == 0
-    assert restarted.list_binds(limit=None) == []
-    assert restarted.list_workspaces(limit=None) == []
-    assert restarted.find_by_issue_key("GONE-1") is None
+    assert restarted.list_binds(limit=None)[0]["session_id"] == "ses_gone"
+    assert restarted.find_by_issue_key("GONE-1")["session_id"] == "ses_gone"
 
 
-def test_schedule_queries_fall_back_to_json_when_sqlite_fails(tmp_path):
+def test_schedule_queries_fail_closed_when_sqlite_fails(tmp_path):
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     rec = _schedule(store, issue_key="KAN-4", when="2026-12-01T10:00:00", title="file")
 
     def boom(*_a, **_k):
         raise sqlite3.OperationalError("locked")
 
-    store._index.list_ids = boom
+    store._index.list_records = boom
     store._index.count = boom
     store._index.has_issue_status = boom
-    listed = store.list_schedules()
-    assert [row["schedule_id"] for row in listed] == [rec["schedule_id"]]
-    assert store.count_schedules() == 1
-    assert store.count_schedules(status="scheduled") == 1
-    assert store.has_open_for_issue("KAN-4") is True
+    assert store.list_schedules() == []
+    assert store.count_schedules() == 0
+    assert store.has_open_for_issue("KAN-4") is False
+    assert store.get(rec["schedule_id"])["title"] == "file"
+    assert list((tmp_path / "schedules").glob("sched_*.json")) == []
 
 
-def test_session_queries_fall_back_to_json_when_sqlite_fails(tmp_path):
+def test_session_queries_fail_closed_when_sqlite_fails(tmp_path):
     store = SessionBindStore(binds_dir=tmp_path / "binds")
-    store.upsert(
+    rec = store.upsert(
         repository_url="https://gitlab.example.com/acme/app.git",
         branch="feature/KAN-4",
         target_branch="develop",
@@ -206,11 +211,9 @@ def test_session_queries_fall_back_to_json_when_sqlite_fails(tmp_path):
 
     store._index.list_live = boom
     store._index.newest_live_for_issue = boom
-    listed = store.list_binds(limit=None)
-    assert [row["session_id"] for row in listed] == ["ses_file"]
-    assert store.find_by_issue_key("KAN-4")["session_id"] == "ses_file"
-    rows = store.list_workspaces(limit=None)
-    assert rows[0]["issue_key"] == "KAN-4"
+    assert store.list_binds(limit=None) == []
+    assert store.find_by_issue_key("KAN-4") is None
+    assert store.get_by_id(rec["bind_id"])["session_id"] == "ses_file"
 
 
 def test_forgotten_session_id_is_read_from_sqlite_not_a_directory_scan(tmp_path):
@@ -233,10 +236,9 @@ def test_forgotten_session_id_is_read_from_sqlite_not_a_directory_scan(tmp_path)
         issue_key="KAN-2",
     )
     store.forget_session(other["bind_id"], session_id="ses_drop", reason="reset")
-    # Index is already warm, the way it is after daemon start. Removing the
-    # JSON afterwards must not make forgotten_ids_for rescan the directory.
-    assert store.ensure_index() == 2
-    store._path(other["bind_id"]).unlink()
+    # Upsert already imported an empty folder. A later lookup must not glob.
+    assert store.ensure_index() == 0
+    assert not store._path(other["bind_id"]).is_file()
     scanned: list[str] = []
     real_glob = Path.glob
 
@@ -316,6 +318,8 @@ def test_http_lists_legacy_schedule_and_session_after_restart(
     assert workspaces["total"] == 1
     assert workspaces["workspaces"][0]["issue_key"] == "OLD-HTTP"
     assert workspaces["workspaces"][0]["session_count"] == 1
+    assert not (sched_dir / "sched_legacyhttp.json").is_file()
+    assert not (binds_dir / "osb_legacyhttp1.json").is_file()
 
 
 def test_sessions_page_counts_more_than_500_binds(

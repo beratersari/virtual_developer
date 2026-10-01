@@ -28,7 +28,8 @@ def test_create_list_filter_update(tmp_path: Path):
     )
     store.update_job(j1["job_id"], status="completed", opencode_session_id="ses_abc")
 
-    assert (tmp_path / "jobs.sqlite").is_file()
+    assert (tmp_path / "yaver.sqlite").is_file()
+    assert list((tmp_path / "jobs").glob("job_*.json")) == []
     assert store.count_jobs() == 2
     assert store.count_jobs(issue_key="KAN-1") == 1
 
@@ -84,10 +85,8 @@ bu repoda main.cpp olustur 5+3 yap
     assert extract_task_description_from_prompt(text) == "bu repoda main.cpp olustur 5+3 yap"
 
 
-def test_ensure_description_from_prompt_file(tmp_path: Path):
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    prompt = sessions / "KAN-1_20260101_120000_0.prompt.txt"
+def test_ensure_description_from_prompt_file(tmp_path: Path, isolate_jira_agent_artifacts):
+    prompt = isolate_jira_agent_artifacts["jobs_dir"] / "KAN-1_20260101_120000_0.prompt.txt"
     prompt.write_text(
         "# Direct\n\n## Task\nold description v1\n\n# Instructions\n1. go\n",
         encoding="utf-8",
@@ -121,7 +120,8 @@ def test_sqlite_index_dual_write_and_analytics_iter(tmp_path: Path):
         status="completed",
     )
     store.update_job(j1["job_id"], status="completed")
-    assert (tmp_path / "jobs.sqlite").is_file()
+    assert (tmp_path / "yaver.sqlite").is_file()
+    assert list((tmp_path / "jobs").glob("job_*.json")) == []
     rows = store.iter_jobs()
     assert len(rows) == 1
     assert rows[0]["issue_key"] == "KAN-1"
@@ -154,19 +154,28 @@ def test_sqlite_index_backfills_existing_json(tmp_path: Path):
     )
     store = JobStore(jobs_dir=jobs_dir)
     assert store.ensure_index() == 1
+    assert not (jobs_dir / "job_legacy01ab.json").is_file()
+    assert store.ensure_index() == 0
     assert store.count_jobs() == 1
     rows = store.iter_jobs()
     assert rows[0]["issue_key"] == "KAN-9"
     assert rows[0]["workflow_type"] == "planning"
     listed = store.list_jobs()
     assert listed[0]["summary"] == "old run"
+    store._index_ready = False
+    (jobs_dir / "job_legacy01ab.json").write_text(
+        json.dumps({**raw, "summary": "replaced"}), encoding="utf-8"
+    )
+    assert store.ensure_index() == 0
+    assert store.list_jobs()[0]["summary"] == "old run"
+    assert (jobs_dir / "job_legacy01ab.json").is_file()
 
 
-def test_sqlite_index_drops_rows_when_json_gone(tmp_path: Path):
+def test_sqlite_row_remains_when_json_file_is_absent(tmp_path: Path):
     store = JobStore(jobs_dir=tmp_path / "jobs")
     job = store.create_job(issue_key="KAN-3", summary="x", status="completed")
-    path = tmp_path / "jobs" / f"{job['job_id']}.json"
-    path.unlink()
+    assert not (tmp_path / "jobs" / f"{job['job_id']}.json").is_file()
     store._index_ready = False
-    store.ensure_index()
-    assert store.count_jobs() == 0
+    assert store.ensure_index() == 0
+    assert store.count_jobs() == 1
+    assert store.get_job(job["job_id"])["summary"] == "x"

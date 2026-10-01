@@ -242,20 +242,11 @@ def test_reopen_sees_skipped_row_beyond_500_older_files(tmp_path):
     from src.state.queue_store import WorkQueueStore
     from src.state.schedule_store import ScheduleStore
 
-    qdir = tmp_path / "queue"
-    q = WorkQueueStore(queue_dir=qdir)
+    q = WorkQueueStore(queue_dir=tmp_path / "queue")
     for i in range(500):
-        (qdir / f"q_old{i:04d}.json").write_text(
-            json.dumps(
-                {
-                    "queue_id": f"q_old{i:04d}",
-                    "status": "completed",
-                    "created_at": "2000-01-01T00:00:00.000",
-                    "payload": {},
-                }
-            ),
-            encoding="utf-8",
-        )
+        old = q.enqueue(source="jira", issue_key=f"OLD-{i}", summary="old")
+        q.finish(old["queue_id"], status="completed")
+        q.update(old["queue_id"], created_at="2000-01-01T00:00:00.000")
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     rec = store.create(
         title="t",
@@ -271,13 +262,15 @@ def test_reopen_sees_skipped_row_beyond_500_older_files(tmp_path):
     sid = rec["schedule_id"]
     store.update(sid, status="dispatching")
     store.update(sid, expected_status="dispatching", status="dispatched")
-    q.enqueue(source="jira", issue_key="KAN-9", payload={"schedule_id": sid})
-    new = next(p for p in qdir.glob("q_*.json") if not p.name.startswith("q_old"))
-    data = json.loads(new.read_text(encoding="utf-8"))
-    data["status"] = "skipped"
-    data["error_message"] = "Reaped stale running queue row (issue not live)"
-    data["created_at"] = "2026-09-26T00:00:00.000"
-    new.write_text(json.dumps(data), encoding="utf-8")
+    fired = q.enqueue(
+        source="jira", issue_key="KAN-9", payload={"schedule_id": sid}
+    )
+    q.update(
+        fired["queue_id"],
+        status="skipped",
+        error_message="Reaped stale running queue row (issue not live)",
+        created_at="2026-09-26T00:00:00.000",
+    )
     proc = MagicMock()
     proc.queue_store = q
     proc.state_manager.get_state.return_value = None

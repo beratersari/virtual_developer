@@ -512,12 +512,6 @@ def test_pending_schedule_is_seen_behind_500_newer_rows(tmp_path, monkeypatch):
         issue_key="WAIT-9",
         issue_description="",
     )
-    wait_path = store.schedules_dir / f"{waiting['schedule_id']}.json"
-    old = time.time() - 86_400
-    wait_path.touch()
-    # Ensure this file is older than the flood we write next.
-    os.utime(wait_path, (old, old))
-
     for i in range(500):
         store.create(
             title=f"flood {i}",
@@ -562,8 +556,6 @@ def test_poller_skips_scheduled_ticket_hidden_by_500_newer_files(
         issue_key="WAIT-9",
         issue_description="",
     )
-    wait_path = store.schedules_dir / f"{waiting['schedule_id']}.json"
-    os.utime(wait_path, (time.time() - 86_400, time.time() - 86_400))
     for i in range(500):
         store.create(
             title=f"flood {i}",

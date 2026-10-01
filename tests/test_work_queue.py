@@ -222,6 +222,12 @@ def test_stop_keeps_queue_row_started_after_cancel(tmp_path):
     old = qs.enqueue(source="jira", issue_key="KAN-1447", summary="old")
     qs.claim_next(max_running=4)
     qs.update(old["queue_id"], started_at="2026-09-25T15:11:00.000")
+    same = qs.enqueue(source="jira", issue_key="KAN-1447", summary="same instant")
+    qs.update(
+        same["queue_id"],
+        status="running",
+        started_at="2026-09-25T15:11:46.300",
+    )
     fresh = qs.enqueue(source="jira", issue_key="KAN-1447", summary="rerun")
     qs.update(fresh["queue_id"], status="running", started_at="2026-09-25T15:12:00.000")
     gitlab = qs.enqueue(source="gitlab", issue_key="KAN-1447", summary="follow-up")
@@ -233,8 +239,9 @@ def test_stop_keeps_queue_row_started_after_cancel(tmp_path):
         queued_sources={"jira"},
         started_before="2026-09-25T15:11:46.300",
     )
-    assert n == 1
+    assert n == 2
     assert qs.get(old["queue_id"])["status"] == "cancelled"
+    assert qs.get(same["queue_id"])["status"] == "cancelled"
     assert qs.get(fresh["queue_id"])["status"] == "running"
     assert qs.get(gitlab["queue_id"])["status"] == "queued"
 

@@ -98,9 +98,10 @@ async def test_start_backfills_job_sqlite_index(isolate_jira_agent_artifacts):
     sched_ens.assert_called()
     bind_ens.assert_called()
     runtime = isolate_jira_agent_artifacts["jobs_dir"].parent
-    assert (runtime / "jobs.sqlite").is_file()
-    assert (runtime / "schedules.sqlite").is_file()
-    assert (runtime / "opencode-binds.sqlite").is_file()
+    assert (runtime / "yaver.sqlite").is_file()
+    assert not (runtime / "jobs.sqlite").is_file()
+    assert not (runtime / "schedules.sqlite").is_file()
+    assert not (runtime / "opencode-binds.sqlite").is_file()
 
 
 @pytest.mark.asyncio

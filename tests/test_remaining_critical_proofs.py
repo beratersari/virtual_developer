@@ -251,9 +251,6 @@ def test_c3_older_scheduled_ticket_still_suppresses_poller_intake(
         issue_key="WAIT-9",
         issue_description="",
     )
-    wait_path = store.schedules_dir / f"{waiting['schedule_id']}.json"
-    old = time.time() - 86_400
-    os.utime(wait_path, (old, old))
     for i in range(500):
         store.create(
             title=f"flood {i}",

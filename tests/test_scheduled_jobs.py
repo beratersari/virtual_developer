@@ -1206,8 +1206,6 @@ async def test_skipped_dispatched_schedule_refires_on_next_tick(tmp_path):
 
 def test_list_schedules_pages_after_sort_not_mtime(tmp_path):
     """Older waiting rows stay in the list; limit is a page, not an mtime cap."""
-    import os
-
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     waiting = store.create(
         title="still waiting",
@@ -1220,10 +1218,8 @@ def test_list_schedules_pages_after_sort_not_mtime(tmp_path):
         issue_key="KAN-WAIT",
         issue_description="",
     )
-    os.utime(store._path(waiting["schedule_id"]), (1_700_000_000.0, 1_700_000_000.0))
-    now = datetime.now().timestamp()
     for i in range(30):
-        rec = store.create(
+        store.create(
             title=f"history {i}",
             description="",
             repository_url="https://gitlab.com/a/b.git",
@@ -1234,7 +1230,6 @@ def test_list_schedules_pages_after_sort_not_mtime(tmp_path):
             issue_key=f"KAN-{i + 1}",
             issue_description="",
         )
-        os.utime(store._path(rec["schedule_id"]), (now + i, now + i))
 
     assert store.count_schedules() == 31
     page1 = store.list_schedules(limit=25, offset=0)

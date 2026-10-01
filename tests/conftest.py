@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from unittest.mock import MagicMock
@@ -28,6 +30,68 @@ def disable_dashboard_auth(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(settings, "dashboard_username", "")
     monkeypatch.setattr(settings, "dashboard_password", "")
+
+
+def _rebind_store_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime: Path,
+    replacements: Dict[int, object],
+    folders: Dict[str, tuple],
+) -> None:
+    """Point import-time store aliases at this test's stores.
+
+    ``from src.state.job_store import job_store`` captures the object.
+    A later patch of the defining module does not update api.py, the
+    scheduler, or the dashboard service. A module imported after a
+    previous test can also keep that test's store. Both would miss the
+    operator data directory or read a deleted temp directory.
+    """
+    from src.state.job_store import JobStore
+    from src.state.queue_store import WorkQueueStore
+    from src.state.schedule_store import ScheduleStore
+    from src.state.session_bind_store import SessionBindStore
+
+    store_types = (JobStore, ScheduleStore, SessionBindStore, WorkQueueStore)
+    runtime_resolved = runtime.resolve()
+
+    def _replacement(value: object) -> Optional[object]:
+        found = replacements.get(id(value))
+        if found is not None:
+            return found
+        if not isinstance(value, store_types):
+            return None
+        for attr, (live_dir, repl) in folders.items():
+            folder = getattr(value, attr, None)
+            if not isinstance(folder, Path):
+                continue
+            try:
+                resolved = folder.resolve()
+            except OSError:
+                continue
+            if resolved == live_dir:
+                return repl
+            if (
+                "_vd_runtime" in resolved.parts
+                and runtime_resolved not in resolved.parents
+            ):
+                return repl
+        return None
+
+    for mod in list(sys.modules.values()):
+        if not isinstance(mod, types.ModuleType):
+            continue
+        namespace = getattr(mod, "__dict__", None)
+        if not isinstance(namespace, dict):
+            continue
+        for name, value in list(namespace.items()):
+            replacement = _replacement(value)
+            if replacement is None or replacement is value:
+                continue
+            try:
+                monkeypatch.setattr(mod, name, replacement, raising=False)
+            except (AttributeError, TypeError):
+                continue
 
 
 @pytest.fixture(autouse=True)
@@ -64,28 +128,54 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     from src.state.schedule_store import ScheduleStore
     from src.state.session_bind_store import SessionBindStore
     from src.state.queue_store import WorkQueueStore
-    import src.processor as processor_mod
     import src.state.job_store as job_store_mod
     import src.state.schedule_store as schedule_store_mod
     import src.state.session_bind_store as bind_store_mod
     import src.state.queue_store as queue_store_mod
 
+    live_job = job_store_mod.job_store
+    live_schedules = schedule_store_mod.schedule_store
+    live_binds = bind_store_mod.session_bind_store
+    live_queue = queue_store_mod.work_queue_store
     isolated_store = JobStore(jobs_dir=jobs_dir)
     isolated_binds = SessionBindStore(binds_dir=binds_dir)
     isolated_schedules = ScheduleStore(schedules_dir=schedules_dir)
     isolated_queue = WorkQueueStore(queue_dir=queue_dir)
-    monkeypatch.setattr(job_store_mod, "job_store", isolated_store)
+    _rebind_store_aliases(
+        monkeypatch,
+        runtime=runtime,
+        replacements={
+            id(live_job): isolated_store,
+            id(live_schedules): isolated_schedules,
+            id(live_binds): isolated_binds,
+            id(live_queue): isolated_queue,
+        },
+        folders={
+            "jobs_dir": (Path(live_job.jobs_dir).resolve(), isolated_store),
+            "schedules_dir": (
+                Path(live_schedules.schedules_dir).resolve(),
+                isolated_schedules,
+            ),
+            "binds_dir": (Path(live_binds.binds_dir).resolve(), isolated_binds),
+            "queue_dir": (Path(live_queue.queue_dir).resolve(), isolated_queue),
+        },
+    )
     monkeypatch.setattr(job_store_mod, "_default_jobs_dir", lambda: jobs_dir)
-    monkeypatch.setattr(processor_mod, "job_store", isolated_store)
-    monkeypatch.setattr(processor_mod, "work_queue_store", isolated_queue)
-    monkeypatch.setattr(bind_store_mod, "session_bind_store", isolated_binds)
     monkeypatch.setattr(bind_store_mod, "_default_binds_dir", lambda: binds_dir)
-    monkeypatch.setattr(schedule_store_mod, "schedule_store", isolated_schedules)
     monkeypatch.setattr(
         schedule_store_mod, "_default_schedules_dir", lambda: schedules_dir
     )
-    monkeypatch.setattr(queue_store_mod, "work_queue_store", isolated_queue)
     monkeypatch.setattr(queue_store_mod, "_default_queue_dir", lambda: queue_dir)
+    state_dir = runtime / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    from src.config import settings as app_settings
+
+    def _isolated_state_dir(self, _path=state_dir):
+        return _path
+
+    monkeypatch.setattr(
+        type(app_settings), "state_dir", property(_isolated_state_dir)
+    )
 
     monkeypatch.setattr(
         "src.orchestrator.agent_runner._default_sessions_dir",

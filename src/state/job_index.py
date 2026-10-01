@@ -1,7 +1,8 @@
-"""Local SQLite index of job JSON files (Analytics / Jobs list).
+"""Job rows in yaver.sqlite (Analytics / Jobs list).
 
-One file per data dir, created on first open. JSON remains the full
-record; this table is columns used for list, count, and charts.
+The document column is the full record, including deliveries. Indexed
+columns serve list, count, and charts. Leftover job_*.json is imported
+once on reconcile, then those files are deleted and not scanned again.
 """
 
 from __future__ import annotations
@@ -13,6 +14,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.logger import logger
+from src.state.record_db import (
+    connect,
+    database_path,
+    dumps,
+    ensure_column,
+    import_json_once,
+    loads,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -35,11 +44,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     azure_pr_id INTEGER,
     started_at TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT '',
-    completed_at TEXT NOT NULL DEFAULT ''
+    completed_at TEXT NOT NULL DEFAULT '',
+    working_directory TEXT NOT NULL DEFAULT '',
+    document TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_started ON jobs(started_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_issue ON jobs(issue_key);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+"""
+
+_EXTRA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_jobs_repo ON jobs(repository_url);
+CREATE INDEX IF NOT EXISTS idx_jobs_mr ON jobs(merge_request_url);
+CREATE INDEX IF NOT EXISTS idx_jobs_workdir ON jobs(working_directory);
 """
 
 _WHEN_SQL = """CASE
@@ -103,12 +120,14 @@ INSERT INTO jobs (
     job_id, issue_key, summary, description, status, workflow_type, source,
     agent, model, backend, repository_url, merge_request_url,
     merge_request_state, gitlab_project, gitlab_mr_iid, azure_project,
-    azure_pr_id, started_at, updated_at, completed_at
+    azure_pr_id, started_at, updated_at, completed_at,
+    working_directory, document
 ) VALUES (
     :job_id, :issue_key, :summary, :description, :status, :workflow_type,
     :source, :agent, :model, :backend, :repository_url, :merge_request_url,
     :merge_request_state, :gitlab_project, :gitlab_mr_iid, :azure_project,
-    :azure_pr_id, :started_at, :updated_at, :completed_at
+    :azure_pr_id, :started_at, :updated_at, :completed_at,
+    :working_directory, :document
 )
 ON CONFLICT(job_id) DO UPDATE SET
     issue_key=excluded.issue_key,
@@ -129,12 +148,14 @@ ON CONFLICT(job_id) DO UPDATE SET
     azure_pr_id=excluded.azure_pr_id,
     started_at=excluded.started_at,
     updated_at=excluded.updated_at,
-    completed_at=excluded.completed_at
+    completed_at=excluded.completed_at,
+    working_directory=excluded.working_directory,
+    document=excluded.document
 """
 
 
 def default_index_path(jobs_dir: Path) -> Path:
-    return jobs_dir.parent / "jobs.sqlite"
+    return database_path(jobs_dir)
 
 
 def _text(job: Dict[str, Any], key: str) -> str:
@@ -175,10 +196,23 @@ def row_params(job: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": started,
         "updated_at": _text(job, "updated_at") or started,
         "completed_at": _text(job, "completed_at"),
+        "working_directory": _text(job, "working_directory"),
+        "document": dumps(job),
     }
 
 
 def row_to_job(row: sqlite3.Row) -> Dict[str, Any]:
+    keys = set(row.keys())
+    if "document" in keys:
+        doc = loads(row["document"])
+        if doc is not None:
+            out = dict(doc)
+            if not str(out.get("job_id") or "").strip():
+                out["job_id"] = row["job_id"]
+            started_col = str(row["started_at"] or "").strip()
+            if started_col and not str(out.get("started_at") or "").strip():
+                out["started_at"] = started_col
+            return out
     job: Dict[str, Any] = {
         "job_id": row["job_id"],
         "issue_key": row["issue_key"] or "",
@@ -215,7 +249,7 @@ def row_to_job(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 class JobIndex:
-    """WAL SQLite next to ``jobs/``. Safe for one daemon per data dir."""
+    """WAL SQLite for job rows. Safe for one daemon per data dir."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -224,16 +258,11 @@ class JobIndex:
         self._open()
 
     def _open(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            str(self.path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = connect(self.path)
         conn.executescript(_SCHEMA)
+        ensure_column(conn, "jobs", "working_directory", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "jobs", "document", "TEXT NOT NULL DEFAULT ''")
+        conn.executescript(_EXTRA_INDEXES)
         conn.commit()
         self._conn = conn
 
@@ -255,14 +284,50 @@ class JobIndex:
             self._conn.execute(_UPSERT, params)
             self._conn.commit()
 
-    def delete(self, job_id: str) -> None:
+    def delete(self, job_id: str) -> bool:
         jid = (job_id or "").strip()
         if not jid:
-            return
+            return False
         with self._lock:
             assert self._conn is not None
             self._conn.execute("DELETE FROM jobs WHERE job_id = ?", (jid,))
+            changed = self._conn.execute("SELECT changes()").fetchone()
             self._conn.commit()
+        return bool(changed and int(changed[0]) > 0)
+
+    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        jid = (job_id or "").strip()
+        if not jid:
+            return None
+        with self._lock:
+            assert self._conn is not None
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE job_id = ?", (jid,)
+            ).fetchone()
+        return row_to_job(row) if row else None
+
+    def list_records(
+        self,
+        *,
+        issue_key: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        needle = (issue_key or "").strip().upper()
+        off = max(0, int(offset or 0))
+        lim = max(1, int(limit or 1))
+        sql = (
+            "SELECT * FROM jobs WHERE UPPER(issue_key) = ? "
+            "ORDER BY started_at DESC, job_id DESC LIMIT ? OFFSET ?"
+            if needle
+            else "SELECT * FROM jobs ORDER BY started_at DESC, job_id DESC "
+            "LIMIT ? OFFSET ?"
+        )
+        args: tuple[Any, ...] = (needle, lim, off) if needle else (lim, off)
+        with self._lock:
+            assert self._conn is not None
+            rows = self._conn.execute(sql, args).fetchall()
+        return [row_to_job(r) for r in rows]
 
     def list_ids(
         self,
@@ -435,42 +500,44 @@ class JobIndex:
         return {str(r["job_id"]) for r in rows}
 
     def reconcile(self, jobs_dir: Path) -> int:
-        """Reload every job JSON into the index and drop rows whose file is gone.
+        """Import leftover ``job_*.json`` once. Later calls do not scan.
 
-        Teams upgrading already have months of ``job_*.json`` and no
-        ``jobs.sqlite``. A later start must also refresh rows: a crash can
-        leave the file newer than the index, and some old files omit
-        ``job_id`` (the name is the id).
+        A file that omits ``job_id`` takes the filename. A crash before the
+        flag is set re-imports. Corrupt files stay on disk and do not force
+        another scan. Rows already in the database are kept when their file
+        is already gone.
         """
-        if not jobs_dir.is_dir():
-            return 0
-        try:
-            paths = list(jobs_dir.glob("job_*.json"))
-        except OSError as e:
-            logger.warning(f"Job index glob failed: {e}")
-            raise
-        kept: set[str] = set()
-        unread: set[str] = set()
-        upserted = 0
-        for path in paths:
+        with self._lock:
+            assert self._conn is not None
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeError) as e:
-                logger.warning(f"Job index skip {path.name}: {e}")
-                unread.add(path.stem)
-                continue
-            if not isinstance(raw, dict):
-                unread.add(path.stem)
-                continue
-            job = dict(raw)
-            jid = str(job.get("job_id") or "").strip() or path.stem
-            if not jid.startswith("job_"):
-                continue
-            if not str(job.get("job_id") or "").strip():
-                job["job_id"] = jid
-            self.upsert(job)
-            kept.add(jid)
-            upserted += 1
-        for jid in self.all_ids() - kept - unread:
-            self.delete(jid)
-        return upserted
+                return import_json_once(
+                    self._conn,
+                    jobs_dir,
+                    flag="jobs_json_imported",
+                    pattern="job_*.json",
+                    consume=self._consume_job_file,
+                )
+            except OSError as exc:
+                logger.warning(f"Job import glob failed: {exc}")
+                raise
+
+    def _consume_job_file(self, path: Path) -> str:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+            logger.warning(f"Job import skip {path.name}: {exc}")
+            return "bad"
+        if not isinstance(raw, dict):
+            logger.warning(f"Job import skip {path.name}: not an object")
+            return "bad"
+        job = dict(raw)
+        jid = str(job.get("job_id") or "").strip() or path.stem
+        if not jid.startswith("job_"):
+            return "skip"
+        job["job_id"] = jid
+        if not str(job.get("started_at") or "").strip():
+            created = str(job.get("created_at") or "").strip()
+            if created:
+                job["started_at"] = created
+        self.upsert(job)
+        return "ok"

@@ -545,9 +545,13 @@ def test_get_active_when_dir_deleted(tmp_path):
 
     d = tmp_path / "s"
     mgr = JiraStateManager(state_dir=d)
-    # remove after init
+    # remove after init. The open database sits inside this folder.
     import shutil
 
+    conn = mgr._conn
+    mgr._conn = None
+    if conn is not None:
+        conn.close()
     shutil.rmtree(d)
     # recreate as non-dir? mkdir again then delete file path
     # method checks exists

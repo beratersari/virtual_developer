@@ -14,7 +14,7 @@ import pytest
 
 
 def _raise_oserror_on_first_index_glob(monkeypatch: pytest.MonkeyPatch) -> None:
-    """First index backfill glob fails; a later JSON walk can still see files."""
+    """First import glob fails. The next call can import and delete the file."""
     real = pathlib.Path.glob
     seen: set[str] = set()
 
@@ -27,8 +27,10 @@ def _raise_oserror_on_first_index_glob(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pathlib.Path, "glob", wrapped)
 
 
-def test_job_list_survives_index_backfill_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A reconcile error must not hide job JSON behind an empty SQLite index."""
+def test_job_list_retries_import_after_backfill_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed import leaves the file. The next list imports it."""
     from src.state.job_store import JobStore
 
     jobs = tmp_path / "jobs"
@@ -45,17 +47,27 @@ def test_job_list_survives_index_backfill_exception(tmp_path: Path, monkeypatch:
         encoding="utf-8",
     )
     store = JobStore(jobs)
-
-    def boom(_jobs_dir: Path) -> int:
-        raise RuntimeError("sqlite locked")
-
     assert store._index is not None
-    monkeypatch.setattr(store._index, "reconcile", boom)
+    real = store._index.reconcile
+    calls = {"n": 0}
+
+    def flaky(folder: Path) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("sqlite locked")
+        return real(folder)
+
+    monkeypatch.setattr(store._index, "reconcile", flaky)
+    assert store.list_jobs() == []
+    assert (jobs / "job_keep.json").is_file()
     listed = store.list_jobs()
     assert [row["job_id"] for row in listed] == ["job_keep"]
+    assert not (jobs / "job_keep.json").is_file()
 
 
-def test_job_list_survives_index_glob_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_job_list_retries_import_after_glob_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from src.state.job_store import JobStore
 
     jobs = tmp_path / "jobs"
@@ -73,12 +85,17 @@ def test_job_list_survives_index_glob_oserror(tmp_path: Path, monkeypatch: pytes
     )
     _raise_oserror_on_first_index_glob(monkeypatch)
     store = JobStore(jobs)
+    assert store.list_jobs() == []
+    assert (jobs / "job_keep.json").is_file()
     listed = store.list_jobs()
     assert [row["job_id"] for row in listed] == ["job_keep"]
+    assert not (jobs / "job_keep.json").is_file()
 
 
-def test_schedule_list_survives_index_backfill_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A due schedule file must stay visible when the schedule index backfill throws."""
+def test_schedule_list_retries_import_after_backfill_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed import leaves the file. The next list imports it."""
     from src.state.schedule_store import ScheduleStore
 
     folder = tmp_path / "schedules"
@@ -97,18 +114,28 @@ def test_schedule_list_survives_index_backfill_exception(tmp_path: Path, monkeyp
         encoding="utf-8",
     )
     store = ScheduleStore(schedules_dir=folder)
-
-    def boom(_folder: Path) -> int:
-        raise RuntimeError("sqlite locked")
-
     assert store._index is not None
-    monkeypatch.setattr(store._index, "reconcile", boom)
+    real = store._index.reconcile
+    calls = {"n": 0}
+
+    def flaky(path: Path) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("sqlite locked")
+        return real(path)
+
+    monkeypatch.setattr(store._index, "reconcile", flaky)
+    assert store.list_schedules(status="scheduled", limit=10) == []
+    assert (folder / "sched_keep.json").is_file()
     listed = store.list_schedules(status="scheduled", limit=10)
     assert [row["schedule_id"] for row in listed] == ["sched_keep"]
+    assert not (folder / "sched_keep.json").is_file()
 
 
-def test_session_bind_survives_index_backfill_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Resume must still find the bind JSON when the session index backfill throws."""
+def test_session_bind_retries_import_after_backfill_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed import leaves the file. The next lookup imports it."""
     from src.state.session_bind_store import SessionBindStore
 
     folder = tmp_path / "binds"
@@ -134,15 +161,23 @@ def test_session_bind_survives_index_backfill_exception(tmp_path: Path, monkeypa
         encoding="utf-8",
     )
     store = SessionBindStore(binds_dir=folder)
-
-    def boom(_folder: Path) -> int:
-        raise RuntimeError("sqlite locked")
-
     assert store._index is not None
-    monkeypatch.setattr(store._index, "reconcile", boom)
+    real = store._index.reconcile
+    calls = {"n": 0}
+
+    def flaky(path: Path) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("sqlite locked")
+        return real(path)
+
+    monkeypatch.setattr(store._index, "reconcile", flaky)
+    assert store.find_by_issue_key("KAN-3") is None
+    assert (folder / "osb_keep.json").is_file()
     found = store.find_by_issue_key("KAN-3")
     assert found is not None
     assert found["session_id"] == "ses_keep"
+    assert not (folder / "osb_keep.json").is_file()
 
 
 def test_queue_finish_does_not_overwrite_a_terminal_row(tmp_path: Path):
@@ -154,19 +189,19 @@ def test_queue_finish_does_not_overwrite_a_terminal_row(tmp_path: Path):
     qid = rec["queue_id"]
     entered = threading.Event()
     release = threading.Event()
-    original = store.update
+    original = store._write
     other: dict = {}
 
-    def slow_update(queue_id: str, **fields: object):
-        if fields.get("status") == "completed":
+    def slow_write(row: dict) -> None:
+        if row.get("status") == "completed":
             entered.set()
             assert release.wait(5)
-        return original(queue_id, **fields)
+        original(row)
 
     def cancel() -> None:
         other["row"] = store.finish(qid, status="cancelled", error_message="stopped")
 
-    store.update = slow_update  # type: ignore[method-assign]
+    store._write = slow_write  # type: ignore[method-assign]
     worker = threading.Thread(target=lambda: store.finish(qid, status="completed"))
     worker.start()
     assert entered.wait(5)

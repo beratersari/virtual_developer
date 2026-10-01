@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import threading
 import uuid
@@ -97,10 +95,11 @@ def description_from_prompt_path(prompt_path: Optional[str]) -> str:
 
 
 class JobStore:
-    """File-backed store of agent jobs (one JSON file per job).
+    """Agent jobs stored in yaver.sqlite.
 
-    A local SQLite index (``jobs.sqlite`` next to ``jobs/``) speeds Analytics
-    and list/count. JSON remains the full record; ``get_job`` always reads it.
+    ``get_job`` reads the document column. Leftover ``job_*.json`` is
+    imported once by ``ensure_index``, then deleted. A failed write does
+    not fall back to a JSON file.
     """
 
     def __init__(self, jobs_dir: Optional[Path] = None) -> None:
@@ -109,18 +108,18 @@ class JobStore:
         self._lock = threading.RLock()
         self._index: Optional[JobIndex] = None
         self._index_ready = False
-        self._index_stale = False
         try:
             self._index = JobIndex(default_index_path(self.jobs_dir))
         except Exception as e:
-            logger.warning(f"Job SQLite index unavailable: {e}")
+            logger.warning(f"Job database unavailable: {e}")
             self._index = None
 
     def ensure_index(self) -> int:
-        """Create/open jobs.sqlite and insert JSON files not yet indexed.
+        """Import leftover job JSON once. Later calls do not scan the folder.
 
         Called on daemon start and on the first list/count/Analytics walk.
-        JSON remains the source of truth; this is a local index only.
+        A failed import leaves the flag unset so the next call can retry.
+        Rows already written stay readable.
         """
         if self._index is None:
             return 0
@@ -130,13 +129,11 @@ class JobStore:
             try:
                 n = self._index.reconcile(self.jobs_dir)
             except Exception as e:
-                logger.warning(f"Job index backfill failed: {e}")
-                self._index_stale = True
+                logger.warning(f"Job import failed: {e}")
                 return 0
-            self._index_stale = False
             self._index_ready = True
             if n:
-                logger.info(f"Job index backfilled {n} job(s) from JSON")
+                logger.info(f"Imported {n} job(s) into yaver.sqlite")
             return n
 
     def _path(self, job_id: str) -> Path:
@@ -274,47 +271,93 @@ class JobStore:
                 return None
             return job
 
-    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        path = self._path(job_id)
-        if not path.is_file():
+    def apply_review_state(
+        self,
+        job_id: str,
+        *,
+        state: str,
+        mr_url: str = "",
+        project_path: str = "",
+        mr_iid: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """Set one review's state without dropping the other deliveries.
+
+        ``list_jobs`` can return a snapshot taken before another repository's
+        delivery was saved. Re-read this job under the store lock and mark
+        only the matching row.
+        """
+        jid = (job_id or "").strip()
+        if not jid:
             return None
+        url = (mr_url or "").strip().rstrip("/")
+        with self._lock:
+            current = self.get_job(jid)
+            if not current:
+                return None
+            deliveries: List[Any] = []
+            for row in current.get("deliveries") or []:
+                if not isinstance(row, dict):
+                    deliveries.append(row)
+                    continue
+                copied = dict(row)
+                row_url = str(copied.get("merge_request_url") or "").rstrip("/")
+                if url and row_url == url:
+                    copied["merge_request_state"] = state
+                deliveries.append(copied)
+            fields: Dict[str, Any] = {"merge_request_state": state}
+            if deliveries:
+                fields["deliveries"] = deliveries
+            if url:
+                fields["merge_request_url"] = url
+            if project_path:
+                fields["gitlab_project"] = project_path
+            if mr_iid:
+                fields["gitlab_mr_iid"] = int(mr_iid)
+            return self.update_job(jid, **fields)
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        jid = (job_id or "").strip()
+        if not jid or self._index is None:
+            return None
+        self.ensure_index()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return self._index.get(jid)
         except Exception as e:
             logger.error(f"Error loading job {job_id}: {e}")
             return None
 
     def delete_job(self, job_id: str) -> bool:
-        """Remove the job JSON file. Returns True if a file was deleted.
+        """Remove the job row. Returns True when a row was deleted.
 
         Does not delete session logs or prompt files — callers handle artifacts.
+        Import runs first so a not-yet-imported JSON file cannot recreate the row.
         """
         jid = (job_id or "").strip()
         if not jid or not jid.startswith("job_"):
             return False
-        path = self._path(jid)
+        self.ensure_index()
+        if self._index is None:
+            return False
         with self._lock:
-            if not path.is_file():
-                return False
             try:
-                path.unlink()
-                self._index_delete(jid)
-                logger.info(f"Job deleted: {jid}")
-                return True
-            except OSError as e:
+                removed = self._index.delete(jid)
+            except Exception as e:
                 logger.error(f"Error deleting job {jid}: {e}")
                 return False
+        if removed:
+            logger.info(f"Job deleted: {jid}")
+        return removed
 
     def iter_jobs(self) -> List[Dict[str, Any]]:
-        """Every indexed job (unsorted). Analytics walks this set."""
+        """Every job (unsorted). Analytics walks this set."""
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.iter_jobs()
-            except Exception as e:
-                logger.debug(f"Job index iter failed, using JSON: {e}")
-        return self._iter_jobs_json()
+        if self._index is None:
+            return []
+        try:
+            return self._index.iter_jobs()
+        except Exception as e:
+            logger.debug(f"Job iter failed: {e}")
+            return []
 
     def min_job_when(self) -> Optional[str]:
         self.ensure_index()
@@ -329,28 +372,13 @@ class JobStore:
     def query_jobs(self, **filters: Any) -> List[Dict[str, Any]]:
         """Analytics rows with period/filters applied in SQLite."""
         self.ensure_index()
-        if self._index_ok():
-            return self._index.query_jobs(**filters)
-        return self._query_jobs_from_json(**filters)
-
-    def _iter_jobs_json(self) -> List[Dict[str, Any]]:
-        jobs: List[Dict[str, Any]] = []
-        if not self.jobs_dir.is_dir():
-            return jobs
+        if self._index is None:
+            return []
         try:
-            paths = list(self.jobs_dir.glob("job_*.json"))
-        except OSError:
-            return jobs
-        for path in paths:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    job = json.load(f)
-            except Exception as e:
-                logger.debug(f"Error loading {path}: {e}")
-                continue
-            if isinstance(job, dict):
-                jobs.append(job)
-        return jobs
+            return self._index.query_jobs(**filters)
+        except Exception as e:
+            logger.debug(f"Job query failed: {e}")
+            return []
 
     def list_jobs(
         self,
@@ -364,81 +392,26 @@ class JobStore:
         ``offset`` skips that many rows after sorting (for pagination).
         """
         self.ensure_index()
-        if self._index_ok():
-            try:
-                ids = self._index.list_ids(
-                    issue_key=issue_key, limit=limit, offset=offset
-                )
-                jobs: List[Dict[str, Any]] = []
-                for jid in ids:
-                    job = self.get_job(jid)
-                    if job:
-                        jobs.append(job)
-                return jobs
-            except Exception as e:
-                logger.debug(f"Job index list failed, using JSON: {e}")
-        return self._list_jobs_json(
-            issue_key=issue_key, limit=limit, offset=offset
-        )
-
-    def _list_jobs_json(
-        self,
-        *,
-        issue_key: Optional[str] = None,
-        limit: int = 200,
-        offset: int = 0,
-    ) -> List[Dict[str, Any]]:
-        jobs: List[Dict[str, Any]] = []
-        if not self.jobs_dir.is_dir():
-            return jobs
-        needle = (issue_key or "").strip().upper()
-        for path in self.jobs_dir.glob("job_*.json"):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    job = json.load(f)
-                if needle and (job.get("issue_key") or "").upper() != needle:
-                    continue
-                jobs.append(job)
-            except Exception as e:
-                logger.error(f"Error loading {path}: {e}")
-        jobs.sort(
-            key=lambda j: (
-                j.get("started_at")
-                or j.get("created_at")
-                or j.get("updated_at")
-                or ""
-            ),
-            reverse=True,
-        )
-        off = max(0, int(offset or 0))
-        lim = max(1, int(limit or 1))
-        return jobs[off : off + lim]
+        if self._index is None:
+            return []
+        try:
+            return self._index.list_records(
+                issue_key=issue_key, limit=limit, offset=offset
+            )
+        except Exception as e:
+            logger.debug(f"Job list failed: {e}")
+            return []
 
     def count_jobs(self, *, issue_key: Optional[str] = None) -> int:
         """Count stored jobs matching optional issue filter."""
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.count(issue_key=issue_key)
-            except Exception as e:
-                logger.debug(f"Job index count failed, using JSON: {e}")
-        return self._count_jobs_json(issue_key=issue_key)
-
-    def _count_jobs_json(self, *, issue_key: Optional[str] = None) -> int:
-        if not self.jobs_dir.is_dir():
+        if self._index is None:
             return 0
-        needle = (issue_key or "").strip().upper()
-        n = 0
-        for path in self.jobs_dir.glob("job_*.json"):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    job = json.load(f)
-                if needle and (job.get("issue_key") or "").upper() != needle:
-                    continue
-                n += 1
-            except Exception:
-                continue
-        return n
+        try:
+            return self._index.count(issue_key=issue_key)
+        except Exception as e:
+            logger.debug(f"Job count failed: {e}")
+            return 0
 
     def active_job_for_issue(self, issue_key: str) -> Optional[Dict[str, Any]]:
         for job in self.list_jobs(issue_key=issue_key, limit=50):
@@ -481,60 +454,19 @@ class JobStore:
             )
         return job
 
-    def _index_ok(self) -> bool:
-        return self._index is not None and not self._index_stale
-
-    def _query_jobs_from_json(self, **filters: Any) -> List[Dict[str, Any]]:
-        """Analytics query from job JSON when the sqlite index is stale."""
-        import tempfile
-
-        fd, name = tempfile.mkstemp(suffix=".sqlite")
-        os.close(fd)
-        path = Path(name)
-        fresh = JobIndex(path)
-        try:
-            for job in self._iter_jobs_json():
-                fresh.upsert(job)
-            return fresh.query_jobs(**filters)
-        finally:
-            fresh.close()
-            path.unlink(missing_ok=True)
-
     def _write(self, job: Dict[str, Any]) -> bool:
-        path = self._path(job["job_id"])
-        tmp = path.with_suffix(".tmp")
+        if self._index is None:
+            logger.error(
+                f"Error saving job {job.get('job_id')}: database unavailable"
+            )
+            return False
         with self._lock:
             try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(job, f, indent=2, ensure_ascii=False)
-                tmp.replace(path)
+                self._index.upsert(job)
             except Exception as e:
                 logger.error(f"Error saving job {job.get('job_id')}: {e}")
-                try:
-                    if tmp.is_file():
-                        tmp.unlink()
-                except OSError:
-                    pass
                 return False
-        self._index_upsert(job)
         return True
-
-    def _index_upsert(self, job: Dict[str, Any]) -> None:
-        if self._index is None:
-            return
-        try:
-            self._index.upsert(job)
-        except Exception as e:
-            self._index_stale = True
-            logger.debug(f"Job index upsert failed: {e}")
-
-    def _index_delete(self, job_id: str) -> None:
-        if self._index is None:
-            return
-        try:
-            self._index.delete(job_id)
-        except Exception as e:
-            logger.debug(f"Job index delete failed: {e}")
 
 
 # Process-wide default store

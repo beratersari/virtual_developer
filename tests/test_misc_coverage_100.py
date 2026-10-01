@@ -953,9 +953,10 @@ def test_job_store_update_list_count_active_ensure(tmp_path, monkeypatch):
 
     # empty dir count/list
     empty = JobStore(jobs_dir=tmp_path / "nope_jobs")
-    # remove dir after init created it
     import shutil
 
+    if empty._index is not None:
+        empty._index.close()
     shutil.rmtree(empty.jobs_dir)
     assert empty.list_jobs() == []
     assert empty.count_jobs() == 0
@@ -986,22 +987,23 @@ def test_job_store_update_list_count_active_ensure(tmp_path, monkeypatch):
     ] == ""
 
     # _write error path
-    with patch("builtins.open", side_effect=OSError("disk")):
-        store._write({"job_id": "job_failwrite"})
+    def boom(_job):
+        raise OSError("disk")
+
+    store._index.upsert = boom  # type: ignore[method-assign]
+    assert store._write({"job_id": "job_failwrite"}) is False
 
 
 def test_job_store_write_cleanup_tmp(tmp_path):
     from src.state.job_store import JobStore
 
     store = JobStore(jobs_dir=tmp_path / "jobs2")
-    # Make replace fail after write
-    real_open = open
 
-    def open_ok(path, *a, **k):
-        return real_open(path, *a, **k)
+    def boom(_job):
+        raise OSError("replace fail")
 
-    with patch.object(Path, "replace", side_effect=OSError("replace fail")):
-        store._write({"job_id": "job_tmpclean", "x": 1})
+    store._index.upsert = boom  # type: ignore[method-assign]
+    assert store._write({"job_id": "job_tmpclean", "x": 1}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1034,10 +1036,11 @@ def test_update_state_if_and_delete_and_retry(state_manager, tmp_path):
         )
         is None
     )
-    # success + unknown field + metadata merge
-    state_manager.update_state("U-1", status=TaskStatus.EXECUTING)
+    # success + unknown field + metadata merge (U-1 is terminal ERROR)
+    state_manager.create_state("U-OK", "s", "d")
+    state_manager.update_state("U-OK", status=TaskStatus.EXECUTING)
     st = state_manager.update_state_if(
-        "U-1",
+        "U-OK",
         expected_statuses={TaskStatus.EXECUTING},
         reject_statuses={TaskStatus.ERROR},
         status=TaskStatus.COMPLETED,
@@ -1087,12 +1090,29 @@ def test_update_state_if_and_delete_and_retry(state_manager, tmp_path):
     assert state_manager.delete_state("U-1") is True
     assert state_manager.delete_state("U-1") is False
     # delete error
+    import sqlite3
+
     state_manager.create_state("U-DEL", "s")
-    with patch.object(Path, "unlink", side_effect=OSError("busy")):
+    real = state_manager._conn
+
+    class _FailDeletes:
+        def execute(self, sql, *args, **kwargs):
+            text = sql if isinstance(sql, str) else ""
+            if text.lstrip().upper().startswith("DELETE"):
+                raise sqlite3.OperationalError("busy")
+            return real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    with patch.object(state_manager, "_conn", _FailDeletes()):
         assert state_manager.delete_state("U-DEL") is False
+    assert state_manager.get_state("U-DEL") is not None
 
 
 def test_set_state_save_error_cleans_tmp(state_manager):
+    import sqlite3
+
     from src.state.models import JiraAgentState, TaskStatus
 
     st = JiraAgentState(
@@ -1100,9 +1120,21 @@ def test_set_state_save_error_cleans_tmp(state_manager):
         issue_summary="s",
         status=TaskStatus.PENDING,
     )
-    # Force write failure after tmp created
-    with patch("builtins.open", side_effect=OSError("disk full")):
-        state_manager.set_state(st)
+    real = state_manager._conn
+
+    class _FailWrites:
+        def execute(self, sql, *args, **kwargs):
+            text = sql if isinstance(sql, str) else ""
+            if text.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+                raise sqlite3.OperationalError("disk full")
+            return real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    with patch.object(state_manager, "_conn", _FailWrites()):
+        assert state_manager.set_state(st) is False
+    assert state_manager.get_state("SAVE-ERR") is None
 
 
 # ---------------------------------------------------------------------------

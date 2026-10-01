@@ -1,7 +1,8 @@
-"""Local SQLite index of OpenCode session-bind JSON files (Sessions list).
+"""Session-bind rows in yaver.sqlite.
 
-One file per data dir, created on first open. JSON remains the full record.
-The Sessions page, issue lookup, and workspace rollup read this table.
+The document column is the full record, including forgotten session ids.
+Indexed columns serve the Sessions page, issue lookup, and workspace rollup.
+Leftover osb_*.json is imported once, then those files are deleted.
 """
 
 from __future__ import annotations
@@ -13,6 +14,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.logger import logger
+from src.state.record_db import (
+    connect,
+    database_path,
+    dumps,
+    ensure_column,
+    import_json_once,
+    loads,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_binds (
@@ -46,11 +55,13 @@ _UPSERT = """
 INSERT INTO session_binds (
     bind_id, repository_url, repository_key, branch, target_branch,
     session_id, kind, backend, scope, issue_key, job_id, working_directory,
-    forgotten_json, reset_at, forget_reason, created_at, updated_at
+    forgotten_json, reset_at, forget_reason, created_at, updated_at,
+    merge_request_url, document
 ) VALUES (
     :bind_id, :repository_url, :repository_key, :branch, :target_branch,
     :session_id, :kind, :backend, :scope, :issue_key, :job_id, :working_directory,
-    :forgotten_json, :reset_at, :forget_reason, :created_at, :updated_at
+    :forgotten_json, :reset_at, :forget_reason, :created_at, :updated_at,
+    :merge_request_url, :document
 )
 ON CONFLICT(bind_id) DO UPDATE SET
     repository_url=excluded.repository_url,
@@ -68,12 +79,19 @@ ON CONFLICT(bind_id) DO UPDATE SET
     reset_at=excluded.reset_at,
     forget_reason=excluded.forget_reason,
     created_at=excluded.created_at,
-    updated_at=excluded.updated_at
+    updated_at=excluded.updated_at,
+    merge_request_url=excluded.merge_request_url,
+    document=excluded.document
+"""
+
+_EXTRA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_binds_workdir ON session_binds(working_directory);
+CREATE INDEX IF NOT EXISTS idx_binds_mr ON session_binds(merge_request_url);
 """
 
 
 def default_index_path(binds_dir: Path) -> Path:
-    return binds_dir.parent / "opencode-binds.sqlite"
+    return database_path(binds_dir)
 
 
 def _text(rec: Dict[str, Any], key: str) -> str:
@@ -103,10 +121,20 @@ def row_params(rec: Dict[str, Any]) -> Dict[str, Any]:
         "forget_reason": _text(rec, "forget_reason"),
         "created_at": _text(rec, "created_at"),
         "updated_at": _text(rec, "updated_at"),
+        "merge_request_url": _text(rec, "merge_request_url"),
+        "document": dumps(rec),
     }
 
 
 def row_to_bind(row: sqlite3.Row) -> Dict[str, Any]:
+    keys = set(row.keys())
+    if "document" in keys:
+        doc = loads(row["document"])
+        if doc is not None:
+            out = dict(doc)
+            if not str(out.get("bind_id") or "").strip():
+                out["bind_id"] = row["bind_id"]
+            return out
     forgotten: List[str] = []
     try:
         parsed = json.loads(row["forgotten_json"] or "[]")
@@ -143,7 +171,7 @@ def row_to_bind(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 class SessionBindIndex:
-    """WAL SQLite next to ``opencode-binds/``. Safe for one daemon per data dir."""
+    """WAL SQLite for session binds. Safe for one daemon per data dir."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -152,27 +180,15 @@ class SessionBindIndex:
         self._open()
 
     def _open(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            str(self.path),
-            timeout=10.0,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = connect(self.path)
         conn.executescript(_SCHEMA)
-        columns = {
-            str(row[1]) for row in conn.execute("PRAGMA table_info(session_binds)")
-        }
-        if "backend" not in columns:
-            conn.execute(
-                "ALTER TABLE session_binds ADD COLUMN backend TEXT NOT NULL DEFAULT ''"
-            )
-        if "scope" not in columns:
-            conn.execute(
-                "ALTER TABLE session_binds ADD COLUMN scope TEXT NOT NULL DEFAULT ''"
-            )
+        ensure_column(conn, "session_binds", "backend", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "session_binds", "scope", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(
+            conn, "session_binds", "merge_request_url", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensure_column(conn, "session_binds", "document", "TEXT NOT NULL DEFAULT ''")
+        conn.executescript(_EXTRA_INDEXES)
         conn.commit()
         self._conn = conn
 
@@ -194,16 +210,29 @@ class SessionBindIndex:
             self._conn.execute(_UPSERT, params)
             self._conn.commit()
 
-    def delete(self, bind_id: str) -> None:
+    def get(self, bind_id: str) -> Optional[Dict[str, Any]]:
         bid = (bind_id or "").strip()
         if not bid:
-            return
+            return None
+        with self._lock:
+            assert self._conn is not None
+            row = self._conn.execute(
+                "SELECT * FROM session_binds WHERE bind_id = ?", (bid,)
+            ).fetchone()
+        return row_to_bind(row) if row else None
+
+    def delete(self, bind_id: str) -> bool:
+        bid = (bind_id or "").strip()
+        if not bid:
+            return False
         with self._lock:
             assert self._conn is not None
             self._conn.execute(
                 "DELETE FROM session_binds WHERE bind_id = ?", (bid,)
             )
+            changed = self._conn.execute("SELECT changes()").fetchone()
             self._conn.commit()
+        return bool(changed and int(changed[0]) > 0)
 
     def list_live(self, *, limit: Optional[int] = 200) -> List[Dict[str, Any]]:
         sql = (
@@ -275,35 +304,38 @@ class SessionBindIndex:
         return {str(r["bind_id"]) for r in rows}
 
     def reconcile(self, binds_dir: Path) -> int:
-        """Reload every bind JSON and drop index rows whose file is gone."""
-        if not binds_dir.is_dir():
-            return 0
-        try:
-            paths = list(binds_dir.glob("osb_*.json"))
-        except OSError as e:
-            logger.warning(f"Session index glob failed: {e}")
-            raise
-        kept: set[str] = set()
-        unread: set[str] = set()
-        upserted = 0
-        for path in paths:
+        """Import leftover ``osb_*.json`` once. Later calls do not scan.
+
+        A file that omits ``bind_id`` takes the filename. Rows already in
+        the database stay when their file is already gone.
+        """
+        with self._lock:
+            assert self._conn is not None
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeError) as e:
-                logger.warning(f"Session index skip {path.name}: {e}")
-                unread.add(path.stem)
-                continue
-            if not isinstance(raw, dict):
-                unread.add(path.stem)
-                continue
-            rec = dict(raw)
-            bid = str(rec.get("bind_id") or "").strip() or path.stem
-            if not bid.startswith("osb_"):
-                continue
-            rec["bind_id"] = bid
-            self.upsert(rec)
-            kept.add(bid)
-            upserted += 1
-        for bid in self.all_ids() - kept - unread:
-            self.delete(bid)
-        return upserted
+                return import_json_once(
+                    self._conn,
+                    binds_dir,
+                    flag="binds_json_imported",
+                    pattern="osb_*.json",
+                    consume=self._consume_bind_file,
+                )
+            except OSError as exc:
+                logger.warning(f"Session import glob failed: {exc}")
+                raise
+
+    def _consume_bind_file(self, path: Path) -> str:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+            logger.warning(f"Session import skip {path.name}: {exc}")
+            return "bad"
+        if not isinstance(raw, dict):
+            logger.warning(f"Session import skip {path.name}: not an object")
+            return "bad"
+        rec = dict(raw)
+        bid = str(rec.get("bind_id") or "").strip() or path.stem
+        if not bid.startswith("osb_"):
+            return "skip"
+        rec["bind_id"] = bid
+        self.upsert(rec)
+        return "ok"

@@ -12,7 +12,6 @@ Dashboard Reset drops the bind.
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -284,10 +283,11 @@ _KIND_ORDER = {
 
 
 class SessionBindStore:
-    """One JSON file per (repo, work branch, target) → OpenCode session id.
+    """Session binds stored in yaver.sqlite.
 
-    ``opencode-binds.sqlite`` next to the folder is the Sessions-page index.
-    JSON remains the full record; ``get_by_id`` always reads it.
+    ``get_by_id`` reads the document column. Leftover ``osb_*.json`` is
+    imported once by ``ensure_index``, then deleted. A failed write does
+    not fall back to a JSON file.
     """
 
     def __init__(self, binds_dir: Optional[Path] = None) -> None:
@@ -296,17 +296,19 @@ class SessionBindStore:
         self._lock = threading.RLock()
         self._index = None
         self._index_ready = False
-        self._index_stale = False
         try:
             from src.state.session_index import SessionBindIndex, default_index_path
 
             self._index = SessionBindIndex(default_index_path(self.binds_dir))
         except Exception as e:
-            logger.warning(f"Session SQLite index unavailable: {e}")
+            logger.warning(f"Session database unavailable: {e}")
             self._index = None
 
     def ensure_index(self) -> int:
-        """Create/open opencode-binds.sqlite and insert JSON files not yet indexed."""
+        """Import leftover bind JSON once. Later calls do not scan.
+
+        A failed import leaves the flag unset so the next call can retry.
+        """
         if self._index is None:
             return 0
         with self._lock:
@@ -315,13 +317,11 @@ class SessionBindStore:
             try:
                 n = self._index.reconcile(self.binds_dir)
             except Exception as e:
-                logger.warning(f"Session index backfill failed: {e}")
-                self._index_stale = True
+                logger.warning(f"Session import failed: {e}")
                 return 0
-            self._index_stale = False
             self._index_ready = True
             if n:
-                logger.info(f"Session index backfilled {n} bind(s) from JSON")
+                logger.info(f"Imported {n} session bind(s) into yaver.sqlite")
             return n
 
     def _path(self, bind_id: str) -> Path:
@@ -329,22 +329,11 @@ class SessionBindStore:
         return self.binds_dir / f"{safe}.json"
 
     def _write(self, rec: Dict[str, Any]) -> None:
-        path = self._path(rec["bind_id"])
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, indent=2, ensure_ascii=False)
-        tmp.replace(path)
-        if self._index is not None:
-            try:
-                self._index.upsert(rec)
-            except Exception as e:
-                self._index_stale = True
-                logger.warning(
-                    f"Session index upsert failed for {rec.get('bind_id')}: {e}"
-                )
-
-    def _index_ok(self) -> bool:
-        return self._index is not None and not self._index_stale
+        if self._index is None:
+            raise RuntimeError(
+                f"session database unavailable for {rec.get('bind_id')}"
+            )
+        self._index.upsert(rec)
 
     def _release_single_key_if_multi(self, rec: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """A ``multi_*`` folder saved on the single-repo key is moved aside.
@@ -378,7 +367,11 @@ class SessionBindStore:
         moved["bind_id"] = new_id
         moved["scope"] = scope
         moved["updated_at"] = _now_iso()
-        self._write(moved)
+        try:
+            self._write(moved)
+        except Exception as e:
+            logger.error(f"Could not move session bind {old_id}: {e}")
+            return False
         self.delete(old_id)
         logger.info(
             f"Session bind {old_id} moved to {new_id} (multi-repo workspace)"
@@ -466,36 +459,21 @@ class SessionBindStore:
         if not repo or not br or not tgt:
             return None
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.newest_live(repo, br, tgt)
-            except Exception as e:
-                logger.warning(f"Session index live lookup failed: {e}")
-        best: Optional[Dict[str, Any]] = None
-        for rec in self._list_binds_from_files(limit=None):
-            rec_repo = rec.get("repository_key") or normalize_repo_key(
-                str(rec.get("repository_url") or "")
-            )
-            if rec_repo != repo:
-                continue
-            if normalize_branch(str(rec.get("branch") or "")) != br:
-                continue
-            if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
-                continue
-            if best is None or (rec.get("updated_at") or "") >= (
-                best.get("updated_at") or ""
-            ):
-                best = rec
-        return best
-
-    def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
-        path = self._path((bind_id or "").strip())
-        if not path.is_file():
+        if self._index is None:
             return None
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                rec = json.load(f)
-            return rec if isinstance(rec, dict) else None
+            return self._index.newest_live(repo, br, tgt)
+        except Exception as e:
+            logger.warning(f"Session live lookup failed: {e}")
+            return None
+
+    def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
+        bid = (bind_id or "").strip()
+        if not bid or self._index is None:
+            return None
+        self.ensure_index()
+        try:
+            return self._index.get(bid)
         except Exception as e:
             logger.debug(f"Could not read session bind {bind_id}: {e}")
             return None
@@ -583,7 +561,11 @@ class SessionBindStore:
             }
             if prev.get("reset_at"):
                 rec["reset_at"] = prev.get("reset_at")
-            self._write(rec)
+            try:
+                self._write(rec)
+            except Exception as e:
+                logger.error(f"Error saving session bind {bid}: {e}")
+                return None
         kind_note = f" kind={kind_n}" if kind_n else ""
         logger.info(
             f"Session bind {bid}: {normalize_repo_key(repo)}"
@@ -595,23 +577,18 @@ class SessionBindStore:
         bid = (bind_id or "").strip()
         if not bid:
             return False
-        path = self._path(bid)
+        self.ensure_index()
+        if self._index is None:
+            return False
         with self._lock:
-            if not path.is_file():
-                return False
             try:
-                path.unlink()
-            except OSError as e:
+                removed = self._index.delete(bid)
+            except Exception as e:
                 logger.warning(f"Could not delete session bind {bid}: {e}")
                 return False
-            if self._index is not None:
-                try:
-                    self._index.delete(bid)
-                except Exception as e:
-                    self._index_stale = True
-                    logger.warning(f"Session index delete failed for {bid}: {e}")
-        logger.info(f"OpenCode session bind reset: {bid}")
-        return True
+        if removed:
+            logger.info(f"OpenCode session bind reset: {bid}")
+        return removed
 
     def forget_session(
         self,
@@ -646,7 +623,11 @@ class SessionBindStore:
             rec["reset_at"] = now
             rec["forget_reason"] = reason
             rec["updated_at"] = now
-            self._write(rec)
+            try:
+                self._write(rec)
+            except Exception as e:
+                logger.error(f"Error saving session bind {bid}: {e}")
+                return None
         logger.info(
             f"OpenCode session bind forgotten {bid}: {sid or '(none)'} ({reason})"
         )
@@ -777,34 +758,13 @@ class SessionBindStore:
         )
         _add(self.get_by_id(bind_id_for(repository_url, branch, target_branch)))
         self.ensure_index()
-        if self._index_ok():
-            try:
-                for rec in self._index.rows_for_checkout(repo, br, tgt):
-                    _add(rec)
-                return out
-            except Exception as e:
-                logger.warning(f"Session index forgotten lookup failed: {e}")
-        if not self.binds_dir.is_dir():
+        if self._index is None:
             return out
-        with self._lock:
-            for path in self.binds_dir.glob("osb_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                rec_repo = rec.get("repository_key") or normalize_repo_key(
-                    str(rec.get("repository_url") or "")
-                )
-                if rec_repo != repo:
-                    continue
-                if normalize_branch(str(rec.get("branch") or "")) != br:
-                    continue
-                if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
-                    continue
+        try:
+            for rec in self._index.rows_for_checkout(repo, br, tgt):
                 _add(rec)
+        except Exception as e:
+            logger.warning(f"Session forgotten lookup failed: {e}")
         return out
 
     def find_by_issue_key(self, issue_key: str) -> Optional[Dict[str, Any]]:
@@ -813,51 +773,23 @@ class SessionBindStore:
         if not key:
             return None
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.newest_live_for_issue(key)
-            except Exception as e:
-                logger.warning(f"Session index issue lookup failed: {e}")
-        best: Optional[Dict[str, Any]] = None
-        for rec in self._list_binds_from_files(limit=None):
-            if (rec.get("issue_key") or "").strip().upper() != key:
-                continue
-            if not str(rec.get("session_id") or "").strip():
-                continue
-            if best is None or (rec.get("updated_at") or "") >= (
-                best.get("updated_at") or ""
-            ):
-                best = rec
-        return best
+        if self._index is None:
+            return None
+        try:
+            return self._index.newest_live_for_issue(key)
+        except Exception as e:
+            logger.warning(f"Session issue lookup failed: {e}")
+            return None
 
     def list_binds(self, *, limit: Optional[int] = 200) -> List[Dict[str, Any]]:
         self.ensure_index()
-        if self._index_ok():
-            try:
-                return self._index.list_live(limit=limit)
-            except Exception as e:
-                logger.warning(f"Session index list failed: {e}")
-        return self._list_binds_from_files(limit=limit)
-
-    def _list_binds_from_files(
-        self, *, limit: Optional[int] = 200
-    ) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        if not self.binds_dir.is_dir():
-            return items
-        with self._lock:
-            for path in self.binds_dir.glob("osb_*.json"):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        rec = json.load(f)
-                except Exception:
-                    continue
-                if isinstance(rec, dict) and rec.get("session_id"):
-                    items.append(rec)
-        items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-        if limit is None:
-            return items
-        return items[: max(1, int(limit))]
+        if self._index is None:
+            return []
+        try:
+            return self._index.list_live(limit=limit)
+        except Exception as e:
+            logger.warning(f"Session list failed: {e}")
+            return []
 
     def list_workspaces(
         self,
@@ -956,26 +888,14 @@ class SessionBindStore:
             pass
         updated = 0
         self.ensure_index()
-        rows: Optional[List[Dict[str, Any]]] = None
-        if self._index_ok():
-            try:
-                rows = self._index.rows_with_directory()
-            except Exception as e:
-                logger.warning(f"Session index directory scan failed: {e}")
-                rows = None
+        if self._index is None:
+            return 0
+        try:
+            rows = self._index.rows_with_directory()
+        except Exception as e:
+            logger.warning(f"Session directory scan failed: {e}")
+            return 0
         with self._lock:
-            if rows is None:
-                if not self.binds_dir.is_dir():
-                    return 0
-                rows = []
-                for path in self.binds_dir.glob("osb_*.json"):
-                    try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            loaded = json.load(f)
-                    except Exception:
-                        continue
-                    if isinstance(loaded, dict):
-                        rows.append(loaded)
             now = _now_iso()
             for rec in rows:
                 raw = rec.get("working_directory")
@@ -989,7 +909,13 @@ class SessionBindStore:
                 disk = self.get_by_id(str(rec.get("bind_id") or "")) or rec
                 disk["working_directory"] = new_s
                 disk["updated_at"] = now
-                self._write(disk)
+                try:
+                    self._write(disk)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not relocate session bind {disk.get('bind_id')}: {e}"
+                    )
+                    continue
                 updated += 1
         if updated:
             logger.info(
