@@ -716,10 +716,13 @@ def test_push_paths(gm):
         with patch.object(gm, "_run_git", return_value=_cp()):
             assert gm.push() is True
             assert gm.last_push_error is None
-        # auth set-url ok, push fails, integrate already mocked True, push retry
+        # auth set-url ok, push fails, integrate already mocked True, push retry.
+        # Each attempt lists commits ahead (one git log) before git push.
         with patch.object(gm, "_run_git", side_effect=[
             _cp(),  # auth set-url
+            _cp(),  # commits ahead
             RuntimeError("fail"),  # push
+            _cp(),  # commits ahead before retry
             _cp(),  # push retry
             _cp(),  # scrub
         ]):
@@ -728,7 +731,9 @@ def test_push_paths(gm):
         with patch.object(gm, "head_is_on_remote", return_value=False):
             with patch.object(gm, "_run_git", side_effect=[
                 _cp(),  # set-url
+                _cp(),  # commits ahead
                 RuntimeError("fail"),  # push
+                _cp(),  # commits ahead before retry
                 RuntimeError("fail2"),  # push retry
                 _cp(),  # scrub
             ]):
@@ -738,12 +743,142 @@ def test_push_paths(gm):
         with patch.object(gm, "head_is_on_remote", return_value=True):
             with patch.object(gm, "_run_git", side_effect=[
                 _cp(),  # set-url
+                _cp(),  # commits ahead
                 RuntimeError("fail"),  # push
+                _cp(),  # commits ahead before retry
                 RuntimeError("fail2"),  # push retry
                 _cp(),  # scrub
             ]):
                 assert gm.push("feature/x") is True
                 assert gm.last_push_error is None
+
+
+def test_push_job_log_lists_ahead_commits_then_git_push_text(gm):
+    """Daemon job log shows the commits about to be pushed, then git's own push text."""
+    from src.dashboard.issue_logs import issue_log_ring
+    from src.log_context import clear_log_context, set_issue_key, set_job_id
+
+    gm.work_branch = "feature/x"
+    gm.target_branch = "develop"
+    gm._integrate_remote_before_push = lambda branch: True
+    gm._with_auth_remote = lambda: None
+    gm._scrub_remote_credentials = lambda: None
+
+    def run_git(args, **kwargs):
+        if args and args[0] == "log":
+            assert args[1:] == ["--format=%h %s", "origin/feature/x..HEAD"]
+            return _cp(
+                stdout="abc1234 feat: add widget\ndef5678 fix: leak %s path\n"
+            )
+        if args and args[0] == "push":
+            assert "--progress" in args
+            assert args[-1] == "feature/x"
+            return _cp(
+                stderr=(
+                    "Enumerating objects: 3, done.\rCounting objects:  50%\r"
+                    "Counting objects: 100% (3/3), done.\n"
+                    "Writing objects: 100% (2/2), 180 bytes | 180.00 KiB/s, done.\n"
+                    "To https://oauth2:glpat-SECRET@gitlab.example.com/group/repo.git\n"
+                    "   aaa111..abc1234  feature/x -> feature/x\n"
+                )
+            )
+        return _cp()
+
+    set_job_id("job_pushlog1")
+    set_issue_key("GM-1")
+    try:
+        with patch.object(gm, "_run_git", side_effect=run_git):
+            assert gm.push("feature/x") is True
+    finally:
+        clear_log_context()
+
+    blob = "\n".join(row["message"] for row in issue_log_ring.for_job("job_pushlog1"))
+    ahead_at = blob.find("abc1234 feat: add widget")
+    push_at = blob.find("Enumerating objects: 3, done.")
+    assert ahead_at >= 0, blob
+    assert push_at > ahead_at, blob
+    assert "2 commit(s) ahead of origin/feature/x" in blob
+    assert "def5678 fix: leak %s path" in blob
+    assert "Counting objects: 100% (3/3), done." in blob
+    assert "Counting objects:  50%" not in blob
+    assert "Writing objects: 100% (2/2), 180 bytes | 180.00 KiB/s, done." in blob
+    assert "feature/x -> feature/x" in blob
+    assert "glpat-SECRET" not in blob
+    assert "oauth2:***@" in blob
+
+
+def test_push_job_log_includes_rejected_push_text(gm):
+    from src.dashboard.issue_logs import issue_log_ring
+    from src.log_context import clear_log_context, set_issue_key, set_job_id
+
+    gm.work_branch = "feature/x"
+    gm._integrate_remote_before_push = lambda branch: True
+    gm._with_auth_remote = lambda: None
+    gm._scrub_remote_credentials = lambda: None
+    gm.head_is_on_remote = lambda branch: False
+
+    def run_git(args, **kwargs):
+        if args and args[0] == "log":
+            return _cp(stdout="abc1234 feat: add widget\n")
+        if args and args[0] == "push":
+            return _cp(
+                returncode=1,
+                stderr="! [rejected] feature/x -> feature/x (fetch first)\n",
+            )
+        return _cp()
+
+    set_job_id("job_pushlog2")
+    set_issue_key("GM-1")
+    try:
+        with patch.object(gm, "_run_git", side_effect=run_git):
+            assert gm.push("feature/x") is False
+    finally:
+        clear_log_context()
+
+    blob = "\n".join(row["message"] for row in issue_log_ring.for_job("job_pushlog2"))
+    assert "abc1234 feat: add widget" in blob
+    assert "! [rejected] feature/x -> feature/x (fetch first)" in blob
+    assert "rejected" in (gm.last_push_error or "")
+
+
+def test_push_job_log_lists_commits_when_remote_branch_is_new(gm):
+    from src.dashboard.issue_logs import issue_log_ring
+    from src.log_context import clear_log_context, set_issue_key, set_job_id
+
+    gm.work_branch = "feature/x"
+    gm.target_branch = "develop"
+    gm._integrate_remote_before_push = lambda branch: True
+    gm._with_auth_remote = lambda: None
+    gm._scrub_remote_credentials = lambda: None
+
+    def run_git(args, **kwargs):
+        if args and args[0] == "log":
+            spec = args[-1]
+            if spec == "origin/feature/x..HEAD":
+                return _cp(returncode=128, stderr="unknown revision")
+            if spec == "origin/develop..HEAD":
+                return _cp(stdout="abc1234 feat: add widget\n")
+            raise AssertionError(spec)
+        if args and args[0] == "push":
+            return _cp(stderr="Everything up-to-date\n")
+        return _cp()
+
+    set_job_id("job_pushlog3")
+    set_issue_key("GM-1")
+    try:
+        with patch.object(gm, "_run_git", side_effect=run_git):
+            assert gm.push("feature/x") is True
+    finally:
+        clear_log_context()
+
+    blob = "\n".join(row["message"] for row in issue_log_ring.for_job("job_pushlog3"))
+    assert "abc1234 feat: add widget" in blob
+    assert "ahead of origin/develop" in blob
+    assert "origin/feature/x is not on the remote yet" in blob
+    assert "Everything up-to-date" in blob
+    ahead_at = blob.find("abc1234 feat: add widget")
+    push_at = blob.find("Everything up-to-date")
+    assert ahead_at < push_at
 
 
 def test_head_is_on_remote_matches_tip(gm):
