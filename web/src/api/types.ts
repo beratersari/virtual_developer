@@ -838,6 +838,11 @@ export type StorageFolderDelete = {
   error?: string | null
 }
 
+export type StorageReviewLink = {
+  url: string
+  state?: string | null
+}
+
 export type StorageFolder = {
   name: string
   path: string
@@ -853,6 +858,7 @@ export type StorageFolder = {
   job_id?: string | null
   merge_request_url?: string | null
   merge_request_state?: string | null
+  merge_requests?: StorageReviewLink[]
   delete?: StorageFolderDelete | null
 }
 

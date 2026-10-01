@@ -6444,26 +6444,15 @@ class JobProcessor:
                     job, mr_url=url, project_path=path, mr_iid=mr_iid
                 ):
                     continue
-                patch: Dict[str, Any] = {"merge_request_state": state}
-                deliveries = []
-                for row in job.get("deliveries") or []:
-                    if not isinstance(row, dict):
-                        deliveries.append(row)
-                        continue
-                    row_url = str(row.get("merge_request_url") or "").rstrip("/")
-                    if url and row_url == url:
-                        row = dict(row)
-                        row["merge_request_state"] = state
-                    deliveries.append(row)
-                if deliveries:
-                    patch["deliveries"] = deliveries
-                if url:
-                    patch["merge_request_url"] = url
-                if path:
-                    patch["gitlab_project"] = path
-                if mr_iid:
-                    patch["gitlab_mr_iid"] = int(mr_iid)
-                self.job_store.update_job(str(job.get("job_id") or ""), **patch)
+                # Do not write this snapshot's delivery list back. It can
+                # predate the other repository's merge request.
+                self.job_store.apply_review_state(
+                    str(job.get("job_id") or ""),
+                    state=state,
+                    mr_url=url,
+                    project_path=path,
+                    mr_iid=int(mr_iid or 0),
+                )
         except Exception as e:
             logger.warning(f"Could not persist MR state on jobs: {e}")
         if key:
