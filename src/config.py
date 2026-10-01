@@ -1255,7 +1255,18 @@ def _runtime_updated_map(raw: Optional[Dict[str, Any]] = None) -> Dict[str, floa
 
 
 def save_runtime_settings(updates: Dict[str, Any]) -> None:
-    """Merge *updates* into runtime settings file and mirror into os.environ."""
+    """Merge *updates* into runtime settings file and mirror into os.environ.
+
+    Saved projects and repo sets are also written to ``saved_catalog.json``.
+    That file is what the next start reads, so a failed rewrite of this
+    settings file cannot drop those two lists.
+    """
+    try:
+        from src.dashboard.saved_catalog import persist_catalog_updates
+
+        persist_catalog_updates(updates)
+    except Exception as exc:
+        logger.error(f"Could not save saved catalog: {exc}")
     path = runtime_settings_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1506,6 +1517,12 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
             "Kept .env values (newer than that field's last Settings save): "
             + ", ".join(sorted(skip_keys))
         )
+    try:
+        from src.dashboard.saved_catalog import apply_saved_catalog
+
+        apply_saved_catalog(settings_obj)
+    except Exception as exc:
+        logger.warning(f"Could not apply saved catalog: {exc}")
 
 
 def get_settings() -> Settings:

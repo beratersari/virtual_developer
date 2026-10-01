@@ -1477,7 +1477,7 @@ def create_dashboard_app(
 
     @app.get("/api/settings")
     def get_settings() -> dict:
-        """Dashboard settings. Saved projects are loaded only by Reload from tokens."""
+        """Dashboard settings, including the stored project list and repo sets."""
         return settings_response()
 
     @app.get("/api/opencode-agents")

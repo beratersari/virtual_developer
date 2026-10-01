@@ -392,8 +392,12 @@ def build_settings_view(*, include_projects: bool = True) -> SettingsView:
     )
 
 
-def settings_response(*, include_projects: bool = False) -> Dict[str, Any]:
-    """Settings JSON for the dashboard. The saved-project list stays out."""
+def settings_response(*, include_projects: bool = True) -> Dict[str, Any]:
+    """Settings JSON for the dashboard, including saved projects and repo sets.
+
+    The lists come from ``saved_catalog.json``. This does not call GitLab
+    or Azure. Reload from tokens is the import.
+    """
     payload = build_settings_view(include_projects=include_projects).model_dump()
     if not include_projects:
         payload.pop("project_repositories", None)

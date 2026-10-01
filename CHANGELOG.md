@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Saved projects and repo sets are stored in `saved_catalog.json` in the Yaver data folder. The dashboard shows that list after a refresh. Saving another setting does not replace it. Reload from tokens still imports the repositories the GitLab and Azure tokens can read.
+
 ## [0.9.68] — 2026-09-30
 
 Review and test follow-ups stay on their own job. The Sessions page lists OpenCode chats, and stopping a job aborts the OpenCode session.

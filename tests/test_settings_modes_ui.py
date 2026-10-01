@@ -76,13 +76,15 @@ def test_edit_dialogs_leave_delete_on_the_trash_icon():
     assert ">Remove<" not in project_actions
 
 
-def test_saved_projects_load_only_from_reload():
-    """Saved projects appear only after Reload from tokens."""
+def test_saved_projects_come_from_the_settings_payload():
+    """The stored list arrives with settings. Reload from tokens is the token import."""
     live = (ROOT / "web" / "src" / "app" / "LiveProvider.tsx").read_text(encoding="utf-8")
     assert "fetchSettings()" in live
     assert "projects: true" not in live
     page = SETTINGS.read_text(encoding="utf-8")
     assert "fetchSettings({ projects: true })" not in page
+    assert "const serverHasList = Array.isArray(s.project_repositories)" in page
+    assert "if (serverHasList) projectsLoaded.current = true" in page
     assert "void loadProjects()" in page
     assert "Press Reload from tokens to load saved projects." in page
     schedules = (ROOT / "web" / "src" / "pages" / "schedules" / "SchedulesPage.tsx").read_text(

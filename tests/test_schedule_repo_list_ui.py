@@ -36,6 +36,20 @@ def test_repositories_are_a_list_with_popup_branches():
     assert "The ticket records each repository's source branch." in text
 
 
+def test_new_issue_repository_section_starts_empty():
+    page = (ROOT / "web" / "src" / "pages" / "schedules" / "SchedulesPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    create = page.split("function CreateNew", 1)[1].split("function ScheduleWhenField", 1)[0]
+    assert "rowFromProject" not in create
+    assert "rows.length === 1" not in create
+    assert "getItem(LAST_REPO_KEY)" not in create
+    assert "setItem(LAST_REPO_KEY" in create
+    assert "No repositories yet." in (ROOT / "web" / "src" / "pages" / "schedules" / "MoreRepositories.tsx").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_repo_row_helpers():
     completed = subprocess.run(
         ["npx", "tsx", str(ROWS)],
