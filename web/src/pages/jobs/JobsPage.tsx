@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
+import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue, isAbortError } from '../../api/client'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import {
   queuePlaceholder,
   shouldLoadQueueForFilter,
@@ -16,6 +17,7 @@ import {
   type JobStatusFilter,
 } from '../../util/status'
 import { Alert } from '../../ui/Alert'
+import { Spinner } from '../../ui/Spinner'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { LiveDot } from '../../ui/LiveDot'
 import { PageHeader } from '../../ui/PageHeader'
@@ -75,6 +77,11 @@ export function JobsPage() {
   const queueReq = useRef(0)
   const lastFetchedQueued = useRef(-1)
   const lastGenReload = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const jobsFlight = usePageLoad()
+  const queueFlight = usePageLoad()
+  const viewKey = `${statusFilter}|${page}|${debouncedFilter}`
+  const [shownFor, setShownFor] = useState<string | null>(null)
 
   const filterRef = useRef(issueFilter)
   useEffect(() => {
@@ -87,11 +94,13 @@ export function JobsPage() {
     return () => window.clearTimeout(t)
   }, [issueFilter, navigate, pathname, statusFilter])
 
-  const loadQueue = useCallback(async () => {
+  const loadQueue = useCallback(async (mode: 'query' | 'tick' = 'tick') => {
+    const signal = mode === 'query' ? queueFlight.query('queue') : queueFlight.tick('queue')
+    if (!signal) return
     const req = ++queueReq.current
     try {
-      const q = await fetchQueue({ status: 'queued', limit: 200 })
-      if (req !== queueReq.current) return
+      const q = await fetchQueue({ status: 'queued', limit: 200, signal })
+      if (signal.aborted || req !== queueReq.current) return
       const rows = waitingQueueRows(q.items)
       const count =
         typeof q.queued_count === 'number' ? q.queued_count : rows.length
@@ -100,42 +109,64 @@ export function JobsPage() {
       setQueueItems(rows)
       setQueueQueued(count)
       setQueueReady(true)
-    } catch {
+    } catch (e) {
+      if (signal.aborted || isAbortError(e)) return
       // A failed refresh must not wipe rows that are already on screen.
       if (req === queueReq.current) setQueueReady(true)
+    } finally {
+      if (queueFlight.settle(signal)) void loadQueue('tick')
     }
-  }, [])
+  }, [queueFlight])
 
   const load = useCallback(
-    async (opts?: { filter?: string; page?: number }) => {
+    async (opts?: { filter?: string; page?: number; tick?: boolean }) => {
+      const filter = opts?.filter ?? debouncedFilter
+      const nextPage = opts?.page ?? page
+      const key = `${statusFilter}|${nextPage}|${filter}`
+      const signal = opts?.tick ? jobsFlight.tick(key) : jobsFlight.query(key)
+      if (!signal) return
       const req = ++reqId.current
+      if (!opts?.tick) setError(null)
       try {
         const data = await fetchJobs({
-          issueKey: (opts?.filter ?? debouncedFilter) || undefined,
+          issueKey: filter || undefined,
           status: statusFilter,
-          page: opts?.page ?? page,
+          page: nextPage,
           pageSize: PAGE_SIZE,
+          signal,
         })
-        if (req !== reqId.current) return
+        if (signal.aborted || req !== reqId.current) return
         rememberJobsPayload(data)
         setPayload(data)
+        setShownFor(key)
         setError(null)
         const total = data.total ?? 0
         const size = data.page_size ?? PAGE_SIZE
         const pages = Math.max(1, Math.ceil(total / size) || 1)
-        const landed = data.page ?? page
+        const landed = data.page ?? nextPage
         if (landed > pages) {
           navigate(withListPage(jobsFilterPath(statusFilter), pages), { replace: true })
         }
-        void loadQueue()
-        return
       } catch (e) {
-        if (req !== reqId.current) return
+        if (signal.aborted || isAbortError(e) || req !== reqId.current) return
+        if (!opts?.tick) {
+          setPayload({
+            jobs: [],
+            total: 0,
+            page: nextPage,
+            page_size: PAGE_SIZE,
+            server_time: '',
+          })
+        }
+        setShownFor(key)
         setError(e instanceof Error ? e.message : 'Failed to load jobs')
+      } finally {
+        const follow = jobsFlight.settle(signal)
+        if (!signal.aborted && req === reqId.current) void loadQueue('tick')
+        if (follow) void load({ filter, page: nextPage, tick: true })
       }
-      void loadQueue()
     },
-    [debouncedFilter, loadQueue, navigate, page, statusFilter],
+    [debouncedFilter, jobsFlight, loadQueue, navigate, page, statusFilter],
   )
 
   useEffect(() => {
@@ -146,22 +177,23 @@ export function JobsPage() {
   }, [debouncedFilter, page, load, statusFilter])
 
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     if (shouldLoadQueueForFilter(statusFilter)) return
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
-    void load()
+    void load({ tick: true })
   }, [live.generation, load, statusFilter])
 
   useEffect(() => {
     if (shouldLoadQueueForFilter(statusFilter)) {
-      void loadQueue()
+      void loadQueue('query')
       return
     }
     if (!shouldRefreshQueueList(statusFilter, live.queueQueued, lastFetchedQueued.current)) {
       return
     }
-    void loadQueue()
+    void loadQueue('tick')
   }, [statusFilter, live.queueQueued, live.generation, loadQueue])
 
   const showQueue = statusFilter === 'queue'
@@ -462,6 +494,15 @@ export function JobsPage() {
             ))}
           </div>
         )
+      ) : shownFor !== viewKey && !error ? (
+        <div
+          className="vd-panel px-5 py-10 text-center text-sm text-text-muted"
+          aria-busy="true"
+        >
+          <span className="inline-flex items-center gap-2">
+            <Spinner /> Loading jobs…
+          </span>
+        </div>
       ) : (
         <JobsTable
           jobs={filteredJobs}

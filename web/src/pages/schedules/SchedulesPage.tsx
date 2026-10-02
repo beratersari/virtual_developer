@@ -7,6 +7,7 @@ import {
   fetchAzureProjects,
   fetchIssueTypes,
   fetchSchedules,
+  isAbortError,
   patchSettings,
   previewScheduleIssue,
   previewScheduleMr,
@@ -25,6 +26,7 @@ import type {
   WorkMode,
 } from '../../api/types'
 import { useLive } from '../../app/live'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
@@ -99,12 +101,14 @@ export function SchedulesPage() {
   const [rows, setRows] = useState<ScheduleItem[]>([])
   const [total, setTotal] = useState(0)
   const [pageSize, setPageSize] = useState(PAGE_SIZE)
+  const [shownPage, setShownPage] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [cancelId, setCancelId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const lastGenReload = useRef(0)
-  const reqId = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const flight = usePageLoad()
 
   useEffect(() => {
     const want = canonicalSchedulePath(modeParam, trackerParam, pageParam)
@@ -112,12 +116,15 @@ export function SchedulesPage() {
     if (here !== want) navigate(want, { replace: true })
   }, [modeParam, navigate, pageParam, trackerParam])
 
-  const reload = useCallback(async (pageOverride?: number) => {
+  const reload = useCallback(async (loadMode: 'query' | 'tick' = 'query', pageOverride?: number) => {
     const nextPage = pageOverride ?? page
-    const req = ++reqId.current
+    const key = String(nextPage)
+    const signal = loadMode === 'tick' ? flight.tick(key) : flight.query(key)
+    if (!signal) return
+    if (loadMode === 'query') setError(null)
     try {
-      const p = await fetchSchedules({ page: nextPage, pageSize: PAGE_SIZE })
-      if (req !== reqId.current) return
+      const p = await fetchSchedules({ page: nextPage, pageSize: PAGE_SIZE, signal })
+      if (signal.aborted) return
       const size = p.page_size ?? PAGE_SIZE
       const count = p.total ?? 0
       const pages = Math.max(1, Math.ceil(count / size) || 1)
@@ -125,26 +132,32 @@ export function SchedulesPage() {
       setRows(p.schedules || [])
       setTotal(count)
       setPageSize(size)
+      setShownPage(nextPage)
       setError(null)
       if (landed > pages) {
         navigate(withListPage(schedulePath(mode, tracker), pages), { replace: true })
       }
     } catch (e) {
-      if (req !== reqId.current) return
+      if (signal.aborted || isAbortError(e)) return
+      setShownPage(nextPage)
       setError(e instanceof Error ? e.message : 'Load failed')
+    } finally {
+      if (flight.settle(signal)) void reload('tick', nextPage)
     }
-  }, [mode, navigate, page, tracker])
+  }, [flight, mode, navigate, page, tracker])
 
   useEffect(() => {
-    void reload()
+    void reload('query')
   }, [reload])
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
-    void reload()
+    void reload('tick')
   }, [live.generation, reload])
 
+  const listPending = shownPage !== page
   const currentPage = page
   const size = pageSize || PAGE_SIZE
   const totalPages = Math.max(1, Math.ceil(total / size) || 1)
@@ -205,22 +218,22 @@ export function SchedulesPage() {
       {mode === 'existing' ? (
         <Existing onDone={() => {
           if (page > 1) navigate(schedulePath('existing', tracker))
-          else void reload(1)
+          else void reload()
         }} />
       ) : mode === 'mr' ? (
         <ExistingMr onDone={() => {
           if (page > 1) navigate(schedulePath('mr'))
-          else void reload(1)
+          else void reload()
         }} />
       ) : mode === 'pr' ? (
         <ExistingPr onDone={() => {
           if (page > 1) navigate(schedulePath('pr'))
-          else void reload(1)
+          else void reload()
         }} />
       ) : (
         <CreateNew onDone={() => {
           if (page > 1) navigate(schedulePath('new', tracker))
-          else void reload(1)
+          else void reload()
         }} />
       )}
       {error && <p className="text-sm text-danger-text">{error}</p>}
@@ -246,7 +259,7 @@ export function SchedulesPage() {
         </button>
       </div>
       <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
-        {rows.map((s) => (
+        {!listPending && rows.map((s) => (
           <li key={s.schedule_id} className="py-3 text-sm">
             {s.issue_key ? (
               <Link className="font-mono text-accent-text hover:underline" to={`/tasks/${encodeURIComponent(s.issue_key)}`}>
@@ -332,7 +345,17 @@ export function SchedulesPage() {
             )}
           </li>
         ))}
-        {rows.length === 0 && <li className="py-6 text-text-muted">Nothing scheduled.</li>}
+        {(listPending || rows.length === 0) && (
+          <li className="py-6 text-text-muted" aria-busy={listPending && !error}>
+            {listPending && !error ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner /> Loading schedules…
+              </span>
+            ) : (
+              'Nothing scheduled.'
+            )}
+          </li>
+        )}
       </ul>
       <ConfirmDialog
         open={Boolean(runId)}
@@ -1212,19 +1235,32 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       setAzureProjects([])
       return
     }
-    void fetchAzureProjects(collection.trim())
+    const ac = new AbortController()
+    void fetchAzureProjects(collection.trim(), ac.signal)
       .then((p) => {
+        if (ac.signal.aborted) return
         const names = p.projects || []
         setAzureProjects(names)
         setAzureProject((cur) => cur || names[0] || '')
       })
-      .catch(() => setAzureProjects([]))
+      .catch((e: unknown) => {
+        if (ac.signal.aborted || isAbortError(e)) return
+        setAzureProjects([])
+      })
+    return () => ac.abort()
   }, [tracker, collection])
 
   useEffect(() => {
-    void fetchIssueTypes()
-      .then((p) => setTypes(p.issue_types || []))
-      .catch(() => undefined)
+    const ac = new AbortController()
+    void fetchIssueTypes(undefined, ac.signal)
+      .then((p) => {
+        if (ac.signal.aborted) return
+        setTypes(p.issue_types || [])
+      })
+      .catch((e: unknown) => {
+        if (ac.signal.aborted || isAbortError(e)) return
+      })
+    return () => ac.abort()
   }, [])
 
   useEffect(() => {

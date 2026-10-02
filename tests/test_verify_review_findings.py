@@ -956,7 +956,7 @@ def test_job_detail_artifacts_must_ignore_stale_response():
     start = src.find("const loadArtifacts = useCallback")
     assert start != -1
     load = src[start : src.find("const load = useCallback", start)]
-    assert "fetchJobArtifacts(id)" in load
+    assert "fetchJobArtifacts(id," in load
     assert "setPrompts(nextPrompts)" in load
     assert "jobIdRef.current" in src
     assert "acceptJobArtifactsResponse(id, jobIdRef.current)" in load, (

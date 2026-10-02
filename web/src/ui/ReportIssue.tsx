@@ -49,12 +49,13 @@ export function ReportIssue() {
   useEffect(() => {
     if (!open) return
     let cancelled = false
+    const ac = new AbortController()
     setLoadingJobs(true)
     setError(null)
     setDone(null)
-    fetchJobs({ page: 1, pageSize: 100 })
+    fetchJobs({ page: 1, pageSize: 100, signal: ac.signal })
       .then((payload) => {
-        if (cancelled) return
+        if (cancelled || ac.signal.aborted) return
         const list = payload.jobs || []
         setJobs(list)
         const fromPath = jobIdFromPath(location.pathname)
@@ -62,7 +63,7 @@ export function ReportIssue() {
         setSelectedIds(match ? [match.job_id] : [])
       })
       .catch((err: unknown) => {
-        if (cancelled) return
+        if (cancelled || ac.signal.aborted) return
         setJobs([])
         setSelectedIds([])
         setError(err instanceof Error ? err.message : 'Could not load jobs')
@@ -72,6 +73,7 @@ export function ReportIssue() {
       })
     return () => {
       cancelled = true
+      ac.abort()
     }
   }, [open, location.pathname])
 

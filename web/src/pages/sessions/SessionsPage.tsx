@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
 import { SessionWorkspacePage } from './SessionWorkspacePage'
-import { fetchOpencodeWorkspaces } from '../../api/client'
+import { fetchOpencodeWorkspaces, isAbortError } from '../../api/client'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import type { OpencodeWorkspaceItem, OpencodeWorkspaceList } from '../../api/types'
 import { useLive } from '../../app/live'
 import { PageHeader } from '../../ui/PageHeader'
+import { Spinner } from '../../ui/Spinner'
 
 const PAGE_SIZE = 25
 
@@ -31,7 +33,10 @@ export function SessionsPage() {
   const [payload, setPayload] = useState<OpencodeWorkspaceList | null>(null)
   const [error, setError] = useState<string | null>(null)
   const lastGenReload = useRef(0)
-  const reqId = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const flight = usePageLoad()
+  const viewKey = `${page}|${debouncedQuery}`
+  const [shownFor, setShownFor] = useState<string | null>(null)
 
   const queryRef = useRef(query)
   useEffect(() => {
@@ -45,17 +50,22 @@ export function SessionsPage() {
     return () => window.clearTimeout(t)
   }, [navigate, pathname, query])
 
-  const reload = useCallback(async (pageOverride?: number) => {
+  const reload = useCallback(async (mode: 'query' | 'tick', pageOverride?: number) => {
     const nextPage = pageOverride ?? page
-    const req = ++reqId.current
+    const key = `${nextPage}|${debouncedQuery}`
+    const signal = mode === 'tick' ? flight.tick(key) : flight.query(key)
+    if (!signal) return
+    if (mode === 'query') setError(null)
     try {
       const p = await fetchOpencodeWorkspaces({
         page: nextPage,
         pageSize: PAGE_SIZE,
         q: debouncedQuery || undefined,
+        signal,
       })
-      if (req !== reqId.current) return
+      if (signal.aborted) return
       setPayload(p)
+      setShownFor(key)
       setError(null)
       const total = p.total ?? 0
       const size = p.page_size ?? PAGE_SIZE
@@ -63,22 +73,28 @@ export function SessionsPage() {
       const landed = p.page ?? nextPage
       if (landed > pages) navigate(withListPage('/sessions', pages), { replace: true })
     } catch (e) {
-      if (req !== reqId.current) return
+      if (signal.aborted || isAbortError(e)) return
+      if (mode === 'query') setPayload(null)
+      setShownFor(key)
       setError(e instanceof Error ? e.message : 'Load failed')
+    } finally {
+      if (flight.settle(signal)) void reload('tick', nextPage)
     }
-  }, [debouncedQuery, navigate, page])
+  }, [debouncedQuery, flight, navigate, page])
 
   useEffect(() => {
-    void reload()
+    void reload('query')
   }, [reload])
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
-    void reload()
+    void reload('tick')
   }, [live.generation, reload])
 
-  const rows: OpencodeWorkspaceItem[] = payload?.workspaces || []
+  const awaiting = shownFor !== viewKey
+  const rows: OpencodeWorkspaceItem[] = awaiting ? [] : payload?.workspaces || []
   const total = payload?.total ?? 0
   const currentPage = payload?.page ?? page
   const size = payload?.page_size ?? PAGE_SIZE
@@ -130,10 +146,19 @@ export function SessionsPage() {
 
       <div className="space-y-2.5">
         {rows.length === 0 && (
-          <div className="vd-panel px-5 py-10 text-center text-sm text-text-muted">
-            {debouncedQuery
-              ? `No workspaces match "${debouncedQuery}".`
-              : 'No OpenCode workspaces yet. A plan, build, or test run creates one. Claude Code and Codex jobs are listed under Jobs.'}
+          <div
+            className="vd-panel px-5 py-10 text-center text-sm text-text-muted"
+            aria-busy={awaiting && !error}
+          >
+            {awaiting && !error ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner /> Loading sessions…
+              </span>
+            ) : debouncedQuery ? (
+              `No workspaces match "${debouncedQuery}".`
+            ) : (
+              'No OpenCode workspaces yet. A plan, build, or test run creates one. Claude Code and Codex jobs are listed under Jobs.'
+            )}
           </div>
         )}
         {rows.map((w) => (

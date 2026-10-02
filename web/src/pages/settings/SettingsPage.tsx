@@ -812,8 +812,10 @@ export function SettingsPage() {
   }, [live.settings, settings])
 
   useEffect(() => {
-    void fetchSettings()
+    const ac = new AbortController()
+    void fetchSettings(ac.signal)
       .then((s) => {
+        if (ac.signal.aborted) return
         const serverHasList = Array.isArray(s.project_repositories)
         if (serverHasList) projectsLoaded.current = true
         setSettings((cur) => {
@@ -832,7 +834,11 @@ export function SettingsPage() {
           })
         }
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: unknown) => {
+        if (ac.signal.aborted) return
+        setError(e instanceof Error ? e.message : 'Could not load settings')
+      })
+    return () => ac.abort()
   }, [])
 
   const loadProjects = useCallback(async () => {

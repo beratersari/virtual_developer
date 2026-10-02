@@ -11,6 +11,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Fixed
 
 - A comment on one repository of a multi-repo job checks the other repository out on `feature/{KEY}` when its saved source is a primary base (`develop`, `main`, `master`, `trunk`, `dev`, or `release/*`). The follow-up reuses the first run's folder, so that repository's feature commits stay in the workspace. The commented repository stays on the branch named in the review.
+- Dashboard pages no longer stay blank or look empty while an earlier read still holds the browser's connections. Leaving a page cancels that page's read, a live update waits for the read already in flight, and Jobs, Sessions, and Scheduled stay on Loading until the response for the list you opened arrives.
 
 ## [0.9.69] — 2026-10-02
 

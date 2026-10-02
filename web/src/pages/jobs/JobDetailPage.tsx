@@ -5,9 +5,11 @@ import {
   deleteJob,
   fetchJobArtifacts,
   fetchJobById,
+  isAbortError,
   planExecute,
   planRefactor,
 } from '../../api/client'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import type {
   JobItem,
   PlanDocument,
@@ -19,6 +21,7 @@ import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import {
   acceptJobArtifactsResponse,
+  artifactFetchDecision,
   artifactsHaveContent,
   jobArtifactPathSignature,
   shouldRefetchJobArtifacts,
@@ -67,17 +70,24 @@ export function JobDetailPage() {
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const jobFlight = usePageLoad()
   const artsFor = useRef('')
   const artsSig = useRef('')
   const artsHad = useRef(false)
   const artsInFlight = useRef(false)
+  const artsAgain = useRef(false)
+  const artsAbort = useRef<AbortController | null>(null)
   const artsGen = useRef(0)
   const jobIdRef = useRef(jobId)
   jobIdRef.current = jobId
 
   const loadArtifacts = useCallback(async (id: string, force = false, sig = '') => {
     if (!id) return
-    if (artsInFlight.current && !force) return
+    if (artifactFetchDecision(artsInFlight.current) === 'wait') {
+      if (force) artsAgain.current = true
+      return
+    }
     const nextSig = sig || artsSig.current
     if (
       !shouldRefetchJobArtifacts({
@@ -93,11 +103,14 @@ export function JobDetailPage() {
       return
     }
     const gen = artsGen.current
+    artsAbort.current?.abort()
+    const ac = new AbortController()
+    artsAbort.current = ac
     artsInFlight.current = true
     setArtsLoading(true)
     try {
-      const arts = await fetchJobArtifacts(id)
-      if (gen !== artsGen.current) return
+      const arts = await fetchJobArtifacts(id, ac.signal)
+      if (ac.signal.aborted || gen !== artsGen.current) return
       if (!acceptJobArtifactsResponse(id, jobIdRef.current)) return
       artsFor.current = id
       if (sig) artsSig.current = sig
@@ -106,20 +119,27 @@ export function JobDetailPage() {
       artsHad.current = artifactsHaveContent(nextPrompts, nextLogs)
       setPrompts(nextPrompts)
       setSessionLogs(nextLogs)
-    } catch {
+    } catch (e) {
+      if (ac.signal.aborted || isAbortError(e)) return
       /* tab shows its own empty/warning */
     } finally {
       if (gen === artsGen.current) {
         artsInFlight.current = false
         setArtsLoading(false)
+        if (artsAgain.current) {
+          artsAgain.current = false
+          void loadArtifacts(id, true, sig)
+        }
       }
     }
   }, [])
 
   const load = useCallback(
-    async (soft = false) => {
+    async (soft = false, loadMode: 'query' | 'tick' = soft ? 'tick' : 'query') => {
       const id = jobId.trim()
       if (!id) return
+      const signal = loadMode === 'tick' ? jobFlight.tick(id) : jobFlight.query(id)
+      if (!signal) return
       const req = ++reqId.current
       const haveRow = Boolean(peekJob(id))
       if (!soft && !haveRow) {
@@ -127,8 +147,8 @@ export function JobDetailPage() {
         setError(null)
       }
       try {
-        const body = await fetchJobById(id)
-        if (req !== reqId.current) return
+        const body = await fetchJobById(id, signal)
+        if (signal.aborted || req !== reqId.current) return
         if (!body.job.job_id) throw new Error(`Job ${id} not found`)
         rememberJob(body.job)
         setJob(body.job)
@@ -138,17 +158,18 @@ export function JobDetailPage() {
         setStale(false)
         void loadArtifacts(id, !soft, jobArtifactPathSignature(body.job))
       } catch (e) {
-        if (req !== reqId.current) return
+        if (signal.aborted || isAbortError(e) || req !== reqId.current) return
         if (soft || haveRow) setStale(true)
         else {
           setJob(null)
           setError(e instanceof Error ? e.message : 'Failed to load job')
         }
       } finally {
-        if (req === reqId.current) setLoading(false)
+        if (req === reqId.current && !signal.aborted) setLoading(false)
+        if (jobFlight.settle(signal)) void load(true, 'tick')
       }
     },
-    [jobId, loadArtifacts],
+    [jobFlight, jobId, loadArtifacts],
   )
 
   useEffect(() => {
@@ -165,8 +186,10 @@ export function JobDetailPage() {
     setFollowup(null)
     setPlan(null)
     setConfirm(null)
+    artsAbort.current?.abort()
     artsGen.current += 1
     artsInFlight.current = false
+    artsAgain.current = false
     artsFor.current = ''
     artsSig.current = ''
     artsHad.current = false
@@ -177,14 +200,21 @@ export function JobDetailPage() {
     setJob(seed)
     setSystemLogs([])
     setLoading(!seed)
-    void load(Boolean(seed))
+    void load(Boolean(seed), 'query')
+    return () => {
+      artsAbort.current?.abort()
+      artsGen.current += 1
+      artsInFlight.current = false
+      artsAgain.current = false
+    }
   }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps — remount seed per id
 
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     const now = Date.now()
     if (now - lastSoft.current < 4000) return
     lastSoft.current = now
-    void load(true)
+    void load(true, 'tick')
   }, [live.generation, load])
 
   const liveRun =

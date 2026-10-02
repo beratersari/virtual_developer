@@ -63,11 +63,13 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
+    const ac = new AbortController()
+    const boot = { signal: ac.signal, slot: 'background' as const }
     void Promise.allSettled([
-      fetchMeta(),
-      fetchPoll(),
-      fetchSettings(),
-      fetchQueue({ status: 'queued', limit: 200 }),
+      fetchMeta(boot),
+      fetchPoll(boot),
+      fetchSettings(ac.signal, 'background'),
+      fetchQueue({ status: 'queued', limit: 200, ...boot }),
     ]).then((results) => {
       if (cancelled) return
       const [m, p, s, q] = results
@@ -96,6 +98,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     })
     return () => {
       cancelled = true
+      ac.abort()
     }
   }, [])
 

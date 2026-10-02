@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteTempFolder, fetchStorage, fetchStorageDeletes } from '../../api/client'
+import { deleteTempFolder, fetchStorage, fetchStorageDeletes, isAbortError } from '../../api/client'
+import { usePageLoad } from '../../api/pageLoad'
 import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
@@ -246,25 +247,27 @@ export function StoragePage() {
   const [data, setData] = useState<StoragePayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<StorageFolder | null>(null)
-  const reloadInFlight = useRef(false)
+  const flight = usePageLoad()
 
-  const reload = async (refresh = false) => {
-    if (reloadInFlight.current && !refresh) return
-    reloadInFlight.current = true
+  const reload = useCallback(async (refresh = false) => {
+    const signal = refresh ? flight.query('refresh') : flight.tick('storage')
+    if (!signal) return
     try {
-      const payload = await fetchStorage({ refresh })
+      const payload = await fetchStorage({ refresh, signal })
+      if (signal.aborted) return
       setData(payload)
       setError(null)
     } catch (e) {
+      if (signal.aborted || isAbortError(e)) return
       setError(e instanceof Error ? e.message : 'Load failed')
     } finally {
-      reloadInFlight.current = false
+      if (flight.settle(signal)) void reload(false)
     }
-  }
+  }, [flight])
 
   useEffect(() => {
     void reload()
-  }, [])
+  }, [reload])
 
   const deleting = (data?.folders || []).some((folder) => folder.delete?.status === 'deleting')
   const sizesPending = Boolean(data?.sizes_pending)
@@ -273,16 +276,17 @@ export function StoragePage() {
     if (!deleting && !sizesPending && !mrPending) return
     let cancelled = false
     let timer: number | undefined
+    const ac = new AbortController()
     const tick = async () => {
       if (cancelled) return
       try {
         if (deleting) {
-          const payload = await fetchStorageDeletes()
-          if (cancelled) return
+          const payload = await fetchStorageDeletes(ac.signal)
+          if (cancelled || ac.signal.aborted) return
           setData((prev) => applyDeletes(prev, payload.deletes))
           const still = payload.deletes.some((d) => d.status === 'deleting')
           if (!still) await reload()
-        } else if (!reloadInFlight.current) {
+        } else {
           await reload()
         }
       } catch {
@@ -298,9 +302,10 @@ export function StoragePage() {
     void tick()
     return () => {
       cancelled = true
+      ac.abort()
       if (timer) window.clearTimeout(timer)
     }
-  }, [deleting, sizesPending, mrPending])
+  }, [deleting, mrPending, reload, sizesPending])
 
   const onDelete = () => {
     if (!pending || pending.in_use) return
