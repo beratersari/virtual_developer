@@ -2014,7 +2014,7 @@ class GitManager:
         Always applies a hard timeout (default ``git_command_timeout_seconds``)
         so a hung push/fetch cannot pin a job slot forever.
         """
-        if self.repo_checkouts:
+        if getattr(self, "repo_checkouts", None):
             return subprocess.CompletedProcess(
                 args=["git", *args],
                 returncode=1,
