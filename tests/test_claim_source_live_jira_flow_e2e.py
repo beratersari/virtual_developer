@@ -657,8 +657,8 @@ async def test_http_jira_primary_develop_allows_two_concurrent_jobs(
     st_b = sm.get_state(key_b)
     assert st_a is not None and st_b is not None
     # Both should complete (or at least not ERROR on source claim)
-    assert st_a.status != TaskStatus.ERROR or "source" not in (st_a.message or "").lower()
-    assert st_b.status != TaskStatus.ERROR or "source" not in (st_b.message or "").lower()
+    assert st_a.status != TaskStatus.ERROR or "source" not in (st_a.error_message or "").lower()
+    assert st_b.status != TaskStatus.ERROR or "source" not in (st_b.error_message or "").lower()
     print(f"[sim] primary A={key_a}:{st_a.status} B={key_b}:{st_b.status} seen={seen}", flush=True)
 
 
