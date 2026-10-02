@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- A comment on one repository of a multi-repo job checks the other repository out on `feature/{KEY}` when its saved source is a primary base (`develop`, `main`, `master`, `trunk`, `dev`, or `release/*`). The follow-up reuses the first run's folder, so that repository's feature commits stay in the workspace. The commented repository stays on the branch named in the review.
+
 ## [0.9.69] — 2026-10-02
 
 Jobs, schedules, and issue state live in one database. The storage page lists every merge request on a multi-repo folder, and copying a dashboard address pastes the page you have open.
