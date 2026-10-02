@@ -356,6 +356,7 @@ def test_e2e_git_push_timeout_does_not_hang(tmp_path, monkeypatch):
 
     gm = GitManager.__new__(GitManager)
     gm.temp_dir = ws
+    gm.repo_checkouts = []
     gm.remote_url = "https://gitlab.example.com/g/r.git"
     gm.remote_enabled = True
     gm.work_branch = "feature/E2E-PUSH"
