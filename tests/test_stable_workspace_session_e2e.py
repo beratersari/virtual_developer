@@ -575,7 +575,8 @@ async def test_e2e_plan_then_build_same_issue_primary_source_same_folder(harness
         "PB-1", source="develop", git_track=track, agent_sid="ses_should_resume_plan"
     )
     assert d_plan.resolve() == d_build.resolve()
-    assert harness.seen[-1]["session_id"] == sid
+    # Plan and build keep separate chats. The build must not resume the plan session.
+    assert harness.seen[-1]["session_id"] != sid
 
 
 @pytest.mark.asyncio
