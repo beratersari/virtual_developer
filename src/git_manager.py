@@ -1317,7 +1317,11 @@ class GitManager:
         When no PATs are configured at all, any host is allowed (public clone).
         A lone ``GITLAB_PAT`` (no host map) authenticates the job remote.
         When a host→PAT map exists, the repository host must be in that map.
+        A ``file:`` remote is a local git directory and never receives a PAT.
         """
+        raw = (url or "").strip()
+        if urlparse(raw).scheme.lower() == "file":
+            return
         mapping = (
             settings.gitlab_host_pat_map()
             if hasattr(settings, "gitlab_host_pat_map")
