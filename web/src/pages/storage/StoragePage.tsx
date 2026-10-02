@@ -5,6 +5,7 @@ import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
+import { storageMrLabel } from './mrLabel'
 
 function folderHref(folder: StorageFolder): string | null {
   if (folder.job_id) return `/jobs/${encodeURIComponent(folder.job_id)}`
@@ -18,24 +19,6 @@ function mrStateLabel(state?: string | null): string {
   if (raw === 'opened' || raw === 'open') return 'open'
   if (raw === 'unknown') return 'unknown'
   return raw
-}
-
-function reviewRepoName(url: string): string {
-  const gl = /\/([^/?#]+)\/-\/merge_requests\/\d+/i.exec(url)
-  if (gl) return gl[1]
-  const az = /\/_git\/([^/?#]+)\/pullrequest\/\d+/i.exec(url)
-  if (az) return az[1]
-  return ''
-}
-
-function mrShortLabel(url: string, withRepo = false): string {
-  const gl = /\/merge_requests\/(\d+)/i.exec(url)
-  const az = /\/pullrequest\/(\d+)/i.exec(url)
-  const n = gl?.[1] || az?.[1]
-  if (!n) return 'MR'
-  if (!withRepo) return `!${n}`
-  const repo = reviewRepoName(url)
-  return repo ? `${repo} !${n}` : `!${n}`
 }
 
 function folderReviews(folder: StorageFolder): { url: string; state?: string | null }[] {
@@ -55,7 +38,6 @@ function hasLinkedReview(folder: StorageFolder): boolean {
 function ReviewLinks({ folder }: { folder: StorageFolder }) {
   const reviews = folderReviews(folder)
   if (!reviews.length) return null
-  const withRepo = reviews.length > 1
   return (
     <>
       {reviews.map((review) => (
@@ -66,7 +48,7 @@ function ReviewLinks({ folder }: { folder: StorageFolder }) {
             rel="noreferrer"
             className="font-mono text-xs text-accent-text hover:underline"
           >
-            {mrShortLabel(review.url, withRepo)}
+            {storageMrLabel(review.url)}
           </a>
           <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
             {mrStateLabel(review.state)}
