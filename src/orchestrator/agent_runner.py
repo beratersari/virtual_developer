@@ -664,6 +664,21 @@ class AgentRunner:
         ).lower()
         return "unknown agent" in blob or "is not registered" in blob
 
+    @staticmethod
+    def _result_serve_not_answering(result: Optional[Dict[str, Any]]) -> bool:
+        """True when the opening health gate failed.
+
+        Retrying keeps the issue executing, and an executing issue stops
+        the supervisor from replacing a serve that is not answering.
+        """
+        data = result if isinstance(result, dict) else {}
+        blob = " ".join(
+            [str(data.get("stderr") or "")]
+            + [str(data.get("stdout") or "")]
+            + [str(r) for r in (data.get("incomplete_reasons") or [])]
+        ).lower()
+        return "opencode serve is not answering" in blob
+
     def _resume_codex_after_lock(
         self,
         task: AgentTask,
@@ -1569,6 +1584,11 @@ class AgentRunner:
                         f"task_id={task.task_id} "
                         f"(lock retry {lock_used + 1}/{effective_max_retries})"
                     )
+            elif self._result_serve_not_answering(result):
+                logger.error(
+                    f"OpenCode serve is not answering — not retrying: "
+                    f"task_id={task.task_id} attempt={attempt + 1}"
+                )
             elif result.get("timed_out"):
                 from src.opencode_sessions import compact_related_reasons
 

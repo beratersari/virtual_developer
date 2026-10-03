@@ -32,6 +32,50 @@ def disable_dashboard_auth(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "dashboard_password", "")
 
 
+@pytest.fixture(autouse=True)
+def leave_opencode_serve_alone(monkeypatch: pytest.MonkeyPatch):
+    """Stub the serve supervisor so the suite never starts or kills a live serve."""
+    from src.opencode_serve_supervisor import supervisor
+
+    async def _watch(_running):
+        return None
+
+    monkeypatch.setattr(
+        supervisor,
+        "request_reload",
+        lambda: {
+            "status": "reloaded",
+            "message": "OpenCode reloaded and is using the saved agents.",
+        },
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "ensure_started",
+        lambda: {
+            "status": "ready",
+            "message": "OpenCode serve is already running.",
+        },
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: {"status": "ready", "message": "OpenCode serve is running."},
+    )
+    monkeypatch.setattr(supervisor, "stop_owned", lambda: None)
+    monkeypatch.setattr(supervisor, "wait_until_ready", lambda timeout=45.0: True)
+    monkeypatch.setattr(supervisor, "watch", _watch)
+    monkeypatch.setattr(supervisor, "bind", lambda **_kwargs: None)
+    monkeypatch.setattr(supervisor, "reload_outstanding", lambda: False)
+    monkeypatch.setattr(
+        supervisor,
+        "apply_pending_reload",
+        lambda timeout=90.0: {
+            "status": "ready",
+            "message": "OpenCode serve is running.",
+        },
+    )
+
+
 def _rebind_store_aliases(
     monkeypatch: pytest.MonkeyPatch,
     *,

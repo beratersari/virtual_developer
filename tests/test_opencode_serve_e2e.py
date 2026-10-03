@@ -250,7 +250,7 @@ class FakeServeClient(OpenCodeServeClient):
         self._client = None  # type: ignore
         self._backend = backend
 
-    async def health(self):
+    async def health(self, timeout=None):
         return await self._backend.health()
 
     async def create_session(self, title: str, **kw):
@@ -822,7 +822,7 @@ async def test_e2e_does_not_send_twenty_continues():
 @pytest.mark.asyncio
 async def test_serve_health_failure():
     class DeadClient(FakeServeClient):
-        async def health(self):
+        async def health(self, timeout=None):
             raise ConnectionError("connection refused")
 
     backend = FakeServeBackend()
@@ -830,9 +830,9 @@ async def test_serve_health_failure():
     orch = ServeOrchestrator(client=client)
     result = await orch.run(prompt="x", title="t")
     assert result.returncode == 1
-    assert "unreachable" in (result.stderr or "").lower() or "health" in (
-        result.stderr or ""
-    ).lower()
+    assert result.incomplete is False
+    assert "OpenCode serve is not answering" in (result.stderr or "")
+    assert "connection refused" in (result.stderr or "").lower()
 
 
 def test_default_continue_prompt_not_used_for_compact():

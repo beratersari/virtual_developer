@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Added
+
+- The daemon always starts OpenCode serve when it is down, and starts that child again if it exits. A serve that is already healthy is left running. Saving, creating, or syncing an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. A running job keeps the current process until it finishes. Settings has Reload OpenCode for a change made outside the editor.
+
+### Fixed
+
+- Saving or creating an agent while a job is running leaves the jobs that are still queued where they are. Those jobs start after OpenCode reloads, so they see the new agent. The running job keeps its current serve process.
+- A failed OpenCode reload leaves queued jobs queued. They start only after a later reload succeeds and the new process is using the saved agents. The queue also stays put when that reload state cannot be read.
+- OpenCode serve stays up when the work queue cannot be read. A locked or unreadable queue is not treated as an empty queue.
+- A missed OpenCode health check no longer stops serve while a job already has a session. The process stays up when it is still listening. A job that starts during a reload waits for that restart, and Yaver does not open a second serve beside it. A job that appears at the moment of a stop keeps the current process.
+- A job that has not reached OpenCode fails within a few seconds when serve is listening but does not answer. That opening check does not use the agent time budget. The job leaves executing, and the quiet process can then be replaced.
+
 ## [0.9.70] — 2026-10-03
 
 A follow-up on one repository of a multi-repo job keeps the other repository on `feature/{KEY}`. Dashboard pages keep a connection free, and storage labels every review `!N`.

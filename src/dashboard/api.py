@@ -1483,16 +1483,25 @@ def create_dashboard_app(
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
         from src.opencode_agents import list_agents, sync_status
+        from src.opencode_serve_supervisor import supervisor
 
         status = sync_status()
-        return {"agents": list_agents(), **status}
+        try:
+            serve = supervisor.status()
+        except Exception:
+            serve = {
+                "status": "down",
+                "message": "OpenCode serve status is unavailable.",
+            }
+        return {"agents": list_agents(), **status, "serve": serve}
 
     @app.post("/api/opencode-agents/sync")
     def opencode_agents_sync() -> dict:
-        from src.opencode_agents import AgentFileError, sync_agents
+        from src.opencode_agents import AgentFileError
+        from src.opencode_serve_supervisor import publish_catalog
 
         try:
-            return sync_agents()
+            return publish_catalog()
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1509,23 +1518,42 @@ def create_dashboard_app(
     @app.put("/api/opencode-agents/{name}")
     def opencode_agent_save(name: str, body: AgentWrite) -> dict:
         from src.opencode_agents import AgentFileError, write_agent
+        from src.opencode_serve_supervisor import publish_catalog
 
         try:
             path = write_agent(name, body.text)
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"name": name, "path": str(path)}
+        try:
+            published = publish_catalog()
+        except AgentFileError as exc:
+            return {
+                "name": name,
+                "path": str(path),
+                "serve": {"status": "failed", "message": str(exc)},
+            }
+        return {"name": name, "path": str(path), **published}
 
     @app.post("/api/opencode-agents")
     def opencode_agent_create(body: AgentCreate) -> dict:
         from src.opencode_agents import AgentFileError, new_agent_template, write_agent
+        from src.opencode_serve_supervisor import publish_catalog
 
         text = body.text.strip() or new_agent_template()
         try:
             path = write_agent(body.name, text, create=True)
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"name": body.name.strip(), "path": str(path), "text": text}
+        try:
+            published = publish_catalog()
+        except AgentFileError as exc:
+            published = {"serve": {"status": "failed", "message": str(exc)}}
+        return {
+            "name": body.name.strip(),
+            "path": str(path),
+            "text": text,
+            **published,
+        }
 
     @app.post("/api/settings/gitlab/test")
     def settings_gitlab_test(body: GitlabConnectionTestRequest) -> dict:

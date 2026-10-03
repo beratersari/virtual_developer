@@ -30,6 +30,7 @@ class JiraAgentDaemon:
         self._stopping = False
         self._poller: Optional[JiraPoller] = None
         self._dashboard_server: Optional[uvicorn.Server] = None
+        self._opencode_serve = None
         # Main asyncio loop used by poller thread → process_event handoff
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -203,6 +204,9 @@ class JiraAgentDaemon:
         logger.info("Starting unused-clone age policy...")
         tasks.append(asyncio.create_task(self._run_stale_clone_purge()))
 
+        self._attach_opencode_serve()
+        tasks.append(asyncio.create_task(self._watch_opencode_serve()))
+
         logger.info("Daemon started. Press Ctrl+C to stop.")
 
         # Wait for all tasks
@@ -241,6 +245,9 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Processing shutdown failed: {e}", e)
 
+        # Sessions are aborted above. Stop only the serve child we started.
+        self._stop_owned_opencode_serve()
+
         # Cancel remaining asyncio tasks (poller thread future, monitor, jobs)
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in tasks:
@@ -268,6 +275,41 @@ class JiraAgentDaemon:
                 logger.warning(
                     f"Could not abort OpenCode session for {issue_key}: {e}"
                 )
+
+    def _attach_opencode_serve(self) -> None:
+        """Start opencode serve when it is down. Leave one that is already healthy."""
+        from src.opencode_serve_supervisor import blocking_issue_keys, supervisor
+
+        supervisor.bind(live_jobs=lambda: blocking_issue_keys(self.processor))
+        self._opencode_serve = supervisor
+        try:
+            result = supervisor.ensure_started()
+        except Exception as e:
+            logger.exception(f"OpenCode serve start failed: {e}", e)
+            return
+        logger.info(
+            f"OpenCode serve {result.get('status')}: {result.get('message')}"
+        )
+
+    async def _watch_opencode_serve(self) -> None:
+        sup = getattr(self, "_opencode_serve", None)
+        if sup is None:
+            return
+        try:
+            await sup.watch(lambda: bool(self._running) and not self._stopping)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.exception(f"OpenCode serve watch failed: {e}", e)
+
+    def _stop_owned_opencode_serve(self) -> None:
+        sup = getattr(self, "_opencode_serve", None)
+        if sup is None:
+            return
+        try:
+            sup.stop_owned()
+        except Exception as e:
+            logger.warning(f"OpenCode serve stop failed: {e}")
 
     async def _start_dashboard(self):
         """Serve FastAPI dashboard (same process as poller/jobs)."""

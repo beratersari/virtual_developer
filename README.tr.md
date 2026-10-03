@@ -364,6 +364,8 @@ OpenCode TUI: proje klasöründen `./start-opencode.sh` (`$HOME`’dan değil).
 
 Yaver ile OpenCode serve aynı kullanıcı olmalıdır. Daemon git klonunu oluşturur. OpenCode serve o klona yazar ve commit atar. Transcript sekmesi bu sürecin sohbet veritabanını okur. 8080 kapısı root gerektirmez.
 
+Daemon, `OPENCODE_SERVE_URL` ayakta değilse `opencode serve` sürecini her zaman aynı kullanıcı olarak başlatır ve bu çocuk süreç kapanırsa yeniden başlatır. Sağlık kontrolü geçen bir serve’e dokunmaz. Kaçırılan bir sağlık yoklaması, oturumu açılmış bir iş varken hâlâ dinleyen süreci durdurmaz. OpenCode’a henüz ulaşmamış bir iş, serve cevap vermezse birkaç saniyede biter ve executing durumundan çıkar; sessiz süreç bundan sonra değiştirilebilir. Bu açılış kontrolü ajan süre bütçesini kullanmaz. Serve yeniden yüklenirken gelen iş, o yüklemenin bitmesini bekler. Bir ajanı kaydetmek veya oluşturmak kataloğu OpenCode ve Claude ev dizinlerine kopyalar ve çalışan iş yoksa serve’i yeniden yükler. Kuyrukta bekleyen işler, yeniden yükleme beklerken, sürerken veya hata verince kuyrukta kalır. Yeniden yükleme başarılı olduktan sonra başlarlar. Hata, kayıtlı ajanların henüz yüklenmediği anlamına gelir.
+
 `User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/.local/share/yaver/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
 
 Klonların sahibi olacak oturumu Yaver birimine yazın:
@@ -374,7 +376,7 @@ User=yaver
 Group=yaver
 ```
 
-`opencode serve`’ü aynı kullanıcı ve aynı ev dizini ile başlatın. Yeniden açılışta ayakta kalması için kullanıcı systemd servisi uygundur. `nohup`, o kullanıcı olarak başlatıldığında yeterlidir.
+Daemon serve’i o kullanıcı olarak başlatır. Aynı kullanıcı ve aynı ev dizini ile önceden başlattığınız bir süreç, sağlık kontrolü geçtiği sürece ayakta kalır. Kullanıcı systemd servisi o süreci yeniden açılışta ayakta tutar. `nohup`, o kullanıcı olarak başlatıldığında yeterlidir. Root olarak başlatmayın.
 
 Root ile oluşmuş ağaçlar varsa bir kez o kullanıcıya verin, sonra iki süreci de o kullanıcı olarak başlatın:
 

@@ -299,6 +299,7 @@ is not ahead of its target; that clone does not get a merge request.
 | Path | Role |
 |------|------|
 | `src/opencode_serve.py` | Serve orchestrator: compact wait, unattended nudge, post-nudge assess |
+| `src/opencode_serve_supervisor.py` | Daemon child: start serve when down, reload it when agents change and no job is in flight |
 | `src/opencode_sessions.py` | Completeness, `assistant_asked_question`, last-turn-only question tools |
 | `src/orchestrator/agent_runner.py` | Retries; do **not** re-send BUILD after question/compact follow-up |
 | `src/processor.py` | `_fail_from_agent_result` category `question`; `_push_and_create_mr` |
@@ -758,6 +759,8 @@ When TUI shows nothing, **logs still exist**:
 
 Daemon/agent runs use **opencode serve** with the issue temp clone as the session directory. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI. `start-backend.bat` / `start.bat` probe `:4096/global/health` and start serve if needed (`Ensure-OpencodeServe.ps1`). `start-opencode-serve.bat` still force-restarts serve.
 
+The daemon always starts serve when the health check is down, as the same user, and starts that child again if it exits. Shutdown stops only the child it started. A serve that is already healthy is left running until an agent save, create, or sync needs the new files. That reload kills the listener on the serve port and starts a new child. It waits while any job is `planning` or `executing`, including one that is only on disk. Queued jobs stay queued while that reload is deferred, in progress, or failed. They start on the new process only after the reload succeeds. Deferred means the agent files are saved and a planning or executing job is keeping the current process. A failed reload has not loaded those files, so the queue must not claim the next job. If the reload state cannot be read, the queue must not claim either. A missed `/global/health` does not kill a process that is still listening while a job already has a session. The opening gate is ready only after `/global/health` answers, and that check uses a few seconds, not the agent time budget. A listening process that does not answer fails the attempt, the job leaves executing, and the quiet process can then be replaced. Do not treat a listen socket as healthy, and do not run that opening GET with the job budget. Nothing listening is started again even during a job, including when an agent reload is already pending. Three missed checks with no job replace a quiet process, unless a job is visible in the last check immediately before the kill. A job that arrives during a reload waits for that one restart; the reload does not start a second process, and it does not kill the process when the job arrived before the old one was stopped. If the job list cannot be read, do not kill. If the work queue cannot be read, do not kill. An empty queue is the only queue result that leaves serve idle. Do not clear the miss count while holding the supervisor lock (`threading.Lock` is not reentrant). Job cancel still must not kill serve (`src/process_kill.py`). Do not “fix” a deferred reload by killing serve under a live job. Do not add a setting that turns this off. Do not treat one failed health probe as a dead serve. Do not retry the opening gate while the issue is still executing: that retry is what keeps the quiet process from being replaced.
+
 ### 9.8 Product start scripts, SPA, PowerShell — hard-won devops rules
 
 This subsection captures failures paid for while shipping offline **backend + frontend** launchers. Read before touching `start*.bat`, `Stop-VdProcesses.ps1`, or Windows dist CI.
@@ -865,6 +868,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `agent/PLAN_PROMPT.md` | Short plan-job user stub (`Mode: plan`) |
 | `agent/BUILD_PROMPT.md` | Short build-job user stub + git subject format |
 | `src/opencode_serve.py` | Serve loop: compact wait, unattended nudge (see §2 OpenCode serve) |
+| `src/opencode_serve_supervisor.py` | Start serve with the daemon; reload it after an agent save when idle |
 | `src/opencode_sessions.py` | Session completeness + clarifying-question detection |
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
