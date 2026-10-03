@@ -349,12 +349,12 @@ export function JobDetailPage() {
             )}
             {job && <StatusBadge status={job.status} />}
             {channel && (
-              <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+              <span className="vd-tag">
                 {channel}
               </span>
             )}
             {job && (
-              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
+              <span className="vd-tag">
                 {workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}
               </span>
             )}

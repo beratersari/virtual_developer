@@ -1079,7 +1079,7 @@ export function SettingsPage() {
         actions={saveButton}
       />
 
-      <div className="flex w-full gap-1 overflow-x-auto rounded-full border border-border bg-bg-elevated p-1 lg:w-fit lg:overflow-visible">
+      <div className="vd-seg vd-seg-wide">
         {(
           [
             ['jira', 'Jira'],
@@ -1097,9 +1097,8 @@ export function SettingsPage() {
               if (id === 'model' && section !== 'model') setModelsLoading(true)
               navigate(settingsSectionPath(id))
             }}
-            className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-transform duration-150 active:scale-95 ${
-              section === id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-            }`}
+            aria-pressed={section === id}
+            className={`vd-seg-btn ${section === id ? 'is-on' : ''}`}
           >
             {label}
           </button>

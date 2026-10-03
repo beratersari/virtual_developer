@@ -51,7 +51,7 @@ function ReviewLinks({ folder }: { folder: StorageFolder }) {
           >
             {storageMrLabel(review.url)}
           </a>
-          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+          <span className="vd-tag">
             {mrStateLabel(review.state)}
           </span>
         </span>

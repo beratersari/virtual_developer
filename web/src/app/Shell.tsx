@@ -5,7 +5,7 @@ import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
-import { PageTitleRoot } from './pageTitleContext'
+import { PageTitleRoot, useShownPageTitle } from './pageTitleContext'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
@@ -91,6 +91,15 @@ function IconGear() {
 
 const ICONS = [IconJobs, IconChart, IconClock, IconSession, IconDisk, IconBoard, IconGear]
 
+function TopBarName() {
+  const name = useShownPageTitle()
+  return (
+    <div className="hidden min-w-0 max-w-[40%] truncate sm:block" title={name}>
+      {name}
+    </div>
+  )
+}
+
 export function Shell() {
   const live = useLive()
   const location = useLocation()
@@ -108,8 +117,8 @@ export function Shell() {
             <img src="/yaver-wink.gif" alt="" width={64} height={64} />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold tracking-tight">Yaver</div>
-            <div className="text-[11px] text-text-muted">
+            <div className="truncate font-mono text-sm font-semibold tracking-tight">Yaver</div>
+            <div className="truncate font-mono text-[11px] text-text-muted">
               the aide · v{live.meta?.version ?? '—'}
             </div>
           </div>
@@ -126,28 +135,26 @@ export function Shell() {
                 className={active ? 'active' : undefined}
                 aria-current={active ? 'page' : undefined}
               >
+                <span className="vd-nav-idx" aria-hidden>
+                  {String(i + 1).padStart(2, '0')}
+                </span>
                 <Icon />
                 <span className="flex-1">{item.label}</span>
                 {item.to === '/jobs' && workQueued > 0 && (
-                  <span
-                    className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]"
-                    title="Messages waiting in the work queue"
-                  >
+                  <span className="vd-count" title="Messages waiting in the work queue">
                     {workQueued}
                   </span>
                 )}
                 {item.to === '/poll' && boardMatched > 0 && (
-                  <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]">
-                    {boardMatched}
-                  </span>
+                  <span className="vd-count">{boardMatched}</span>
                 )}
               </NavLink>
             )
           })}
         </nav>
 
-        <div className="mt-3 space-y-2 px-2 text-xs">
-          <div className="hidden font-mono text-[11px] leading-snug text-text md:block">
+        <div className="mt-3 space-y-2 border-t border-border px-2 pt-3 text-xs">
+          <div className="hidden font-mono text-[11px] leading-snug text-accent-text md:block">
             {localClock || '—'}
           </div>
           <ServeHealth />
@@ -184,6 +191,15 @@ export function Shell() {
               : 'vd-main-inner space-y-5'
           }
         >
+          <div className="vd-topbar">
+            <div className="vd-topbar-path">
+              <span className="vd-prompt">yaver</span>
+              <span className="text-text-muted">:</span>
+              <span>~{location.pathname}</span>
+              <span className="vd-caret" aria-hidden />
+            </div>
+            <TopBarName />
+          </div>
           {live.error && <Alert>{live.error}</Alert>}
           {live.poll?.error &&
           live.poll.error.trim().toLowerCase() !== 'jira disabled' ? (

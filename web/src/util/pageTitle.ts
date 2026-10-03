@@ -169,6 +169,33 @@ function scheduleName(parts: string[]): string {
   return parsed.tracker === 'azure' ? `${base} - Azure work item` : base
 }
 
+/** The open record's name wins. A leftover name from another address does not. */
+export function shownPageName(
+  fallback: string,
+  override: { path: string; name: string } | null,
+  pathname: string,
+): string {
+  return override && override.path === pathname ? override.name : fallback
+}
+
+/** Tab text without the "Yaver - " prefix. A placeholder yields to a real title already on the document. */
+export function visiblePageNameFrom(
+  name: string,
+  currentTitle: string,
+  seenReal: boolean,
+): string {
+  const title = resolveDocumentTitle(currentTitle, name, seenReal).title
+  const prefix = 'Yaver - '
+  if (title.startsWith(prefix)) return title.slice(prefix.length)
+  return collapse(name) || name
+}
+
+/** Same name the browser tab is showing for this page. */
+export function visiblePageName(name: string): string {
+  if (typeof document === 'undefined') return name
+  return visiblePageNameFrom(name, document.title, seenRealTitle)
+}
+
 /** Name after "Yaver - ". Record pages stay generic until the page supplies the title. */
 export function pageNameFromLocation(pathname: string, search = ''): string {
   const parts = partsOf(pathname)

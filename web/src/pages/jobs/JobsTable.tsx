@@ -62,25 +62,25 @@ export function JobsTable({
                   {j.issue_key}
                 </span>
                 {!channel && (j.source || 'jira') === 'gitlab' && (
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     GitLab
                   </span>
                 )}
                 {!channel &&
                   ((j.source || 'jira') === 'azure' ||
                     (j.source || 'jira') === 'azure_workitem') && (
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     Azure
                   </span>
                 )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
                 {channel && (
-                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     {channel}
                   </span>
                 )}
-                <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                <span className="vd-tag">
                   {workerLabel(resolveJobWorker(j, fallbackWorker))}
                 </span>
               </div>

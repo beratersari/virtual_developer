@@ -80,7 +80,7 @@ export function PollPage() {
                 {i.matched_label && <span className="text-success-text">trigger label</span>}
                 {i.is_todo && <span>To Do</span>}
                 {i.labels.slice(0, 6).map((l) => (
-                  <span key={l} className="rounded-full bg-bg px-2 py-0.5">
+                  <span key={l} className="vd-tag">
                     {l}
                   </span>
                 ))}
@@ -88,7 +88,7 @@ export function PollPage() {
             </div>
             <div>
               {i.will_process ? (
-                <span className="vd-pill bg-accent text-[#1a0d08]">This cycle</span>
+                <span className="vd-pill vd-pill-solid">This cycle</span>
               ) : (
                 <span className="text-xs text-text-muted">Skip</span>
               )}

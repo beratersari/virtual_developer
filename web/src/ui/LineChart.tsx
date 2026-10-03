@@ -220,7 +220,7 @@ export function LineChart({
                   cy={yAt(v)}
                   r="3.5"
                   fill={s.color}
-                  stroke="#0b1020"
+                  stroke="#07090d"
                   strokeWidth="1.5"
                 />
               )

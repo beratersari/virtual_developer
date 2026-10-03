@@ -28,11 +28,11 @@ const PERIODS: { id: AnalyticsPeriod; label: string }[] = ANALYTICS_PERIODS.map(
 type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
-  { id: 'total', label: 'Total', color: '#ff7a45' },
-  { id: 'completed', label: 'Completed', color: '#3ecf8e' },
-  { id: 'error', label: 'Error', color: '#f25c54' },
-  { id: 'cancelled', label: 'Cancelled', color: '#7b88a8' },
-  { id: 'in_flight', label: 'In flight', color: '#c9a227' },
+  { id: 'total', label: 'Total', color: '#3dffb0' },
+  { id: 'completed', label: 'Completed', color: '#5ec8ff' },
+  { id: 'error', label: 'Error', color: '#ff5d73' },
+  { id: 'cancelled', label: 'Cancelled', color: '#8aa0b5' },
+  { id: 'in_flight', label: 'In flight', color: '#ffc857' },
 ]
 
 function csv(set: Set<string>) {
@@ -437,11 +437,12 @@ export function AnalyticsPage() {
       {error && <Alert>{error}</Alert>}
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {PERIODS.map((p) => (
             <button
               key={p.id}
               type="button"
+              aria-pressed={period === p.id}
               onClick={() => {
                 if (p.id === 'custom') {
                   const start = payload?.range.start || ''
@@ -451,11 +452,7 @@ export function AnalyticsPage() {
                 }
                 navigate(analyticsPeriodPath(p.id))
               }}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                period === p.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-secondary hover:text-text'
-              }`}
+              className={`vd-seg-btn ${period === p.id ? 'is-on' : ''}`}
             >
               {p.label}
             </button>

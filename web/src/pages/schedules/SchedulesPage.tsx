@@ -177,39 +177,35 @@ export function SchedulesPage() {
           </>
         }
       />
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+      <div className="vd-seg">
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'existing' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'existing' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'existing'}
           onClick={() => navigate(schedulePath('existing'))}
         >
           Existing issue
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'new' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'new' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'new'}
           onClick={() => navigate(schedulePath('new'))}
         >
           New issue
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'mr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'mr' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'mr'}
           onClick={() => navigate(schedulePath('mr'))}
         >
           Existing MR
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'pr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'pr' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'pr'}
           onClick={() => navigate(schedulePath('pr'))}
         >
           Existing PR
@@ -1034,12 +1030,11 @@ function Existing({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={(e) => void submit(e)}>
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+      <div className="vd-seg mb-3">
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'jira' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'jira'}
           onClick={() => {
             navigate(schedulePath('existing', 'jira'))
             setPreview(null)
@@ -1049,9 +1044,8 @@ function Existing({ onDone }: { onDone: () => void }) {
         </button>
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'azure' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'azure'}
           onClick={() => {
             navigate(schedulePath('existing', 'azure'))
             setPreview(null)
@@ -1342,21 +1336,19 @@ function CreateNew({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={(e) => void submit(e)}>
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+      <div className="vd-seg mb-3">
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'jira' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'jira'}
           onClick={() => navigate(schedulePath('new', 'jira'))}
         >
           Jira
         </button>
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'azure' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'azure'}
           onClick={() => navigate(schedulePath('new', 'azure'))}
         >
           Azure work item

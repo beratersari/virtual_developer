@@ -8,6 +8,8 @@ import {
   jobPageName,
   pageNameFromLocation,
   resolveDocumentTitle,
+  shownPageName,
+  visiblePageNameFrom,
   reviewsPageName,
   workspacePageName,
 } from './pageTitle'
@@ -46,6 +48,31 @@ assert(jobPageName('Fix login', 'daemon') === 'Fix login - Daemon', 'daemon tab'
 assert(jobPageName('Fix login', 'prompt') === 'Fix login - Prompt', 'prompt tab')
 assert(jobPageName('Fix login', 'output') === 'Fix login - Output', 'output tab')
 assert(titled('/jobs/job_1') === 'Yaver - Job', 'job url before the record loads')
+assert(
+  shownPageName('Job', { path: '/jobs/job_1', name: 'Fix login' }, '/jobs/job_1') === 'Fix login',
+  'open job name replaces the address placeholder',
+)
+assert(
+  shownPageName('Job', { path: '/jobs/job_1', name: 'Fix login' }, '/jobs/job_2') === 'Job',
+  'a name from another job does not leak',
+)
+assert(
+  visiblePageNameFrom('Job', 'Yaver - Fix login', false) === 'Fix login',
+  'the bar keeps the issue name the server already wrote',
+)
+assert(
+  visiblePageNameFrom('Job - Transcript', 'Yaver - Fix login - Transcript', false) ===
+    'Fix login - Transcript',
+  'the bar keeps the issue name on a job tab',
+)
+assert(
+  visiblePageNameFrom('Fix login - Transcript', 'Yaver - Job', true) === 'Fix login - Transcript',
+  'a loaded issue name replaces the placeholder',
+)
+assert(
+  visiblePageNameFrom('Job', 'Yaver - Jobs', true) === 'Job',
+  'opening another job does not keep the previous page name',
+)
 assert(titled('/jobs/job_1/transcript') === 'Yaver - Job - Transcript', 'job tab before the record loads')
 
 assert(issuePageName('Board bug', 'KAN-9', '') === 'Board bug', 'issue title')

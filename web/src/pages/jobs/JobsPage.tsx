@@ -329,17 +329,14 @@ export function JobsPage() {
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {FILTERS.map((f) => (
             <button
               key={f.id}
               type="button"
+              aria-pressed={statusFilter === f.id}
               onClick={() => navigate(jobsFilterPath(f.id))}
-              className={`rounded-full px-3 py-1 text-xs font-semibold transition-transform duration-150 active:scale-95 ${
-                statusFilter === f.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-muted hover:text-text'
-              }`}
+              className={`vd-seg-btn ${statusFilter === f.id ? 'is-on' : ''}`}
             >
               {f.id === 'queue' ? `Queue (${badgeQueued})` : f.label}
             </button>

@@ -102,8 +102,8 @@ function MessageBubble({ group }: { group: ChatGroup }) {
   if (isCompact) {
     return (
       <div className="flex justify-center">
-        <div className="max-w-[min(40rem,90%)] rounded-full border border-border bg-bg px-3 py-1 text-center">
-          <span className="text-[11px] italic text-warning-text">
+        <div className="max-w-[min(40rem,90%)] border border-border bg-bg px-3 py-1 text-center font-mono">
+          <span className="text-[11px] text-warning-text">
             {group.parts.some((p) => p.auto) ? 'Session auto-compacted' : 'Session compacted'}
           </span>
           {group.created_at ? (
