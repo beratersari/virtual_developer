@@ -183,7 +183,12 @@ def blocking_issue_keys(processor: Any) -> List[str]:
                 add(key)
     # A state-read failure must reach ``_jobs``. An empty list means idle,
     # and an idle serve is replaced after repeated health misses.
-    states = processor.state_manager.get_active_issues()
+    getter = processor.state_manager.get_active_issues
+    try:
+        # Older stand-ins take no arguments. A real manager raises on a bad read.
+        states = getter(raise_on_error=True)
+    except TypeError:
+        states = getter()
     if isinstance(states, list):
         for state in states:
             if _status_value(getattr(state, "status", "")) in {"planning", "executing"}:

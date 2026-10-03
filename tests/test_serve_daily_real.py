@@ -20,6 +20,7 @@ from src.config import settings
 from src.opencode_serve import OpenCodeServeClient
 from src.opencode_serve_supervisor import (
     OpenCodeServeSupervisor,
+    blocking_issue_keys,
     default_listener_pids,
     probe_healthy,
     resolve_opencode_binary,
@@ -29,12 +30,37 @@ from src.opencode_serve_supervisor import (
     serve_target,
 )
 from src.process_kill import kill_pid
+from src.state.manager import JiraStateManager
+from src.state.models import TaskStatus
+from src.state.queue_store import WorkQueueStore
 
 
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+class _Jobs:
+    """The three attributes ``blocking_issue_keys`` reads. Stores are real."""
+
+    def __init__(self, state: JiraStateManager, queue: WorkQueueStore) -> None:
+        self.state_manager = state
+        self.queue_store = queue
+        self._contexts: dict[str, object] = {}
+
+    def list_live_processing_keys(self) -> list[str]:
+        return list(self._contexts)
+
+
+def _planning_issue(state_dir: Path) -> JiraStateManager:
+    state = JiraStateManager(state_dir)
+    created = state.create_state("KAN-910", "clone while serve reloads")
+    assert created is not None
+    updated = state.update_state("KAN-910", status=TaskStatus.PLANNING)
+    assert updated is not None
+    assert updated.status == TaskStatus.PLANNING
+    return state
 
 
 def _listen_pids(port: int) -> list[int]:
@@ -63,6 +89,15 @@ def test_serve_auth_defaults_the_user_to_opencode(monkeypatch: pytest.MonkeyPatc
     assert base64.b64decode(encoded) == b"opencode:review-secret"
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "")
     assert serve_auth_headers() == {}
+
+
+def test_closed_issue_state_stays_empty_for_a_normal_list(tmp_path: Path) -> None:
+    """Dashboard and poller reads still swallow a closed database."""
+    state = _planning_issue(tmp_path / "issue" / "state")
+    state._conn.close()
+    assert state.get_active_issues() == []
+    with pytest.raises(Exception):
+        state.get_active_issues(raise_on_error=True)
 
 
 def test_password_protected_serve_stays_up_and_answers(
@@ -134,3 +169,46 @@ def test_password_protected_serve_stays_up_and_answers(
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def test_unreadable_issue_state_does_not_reload_a_live_serve(
+    tmp_path: Path, serve_port: int
+) -> None:
+    """A planning job is only on disk during clone, before a session exists.
+
+    Closing the state connection makes the real manager return an empty list.
+    That must not look like "no job", or an agent save reloads serve under it.
+    """
+    if not resolve_opencode_binary():
+        pytest.skip("opencode is not installed")
+    state = _planning_issue(tmp_path / "issue" / "state")
+    queue = WorkQueueStore(tmp_path / "work" / "queue")
+    jobs = _Jobs(state, queue)
+    state._conn.close()
+    fresh = JiraStateManager(state.state_dir)
+    try:
+        still = [
+            row
+            for row in fresh.get_active_issues()
+            if row.issue_key == "KAN-910" and row.status == TaskStatus.PLANNING
+        ]
+        assert still, "the planning row must still be in the database"
+    finally:
+        fresh._conn.close()
+
+    sup = OpenCodeServeSupervisor(
+        live_jobs=lambda: blocking_issue_keys(jobs),
+        reload_marker=tmp_path / "reload.pending",
+    )
+    try:
+        started = sup.ensure_started()
+        assert started["status"] in {"ready", "started"}, started
+        pid = _listen_pids(serve_port)
+        assert pid
+        reloaded = sup.request_reload()
+        assert reloaded["status"] == "deferred", reloaded
+        assert _listen_pids(serve_port) == pid
+    finally:
+        sup.stop_owned()
+        for pid in default_listener_pids(serve_port):
+            kill_pid(pid)
