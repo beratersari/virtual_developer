@@ -10,6 +10,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Added
 
+- The sidebar shows OpenCode serve health at the bottom left on every page. The line reads healthy, restarting, reload waiting, not answering, down, or failed. Hover shows the detail from the serve check. A status that cannot be read stays unavailable.
 - The daemon always starts OpenCode serve when it is down, and starts that child again if it exits. A serve that is already healthy is left running. Saving, creating, or syncing an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. A running job keeps the current process until it finishes. Settings has Reload OpenCode for a change made outside the editor.
 
 ### Fixed

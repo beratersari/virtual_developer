@@ -441,6 +441,13 @@ export type OpencodeServeState = {
   message?: string
 }
 
+export function fetchOpencodeServe(signal?: AbortSignal) {
+  return request<OpencodeServeState>('/api/opencode-serve', {
+    signal,
+    slot: 'background',
+  })
+}
+
 export function fetchOpencodeAgents(signal?: AbortSignal) {
   return request<{
     agents: string[]

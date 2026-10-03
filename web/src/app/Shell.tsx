@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { ServeHealth } from './ServeHealth'
 import { signOutDashboard } from '../auth/dashboardAuth'
 import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
@@ -149,6 +150,7 @@ export function Shell() {
           <div className="hidden font-mono text-[11px] leading-snug text-text md:block">
             {localClock || '—'}
           </div>
+          <ServeHealth />
           <div className="hidden items-center gap-2 md:flex">
             <span
               className={`h-2 w-2 rounded-full ${

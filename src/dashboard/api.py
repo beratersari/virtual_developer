@@ -1480,6 +1480,28 @@ def create_dashboard_app(
         """Dashboard settings, including the stored project list and repo sets."""
         return settings_response()
 
+    @app.get("/api/opencode-serve")
+    def opencode_serve_health() -> dict:
+        """Serve health for the sidebar. A failed read is not healthy."""
+        from src.logger import logger
+        from src.opencode_serve_supervisor import supervisor
+
+        try:
+            serve = supervisor.status()
+        except Exception as exc:
+            logger.warning(f"OpenCode serve status could not be read: {exc}")
+            serve = None
+        if not isinstance(serve, dict):
+            return {
+                "status": "unavailable",
+                "message": "OpenCode serve status is unavailable.",
+            }
+        status = str(serve.get("status") or "").strip().lower() or "unavailable"
+        message = str(serve.get("message") or "").strip()
+        if not message and status == "unavailable":
+            message = "OpenCode serve status is unavailable."
+        return {"status": status, "message": message}
+
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
         from src.opencode_agents import list_agents, sync_status
