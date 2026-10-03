@@ -436,11 +436,18 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
   })
 }
 
+export type OpencodeServeState = {
+  status?: string
+  message?: string
+}
+
 export function fetchOpencodeAgents(signal?: AbortSignal) {
-  return request<{ agents: string[]; synced?: boolean; pending?: string[] }>(
-    '/api/opencode-agents',
-    { signal },
-  )
+  return request<{
+    agents: string[]
+    synced?: boolean
+    pending?: string[]
+    serve?: OpencodeServeState
+  }>('/api/opencode-agents', { signal })
 }
 
 export function fetchOpencodeAgent(name: string) {
@@ -450,21 +457,21 @@ export function fetchOpencodeAgent(name: string) {
 }
 
 export function saveOpencodeAgent(name: string, text: string) {
-  return request<{ name: string; path: string }>(
+  return request<{ name: string; path: string; serve?: OpencodeServeState }>(
     `/api/opencode-agents/${encodeURIComponent(name)}`,
     { method: 'PUT', body: JSON.stringify({ text }) },
   )
 }
 
 export function createOpencodeAgent(name: string, text = '') {
-  return request<{ name: string; path: string; text: string }>('/api/opencode-agents', {
-    method: 'POST',
-    body: JSON.stringify({ name, text }),
-  })
+  return request<{ name: string; path: string; text: string; serve?: OpencodeServeState }>(
+    '/api/opencode-agents',
+    { method: 'POST', body: JSON.stringify({ name, text }) },
+  )
 }
 
 export function syncOpencodeAgents() {
-  return request<{ agents: string[]; opencode: string; claude: string }>(
+  return request<{ agents: string[]; opencode: string; claude: string; serve?: OpencodeServeState }>(
     '/api/opencode-agents/sync',
     { method: 'POST', body: '{}' },
   )
