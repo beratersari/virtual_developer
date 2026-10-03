@@ -212,3 +212,41 @@ def test_unreadable_issue_state_does_not_reload_a_live_serve(
         sup.stop_owned()
         for pid in default_listener_pids(serve_port):
             kill_pid(pid)
+
+
+def test_unopened_queue_database_does_not_reload_a_live_serve(
+    tmp_path: Path, serve_port: int
+) -> None:
+    """A queue database that never opened is not an empty queue.
+
+    ``list_items`` returns [] in that case and does not raise. A reload must
+    still leave the listening serve alone.
+    """
+    if not resolve_opencode_binary():
+        pytest.skip("opencode is not installed")
+    root = tmp_path / "broken"
+    queue_dir = root / "queue"
+    queue_dir.mkdir(parents=True)
+    (root / "yaver.sqlite").mkdir()
+    queue = WorkQueueStore(queue_dir)
+    assert queue._conn is None
+    assert queue.list_items(status="running", limit=1) == []
+    state = JiraStateManager(tmp_path / "issue" / "state")
+    jobs = _Jobs(state, queue)
+    sup = OpenCodeServeSupervisor(
+        live_jobs=lambda: blocking_issue_keys(jobs),
+        reload_marker=tmp_path / "reload.pending",
+    )
+    try:
+        started = sup.ensure_started()
+        assert started["status"] in {"ready", "started"}, started
+        pid = _listen_pids(serve_port)
+        assert pid
+        reloaded = sup.request_reload()
+        assert reloaded["status"] == "deferred", reloaded
+        assert _listen_pids(serve_port) == pid
+    finally:
+        sup.stop_owned()
+        state._conn.close()
+        for pid in default_listener_pids(serve_port):
+            kill_pid(pid)

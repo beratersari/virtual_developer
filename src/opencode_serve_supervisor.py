@@ -156,6 +156,10 @@ def blocking_issue_keys(processor: Any) -> List[str]:
     # empty: list_items raises when sqlite cannot be read, and that failure
     # has to reach ``_jobs`` so a quiet listener is left running.
     store = getattr(processor, "queue_store", None)
+    # A database that never opened makes list_items return [] and not raise.
+    # That is not an empty queue. ``_conn`` is None only in that case.
+    if store is not None and getattr(store, "_conn", True) is None:
+        raise RuntimeError("queue database is unavailable")
     list_items = getattr(store, "list_items", None)
     if callable(list_items):
         list_items(status="running", limit=1)
