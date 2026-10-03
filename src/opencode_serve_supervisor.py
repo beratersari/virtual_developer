@@ -25,6 +25,7 @@ refuses to kill this process while it is stopping a job.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import shutil
@@ -190,6 +191,21 @@ def blocking_issue_keys(processor: Any) -> List[str]:
     return found
 
 
+def serve_auth_headers() -> Dict[str, str]:
+    """Basic auth when OpenCode serve has a password.
+
+    The server user defaults to ``opencode``. ``OPENCODE_SERVER_USERNAME``
+    overrides it. An empty password means the server is open. The value is
+    not logged.
+    """
+    password = os.environ.get("OPENCODE_SERVER_PASSWORD") or ""
+    if password == "":
+        return {}
+    username = os.environ.get("OPENCODE_SERVER_USERNAME") or "opencode"
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
 def probe_healthy(url: str = "") -> bool:
     """True when ``/global/health`` reports healthy. Never raises."""
     import httpx
@@ -200,7 +216,7 @@ def probe_healthy(url: str = "") -> bool:
     try:
         # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(timeout=HEALTH_PROBE_TIMEOUT_SECONDS, verify=False) as client:
-            response = client.get(target)
+            response = client.get(target, headers=serve_auth_headers())
         if response.status_code < 200 or response.status_code >= 500:
             return False
         return "healthy" in (response.text or "").lower()

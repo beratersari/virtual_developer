@@ -19,6 +19,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 - Saving or creating an agent while a job is running leaves the jobs that are still queued where they are. Those jobs start after OpenCode reloads, so they see the new agent. The running job keeps its current serve process.
 - A failed OpenCode reload leaves queued jobs queued. They start only after a later reload succeeds and the new process is using the saved agents. The queue also stays put when that reload state cannot be read.
 - OpenCode serve stays up when the work queue cannot be read. A locked or unreadable queue is not treated as an empty queue.
+- OpenCode serve started with ``OPENCODE_SERVER_PASSWORD`` stays up. Health checks and job requests send that password. ``OPENCODE_SERVER_USERNAME`` overrides the default user ``opencode``. A 401 from a missing password is not treated as a crashed serve.
 - A missed OpenCode health check no longer stops serve while a job already has a session. The process stays up when it is still listening. A job that starts during a reload waits for that restart, and Yaver does not open a second serve beside it. A job that appears at the moment of a stop keeps the current process.
 - A job that has not reached OpenCode fails within a few seconds when serve is listening but does not answer. That opening check does not use the agent time budget. The job leaves executing, and the quiet process can then be replaced.
 

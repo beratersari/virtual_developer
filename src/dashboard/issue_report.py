@@ -1112,8 +1112,10 @@ def _serve_get(
         import urllib3
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        from src.opencode_serve_supervisor import serve_auth_headers
+
         with httpx.Client(verify=False, timeout=_SERVE_TIMEOUT) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, params=params, headers=serve_auth_headers())
         body: Any
         try:
             body = resp.json()

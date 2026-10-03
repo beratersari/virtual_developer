@@ -669,11 +669,16 @@ class OpenCodeServeClient:
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=30.0),
             verify=False,
-            headers={"Accept": "application/json"},
+            headers={"Accept": "application/json", **self._auth_headers()},
         )
 
+    def _auth_headers(self) -> Dict[str, str]:
+        from src.opencode_serve_supervisor import serve_auth_headers
+
+        return serve_auth_headers()
+
     def _headers(self) -> Dict[str, str]:
-        h: Dict[str, str] = {}
+        h: Dict[str, str] = dict(self._auth_headers())
         if self.directory:
             # OpenCode uses this to scope project/workspace for the request
             h["x-opencode-directory"] = self.directory
