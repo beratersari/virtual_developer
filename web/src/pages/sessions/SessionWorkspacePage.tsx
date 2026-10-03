@@ -1,16 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   deleteTempFolder,
   fetchOpencodeWorkspace,
+  isAbortError,
   resetOpencodeSession,
 } from '../../api/client'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import type { OpencodeWorkspaceDetail, WorkspacePlanFile } from '../../api/types'
 import { rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { MarkdownBody } from '../../ui/MarkdownBody'
 import { PageHeader } from '../../ui/PageHeader'
+import { Spinner } from '../../ui/Spinner'
 import { JobsTable } from '../jobs/JobsTable'
 import { usePageTitle } from '../../app/pageTitleContext'
 import { workspacePageName } from '../../util/pageTitle'
@@ -31,34 +34,46 @@ export function SessionWorkspacePage() {
   const [deleteClone, setDeleteClone] = useState(false)
   const [busy, setBusy] = useState(false)
   const lastGenReload = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const flight = usePageLoad()
 
-  const reload = async () => {
+  const reload = useCallback(async (mode: 'query' | 'tick') => {
     const id = workspaceId.trim()
     if (!id) return
+    const signal = mode === 'tick' ? flight.tick(id) : flight.query(id)
+    if (!signal) return
+    if (mode === 'query') setError(null)
     try {
-      const body = await fetchOpencodeWorkspace(id)
+      const body = await fetchOpencodeWorkspace(id, signal)
+      if (signal.aborted) return
       setDetail(body)
       for (const job of body.jobs || []) rememberJob(job)
       setError(null)
     } catch (e) {
+      if (signal.aborted || isAbortError(e)) return
       setDetail(null)
       setError(e instanceof Error ? e.message : 'Load failed')
+    } finally {
+      if (flight.settle(signal)) void reload('tick')
     }
-  }
+  }, [flight, workspaceId])
 
   useEffect(() => {
-    void reload()
-  }, [workspaceId])
+    void reload('query')
+  }, [reload])
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
-    void reload()
-  }, [live.generation, workspaceId])
+    void reload('tick')
+  }, [live.generation, reload])
 
-  const w = detail?.workspace
+  const loaded =
+    detail && detail.workspace.workspace_id === workspaceId.trim() ? detail : null
+  const w = loaded?.workspace
   usePageTitle(workspacePageName(w?.branch, w?.target_branch))
-  const target = detail?.sessions.find((s) => s.bind_id === resetId)
+  const target = loaded?.sessions.find((s) => s.bind_id === resetId)
   const targetKind = kindLabel(target?.kind)
 
   return (
@@ -78,23 +93,28 @@ export function SessionWorkspacePage() {
         />
       </div>
       {error && <p className="text-sm text-danger-text">{error}</p>}
+      {!loaded && !error && (
+        <p className="flex items-center gap-2 text-sm text-text-muted" aria-busy="true">
+          <Spinner /> Loading workspace…
+        </p>
+      )}
 
-      <MergeRequestLinks urls={detail?.merge_requests || []} />
+      <MergeRequestLinks urls={loaded?.merge_requests || []} />
 
       <CloneBlock
-        detail={detail}
+        detail={loaded}
         deleting={busy && deleteClone}
         onDelete={() => setDeleteClone(true)}
       />
 
-      <PlanFiles plans={detail?.plans || []} />
+      <PlanFiles plans={loaded?.plans || []} />
 
       <div className="space-y-2">
         <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
           OpenCode sessions
         </h2>
         <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
-          {(detail?.sessions || []).map((s) => (
+          {(loaded?.sessions || []).map((s) => (
             <li
               key={s.bind_id}
               className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm"
@@ -126,7 +146,7 @@ export function SessionWorkspacePage() {
               </button>
             </li>
           ))}
-          {detail && detail.sessions.length === 0 && (
+          {loaded && loaded.sessions.length === 0 && (
             <li className="py-6 text-text-muted">No live session binds.</li>
           )}
         </ul>
@@ -137,7 +157,7 @@ export function SessionWorkspacePage() {
           Jobs
         </h2>
         <JobsTable
-          jobs={detail?.jobs || []}
+          jobs={loaded?.jobs || []}
           compact
           fallbackWorker={live.settings?.agent_backend || ''}
           empty="No jobs recorded for this repository + source + target yet."
@@ -164,7 +184,7 @@ export function SessionWorkspacePage() {
           try {
             await resetOpencodeSession(resetId)
             setResetId(null)
-            await reload()
+            await reload('query')
           } catch (e) {
             setError(e instanceof Error ? e.message : 'Reset failed')
           } finally {
@@ -177,16 +197,16 @@ export function SessionWorkspacePage() {
         open={deleteClone}
         title="Delete this clone?"
         body={
-          detail?.clone
-            ? `Removes ${detail.clone.path} from disk. Session resume for this workspace will need a fresh clone. Stop a live job first if Delete is disabled.`
+          loaded?.clone
+            ? `Removes ${loaded.clone.path} from disk. Session resume for this workspace will need a fresh clone. Stop a live job first if Delete is disabled.`
             : 'Removes the temp clone from disk.'
         }
         confirmLabel="Delete clone"
         danger
         busy={busy}
         onConfirm={async () => {
-          const name = detail?.clone?.name
-          if (!name || !detail?.clone?.can_delete) {
+          const name = loaded?.clone?.name
+          if (!name || !loaded?.clone?.can_delete) {
             setDeleteClone(false)
             return
           }
@@ -194,7 +214,7 @@ export function SessionWorkspacePage() {
           try {
             await deleteTempFolder(name)
             setDeleteClone(false)
-            await reload()
+            await reload('query')
           } catch (e) {
             setError(e instanceof Error ? e.message : 'Delete failed')
           } finally {

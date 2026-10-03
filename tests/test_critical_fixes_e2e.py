@@ -409,6 +409,8 @@ async def test_e2e_plan_workflow_rejects_foreign_markdown(
         s.full_plans_dir = plans_host
         s.sisyphus_plans_dir = Path(".sisyphus/plans")
         s.default_agent = "atlas"
+        s.default_model = "opencode/hy3-free"
+        s.agent_backend = "opencode"
         s.agent_task_timeout_seconds = 30
         s.agent_task_max_retries = 0
         s.agent_task_max_incomplete_retries = 0

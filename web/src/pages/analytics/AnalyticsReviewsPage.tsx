@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
 import { analyticsBackHref } from './analyticsPeriodUrl'
 import { reviewsPageName } from '../../util/pageTitle'
-import { ApiError, fetchAnalyticsReviews } from '../../api/client'
+import { ApiError, fetchAnalyticsReviews, isAbortError } from '../../api/client'
+import { usePageLoad } from '../../api/pageLoad'
 import type { AnalyticsReviewsPayload } from '../../api/types'
 import { Alert } from '../../ui/Alert'
 import { PageHeader } from '../../ui/PageHeader'
@@ -53,7 +54,7 @@ export function AnalyticsReviewsPage() {
   const [payload, setPayload] = useState<AnalyticsReviewsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const reqId = useRef(0)
+  const flight = usePageLoad()
 
   const filterOpts = {
     period: params.get('period') || '30d',
@@ -69,7 +70,10 @@ export function AnalyticsReviewsPage() {
   }
 
   const load = useCallback(async () => {
-    const req = ++reqId.current
+    const signal = flight.query(
+      [state, origin, page, filterOpts.period, filterOpts.from, filterOpts.to, filterOpts.status, filterOpts.category, filterOpts.source, filterOpts.model, filterOpts.backend, filterOpts.agent, filterOpts.repository].join('|'),
+    )
+    if (!signal) return
     setLoading(true)
     try {
       const data = await fetchAnalyticsReviews({
@@ -78,15 +82,17 @@ export function AnalyticsReviewsPage() {
         page,
         pageSize: PAGE_SIZE,
         ...filterOpts,
+        signal,
       })
-      if (req !== reqId.current) return
+      if (signal.aborted) return
       setPayload(data)
       setError(null)
     } catch (e) {
-      if (req !== reqId.current) return
+      if (signal.aborted || isAbortError(e)) return
       setError(e instanceof ApiError || e instanceof Error ? e.message : 'Load failed')
     } finally {
-      if (req === reqId.current) setLoading(false)
+      if (!signal.aborted) setLoading(false)
+      flight.settle(signal)
     }
     // filterOpts fields are read from params; listing `params` is enough.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -37,7 +37,8 @@ def test_e2e_model_id_input_only_when_other_id_selected():
 def test_e2e_schedule_and_settings_use_shared_model_field():
     schedules = SCHEDULES.read_text(encoding="utf-8")
     settings = SETTINGS.read_text(encoding="utf-8")
-    assert schedules.count("<ModelField") >= 2
+    assert schedules.count("<WorkerBlock") >= 2
+    assert "<ModelField" in schedules
     assert "<ModelField" in settings
     assert 'label="Default model"' in settings
 
@@ -59,7 +60,8 @@ def test_e2e_model_field_disabled_until_inventory_loads():
     assert "disabled={saving || modelsLoading || !dirty}" in settings
     assert "Loading models…" in settings
 
-    assert schedules.count("onLoadingChange={setModelsLoading}") >= 2
+    assert schedules.count("<WorkerBlock") >= 2
+    assert schedules.count("onLoadingChange={setModelsLoading}") >= 1
     assert schedules.count("setModelsLoading(true)") >= 3
     assert "disabled={busy || modelsLoading}" in schedules
     assert schedules.count("disabled={busy || modelsLoading}") >= 4

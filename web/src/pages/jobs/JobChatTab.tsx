@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchJobChat } from '../../api/client'
+import { fetchJobChat, isAbortError } from '../../api/client'
 import type { ChatPart, JobChatPayload, TextArtifact } from '../../api/types'
 import { buildCodexTranscriptEvents } from '../../util/codexLog'
 import { buildClaudeTranscriptEvents } from '../../util/claudeLog'
@@ -430,6 +430,7 @@ export function JobChatTab({
   const fetchGen = useRef(0)
   const wasLive = useRef(false)
   const inFlight = useRef(false)
+  const chatAbort = useRef<AbortController | null>(null)
 
   const load = (soft: boolean) => {
     const id = jobId.trim()
@@ -440,6 +441,9 @@ export function JobChatTab({
       return
     }
     if (soft && inFlight.current) return
+    chatAbort.current?.abort()
+    const ac = new AbortController()
+    chatAbort.current = ac
     const gen = ++fetchGen.current
     inFlight.current = true
     if (!soft) {
@@ -448,15 +452,15 @@ export function JobChatTab({
       setSessionFilter('all')
     }
     lastSoft.current = Date.now()
-    void fetchJobChat(id)
+    void fetchJobChat(id, ac.signal)
       .then((body) => {
-        if (gen !== fetchGen.current) return
+        if (ac.signal.aborted || gen !== fetchGen.current) return
         loadedFor.current = id
         setData(body)
         setError(null)
       })
       .catch((e) => {
-        if (gen !== fetchGen.current) return
+        if (ac.signal.aborted || isAbortError(e) || gen !== fetchGen.current) return
         if (!soft) setError(e instanceof Error ? e.message : 'Failed to load chat')
       })
       .finally(() => {
@@ -475,6 +479,7 @@ export function JobChatTab({
     load(false)
     return () => {
       fetchGen.current += 1
+      chatAbort.current?.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- remount load per job
   }, [jobId])

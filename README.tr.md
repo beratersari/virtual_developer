@@ -362,6 +362,31 @@ git submodule update --init --recursive
 İşlem panosu: **http://127.0.0.1:8080**  
 OpenCode TUI: proje klasöründen `./start-opencode.sh` (`$HOME`’dan değil).
 
+Yaver ile OpenCode serve aynı kullanıcı olmalıdır. Daemon git klonunu oluşturur. OpenCode serve o klona yazar ve commit atar. Transcript sekmesi bu sürecin sohbet veritabanını okur. 8080 kapısı root gerektirmez.
+
+`User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/.local/share/yaver/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
+
+Klonların sahibi olacak oturumu Yaver birimine yazın:
+
+```ini
+[Service]
+User=yaver
+Group=yaver
+```
+
+`opencode serve`’ü aynı kullanıcı ve aynı ev dizini ile başlatın. Yeniden açılışta ayakta kalması için kullanıcı systemd servisi uygundur. `nohup`, o kullanıcı olarak başlatıldığında yeterlidir.
+
+Root ile oluşmuş ağaçlar varsa bir kez o kullanıcıya verin, sonra iki süreci de o kullanıcı olarak başlatın:
+
+```bash
+sudo chown -R yaver:yaver \
+  /home/yaver/.local/share/yaver \
+  /home/yaver/.local/share/opencode
+sudo systemctl restart yaver
+```
+
+`yaver` yerine işin sahibi olacak hesabı yazın. İki süreç de root kaldığı sürece yeni klonlar ve sohbet veritabanı `/root` altındadır. Sonradan `sudo` olmadan başlayan bir serve bu geçmişi görmez ve bu klonlara yazamaz.
+
 ### Windows (çevrimdışı zip)
 
 Ayrıntı: [packaging/windows/README.md](packaging/windows/README.md).
@@ -470,6 +495,7 @@ python cli.py cancel PROJ-123
 | 401 / 403 Jira | Jeton; Cloud’da `JIRA_EMAIL` |
 | Git / MR batıyor | `{params}` tam mı; `GITLAB_HOST_PATS` veya `AZURE_COLLECTION_PATS` |
 | Panel yok | Daemon ayakta mı? `http://127.0.0.1:8080` |
+| Linux’ta iş birleştirme isteği olmadan tamamlanır veya Transcript boştur | Yaver ile `opencode serve` farklı kullanıcıdır; çoğu zaman biri root, biri oturum hesabıdır. İkisini de aynı kullanıcı yapın. Bkz. [Linux](#linux). |
 | Windows TUI siyah ekran | Proje klasöründen `start-opencode.bat` |
 
 ---

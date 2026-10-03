@@ -3,6 +3,7 @@
  */
 import {
   acceptJobArtifactsResponse,
+  artifactFetchDecision,
   artifactsHaveContent,
   jobArtifactPathSignature,
   shouldRefetchJobArtifacts,
@@ -42,6 +43,12 @@ const base = {
   lastPathSignature: '/s/a.log',
   lastHadContent: true,
 }
+
+assert(artifactFetchDecision(false) === 'start', 'idle artifacts GET starts')
+assert(
+  artifactFetchDecision(true) === 'wait',
+  'a live poll does not open a second artifacts GET',
+)
 
 assert(shouldRefetchJobArtifacts({ ...base, jobId: '' }) === false, 'no id')
 assert(

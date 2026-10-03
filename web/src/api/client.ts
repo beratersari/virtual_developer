@@ -1,3 +1,4 @@
+import { acquireGetSlot, releaseGetSlot, type GetSlot } from './getSlots'
 import type {
   AnalyticsPayload,
   AnalyticsReviewsPayload,
@@ -86,9 +87,9 @@ export function formatApiError(detail: unknown, fallback: string): string {
 
 async function request<T>(
   path: string,
-  init?: RequestInit & { timeoutMs?: number },
+  init?: RequestInit & { timeoutMs?: number; slot?: GetSlot },
 ): Promise<T> {
-  const { timeoutMs, ...rest } = init || {}
+  const { timeoutMs, slot, ...rest } = init || {}
   const headers = new Headers(rest.headers)
   if (rest.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
@@ -113,7 +114,16 @@ async function request<T>(
   if (budget != null) {
     timer = window.setTimeout(abortFromTimer, budget)
   }
+  // GETs wait for a slot so a slow page cannot use every browser connection.
+  // The timer above still covers that wait. POST/PATCH/DELETE do not wait.
+  // Background boot reads leave one slot for the page the operator opened.
+  let held: GetSlot | null = null
   try {
+    if (method === 'GET') {
+      const kind: GetSlot = slot === 'background' ? 'background' : 'page'
+      await acquireGetSlot(ctrl.signal, kind)
+      held = kind
+    }
     const res = await fetch(path, {
       ...rest,
       headers,
@@ -144,6 +154,7 @@ async function request<T>(
     }
     throw err
   } finally {
+    if (held) releaseGetSlot(held)
     if (timer) window.clearTimeout(timer)
     rest.signal?.removeEventListener('abort', abortFromCaller)
   }
@@ -197,21 +208,25 @@ export function dashboardWsUrl(): string {
   return `${proto}://${window.location.host}/ws`
 }
 
-export function fetchMeta(opts?: { timeoutMs?: number }) {
+export function fetchMeta(opts?: { timeoutMs?: number; signal?: AbortSignal; slot?: GetSlot }) {
   // Cheap JSON; a long hang here is the full-page loading screen.
-  return request<Meta>('/api/meta', { timeoutMs: opts?.timeoutMs ?? 4_000 })
+  return request<Meta>('/api/meta', {
+    timeoutMs: opts?.timeoutMs ?? 4_000,
+    signal: opts?.signal,
+    slot: opts?.slot,
+  })
 }
 
-export function fetchPoll() {
-  return request<PollPayload>('/api/poll')
+export function fetchPoll(opts?: { signal?: AbortSignal; slot?: GetSlot }) {
+  return request<PollPayload>('/api/poll', { signal: opts?.signal, slot: opts?.slot })
 }
 
-export function fetchQueue(opts?: { status?: string; limit?: number }) {
+export function fetchQueue(opts?: { status?: string; limit?: number; signal?: AbortSignal; slot?: GetSlot }) {
   const params = new URLSearchParams()
   if (opts?.status) params.set('status', opts.status)
   if (opts?.limit != null) params.set('limit', String(opts.limit))
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<QueuePayload>(`/api/queue${q}`)
+  return request<QueuePayload>(`/api/queue${q}`, { signal: opts?.signal, slot: opts?.slot })
 }
 
 export function cancelQueueItem(queueId: string) {
@@ -308,6 +323,7 @@ export async function fetchJobs(opts?: {
   status?: string
   page?: number
   pageSize?: number
+  signal?: AbortSignal
 }): Promise<JobsPayload> {
   const params = new URLSearchParams()
   const key = opts?.issueKey?.trim()
@@ -317,16 +333,20 @@ export async function fetchJobs(opts?: {
   if (opts?.page != null) params.set('page', String(opts.page))
   if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
   const q = params.toString() ? `?${params.toString()}` : ''
-  const payload = await request<JobsPayload>(`/api/jobs${q}`)
+  const payload = await request<JobsPayload>(`/api/jobs${q}`, { signal: opts?.signal })
   return {
     ...payload,
     jobs: (payload.jobs || []).map(normalizeJob),
   }
 }
 
-export async function fetchJobById(jobId: string): Promise<JobDetailResponse> {
+export async function fetchJobById(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobDetailResponse> {
   const body = await request<JobDetailResponse>(
     `/api/jobs/${encodeURIComponent(jobId)}`,
+    { signal },
   )
   return {
     ...body,
@@ -340,29 +360,32 @@ export async function fetchJobById(jobId: string): Promise<JobDetailResponse> {
   }
 }
 
-export async function fetchJobArtifacts(jobId: string): Promise<{
+export async function fetchJobArtifacts(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<{
   job_id: string
   prompts: import('./types').TextArtifact[]
   session_logs: import('./types').TextArtifact[]
 }> {
-  return request(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`)
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`, { signal })
 }
 
-export function fetchJobChat(jobId: string) {
-  return request<JobChatPayload>(`/api/jobs/${encodeURIComponent(jobId)}/chat`)
+export function fetchJobChat(jobId: string, signal?: AbortSignal) {
+  return request<JobChatPayload>(`/api/jobs/${encodeURIComponent(jobId)}/chat`, { signal })
 }
 
 export function fetchTaskDetail(
   issueKey: string,
-  opts?: { live?: boolean; artifacts?: boolean },
+  opts?: { live?: boolean; artifacts?: boolean; signal?: AbortSignal },
 ) {
   const params = new URLSearchParams()
   if (opts?.live) params.set('live', 'true')
   if (opts?.artifacts) params.set('artifacts', 'true')
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<TaskDetail>(
-    `/api/tasks/${encodeURIComponent(issueKey)}${q}`,
-  ).then((d) => ({
+  return request<TaskDetail>(`/api/tasks/${encodeURIComponent(issueKey)}${q}`, {
+    signal: opts?.signal,
+  }).then((d) => ({
     ...d,
     jobs: (d.jobs || []).map(normalizeJob),
   }))
@@ -413,9 +436,10 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
   })
 }
 
-export function fetchOpencodeAgents() {
+export function fetchOpencodeAgents(signal?: AbortSignal) {
   return request<{ agents: string[]; synced?: boolean; pending?: string[] }>(
     '/api/opencode-agents',
+    { signal },
   )
 }
 
@@ -446,8 +470,8 @@ export function syncOpencodeAgents() {
   )
 }
 
-export function fetchSettings() {
-  return request<SettingsPayload>('/api/settings')
+export function fetchSettings(signal?: AbortSignal, slot?: GetSlot) {
+  return request<SettingsPayload>('/api/settings', { signal, slot })
 }
 
 export function patchSettings(body: SettingsPatch) {
@@ -475,12 +499,12 @@ export function importAccessibleProjects(project_repositories: ProjectRepository
   })
 }
 
-export function fetchModels(refresh = false, backend?: string) {
+export function fetchModels(refresh = false, backend?: string, signal?: AbortSignal) {
   const params = new URLSearchParams()
   if (refresh) params.set('refresh', 'true')
   if (backend) params.set('backend', backend)
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<ModelsPayload>(`/api/models${q}`)
+  return request<ModelsPayload>(`/api/models${q}`, { signal })
 }
 
 export function testGitlabConnection(body: {
@@ -572,20 +596,20 @@ export function testJiraConnection(body: {
   })
 }
 
-export function fetchIssueTypes(projectKey?: string) {
+export function fetchIssueTypes(projectKey?: string, signal?: AbortSignal) {
   const params = new URLSearchParams()
   if (projectKey?.trim()) params.set('project_key', projectKey.trim())
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<JiraIssueTypesPayload>(`/api/jira/issue-types${q}`)
+  return request<JiraIssueTypesPayload>(`/api/jira/issue-types${q}`, { signal })
 }
 
-export function fetchStorage(opts?: { refresh?: boolean }) {
+export function fetchStorage(opts?: { refresh?: boolean; signal?: AbortSignal }) {
   const q = opts?.refresh ? '?refresh=1' : ''
-  return request<StoragePayload>(`/api/storage${q}`)
+  return request<StoragePayload>(`/api/storage${q}`, { signal: opts?.signal })
 }
 
-export function fetchStorageDeletes() {
-  return request<StorageDeletesPayload>('/api/storage/deletes')
+export function fetchStorageDeletes(signal?: AbortSignal) {
+  return request<StorageDeletesPayload>('/api/storage/deletes', { signal })
 }
 
 export function deleteTempFolder(name: string) {
@@ -611,6 +635,7 @@ export function fetchOpencodeWorkspaces(opts?: {
   page?: number
   pageSize?: number
   q?: string
+  signal?: AbortSignal
 }) {
   const params = new URLSearchParams()
   if (opts?.page != null) params.set('page', String(opts.page))
@@ -618,12 +643,15 @@ export function fetchOpencodeWorkspaces(opts?: {
   const needle = opts?.q?.trim()
   if (needle) params.set('q', needle)
   const qs = params.toString() ? `?${params.toString()}` : ''
-  return request<OpencodeWorkspaceList>(`/api/opencode-workspaces${qs}`)
+  return request<OpencodeWorkspaceList>(`/api/opencode-workspaces${qs}`, {
+    signal: opts?.signal,
+  })
 }
 
-export function fetchOpencodeWorkspace(workspaceId: string) {
+export function fetchOpencodeWorkspace(workspaceId: string, signal?: AbortSignal) {
   return request<OpencodeWorkspaceDetail>(
     `/api/opencode-workspaces/${encodeURIComponent(workspaceId)}`,
+    { signal },
   )
 }
 
@@ -638,13 +666,14 @@ export function fetchSchedules(opts?: {
   status?: string
   page?: number
   pageSize?: number
+  signal?: AbortSignal
 }) {
   const params = new URLSearchParams()
   if (opts?.status) params.set('status', opts.status)
   if (opts?.page != null) params.set('page', String(opts.page))
   if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<SchedulesPayload>(`/api/schedules${q}`)
+  return request<SchedulesPayload>(`/api/schedules${q}`, { signal: opts?.signal })
 }
 
 export function createSchedule(body: ScheduleCreateBody) {
@@ -760,12 +789,13 @@ export function schedulePrFollowup(body: SchedulePrBody) {
   }>('/api/schedules/pr', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function fetchAzureProjects(collectionUrl: string) {
+export function fetchAzureProjects(collectionUrl: string, signal?: AbortSignal) {
   const params = new URLSearchParams({
     collection_url: collectionUrl.trim(),
   })
   return request<{ ok: boolean; projects: string[]; collection_url?: string }>(
     `/api/azure/projects?${params.toString()}`,
+    { signal },
   )
 }
 

@@ -76,3 +76,26 @@ Durable data (not next to the git checkout). The default base is
 Open http://127.0.0.1:8080/ (backend also serves `web/dist` when present).
 
 Never run `opencode` from `$HOME` — it treats the profile as the project.
+
+## Same user
+
+Yaver and `opencode serve` have to be the same user. The daemon creates the clone under `~/.local/share/yaver/t`. Serve writes and commits there, and the Transcript tab reads serve's chat database (`~/.local/share/opencode`). Port 8080 does not need root.
+
+A unit with no `User=` runs as root. `sudo nohup opencode serve` is root too, and `sudo` sets `HOME` to `/root`. The login user's serve then cannot write the clone, so the agent commits in `~/.tmp/opencode`. The job can show completed with no merge request, and Transcript stays empty because the dashboard is looking in `/root/.local/share/opencode`.
+
+```ini
+[Service]
+User=yaver
+Group=yaver
+```
+
+Start serve as that same user. After a root run, give the trees to that account once, then restart both as the user:
+
+```bash
+sudo chown -R yaver:yaver \
+  /home/yaver/.local/share/yaver \
+  /home/yaver/.local/share/opencode
+sudo systemctl restart yaver
+```
+
+Replace `yaver` with the account that should own the work. The same note is in the [Linux quick start](../../README.md#linux).

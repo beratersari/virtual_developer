@@ -367,11 +367,14 @@ class GitManager:
     ) -> str:
         """Follow-up source for one clone.
 
-        A stored primary base is the ticket text. The build already cut
-        ``feature/{KEY}`` from it, and the merge request uses that branch.
-        ``keep_source`` must not check the base out again. A sibling whose
-        source is a real branch, or an explicit base the event did not
-        replace, stays as given.
+        A stored primary base is the ticket text. The first run already cut
+        ``feature/{KEY}`` from it. ``keep_source`` checks that feature branch
+        out again, including on a repository the comment did not name, so
+        the follow-up stays in the same workspace. The reviewed repository
+        uses the comment's branch when that branch is a real work branch.
+        A sibling whose saved source is already a real work branch stays
+        on it. An empty event, or an event that is itself a primary base,
+        leaves the stored base unchanged.
         """
         own = (own_source or "").strip()
         if not self.keep_source_work_branch or not self._is_primary_base(own):
@@ -385,11 +388,9 @@ class GitManager:
             own_target,
             keep_source=False,
         )
-        if event == feature:
-            return feature
-        if reviewed:
+        if reviewed and event != feature:
             return event
-        return own
+        return feature
 
     def _repository_specs(self) -> List[Dict[str, str]]:
         """One entry per clone: url, source branch, target branch."""
@@ -1317,7 +1318,11 @@ class GitManager:
         When no PATs are configured at all, any host is allowed (public clone).
         A lone ``GITLAB_PAT`` (no host map) authenticates the job remote.
         When a host→PAT map exists, the repository host must be in that map.
+        A ``file:`` remote is a local git directory and never receives a PAT.
         """
+        raw = (url or "").strip()
+        if urlparse(raw).scheme.lower() == "file":
+            return
         mapping = (
             settings.gitlab_host_pat_map()
             if hasattr(settings, "gitlab_host_pat_map")
@@ -2010,7 +2015,7 @@ class GitManager:
         Always applies a hard timeout (default ``git_command_timeout_seconds``)
         so a hung push/fetch cannot pin a job slot forever.
         """
-        if self.repo_checkouts:
+        if getattr(self, "repo_checkouts", None):
             return subprocess.CompletedProcess(
                 args=["git", *args],
                 returncode=1,

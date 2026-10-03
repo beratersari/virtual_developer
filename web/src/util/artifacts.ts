@@ -46,6 +46,11 @@ export function acceptJobArtifactsResponse(
   return Boolean(req) && req === route
 }
 
+/** A live output poll must not open a second artifacts GET while one is running. */
+export function artifactFetchDecision(inFlight: boolean): 'start' | 'wait' {
+  return inFlight ? 'wait' : 'start'
+}
+
 export function shouldRefetchJobArtifacts(opts: {
   jobId: string
   lastJobId: string

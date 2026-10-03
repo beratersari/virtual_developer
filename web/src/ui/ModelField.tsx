@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchModels } from '../api/client'
+import { fetchModels, isAbortError } from '../api/client'
 import type { ModelsPayload } from '../api/types'
 import { CUSTOM_MODEL, modelSelectValue, showCustomModelId } from '../util/modelPicker'
 import { Spinner } from './Spinner'
@@ -28,20 +28,24 @@ export function ModelField({
   const [fetching, setFetching] = useState(true)
   const [custom, setCustom] = useState(false)
   const loadGen = useRef(0)
+  const loadAbort = useRef<AbortController | null>(null)
   const worker = (backend || '').trim().toLowerCase() || 'opencode'
   const isCodex = worker === 'codex'
   const isClaude = worker === 'claude' || worker === 'claude-code'
   const loading = fetching || loadedWorker !== worker
 
   const load = async (refresh: boolean) => {
+    loadAbort.current?.abort()
+    const ac = new AbortController()
+    loadAbort.current = ac
     const req = ++loadGen.current
     setFetching(true)
     try {
-      const inv = await fetchModels(refresh, worker)
-      if (req !== loadGen.current) return
+      const inv = await fetchModels(refresh, worker, ac.signal)
+      if (ac.signal.aborted || req !== loadGen.current) return
       setInventory(inv)
-    } catch {
-      if (req !== loadGen.current) return
+    } catch (e) {
+      if (ac.signal.aborted || isAbortError(e) || req !== loadGen.current) return
       setInventory(null)
     } finally {
       if (req === loadGen.current) {
@@ -55,6 +59,7 @@ export function ModelField({
     void load(false)
     return () => {
       loadGen.current += 1
+      loadAbort.current?.abort()
     }
   }, [worker])
 

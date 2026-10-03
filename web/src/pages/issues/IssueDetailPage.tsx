@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { cancelTask, fetchTaskDetail, planExecute, planRefactor } from '../../api/client'
+import { cancelTask, fetchTaskDetail, isAbortError, planExecute, planRefactor } from '../../api/client'
+import { noteLiveGeneration, usePageLoad } from '../../api/pageLoad'
 import type { GitDelivery, TaskDetail } from '../../api/types'
 import { peekTask, rememberJob, rememberTask } from '../../app/entityCache'
 import { useLive } from '../../app/live'
@@ -57,11 +58,16 @@ export function IssueDetailPage() {
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
+  const genSeen = useRef<number | null>(null)
+  const flight = usePageLoad()
 
   const load = useCallback(
-    async (soft = false, live = false) => {
+    async (soft = false, liveFetch = false, loadMode: 'query' | 'tick' = soft ? 'tick' : 'query') => {
       const key = issueKey.trim().toUpperCase()
       if (!key) return
+      const flightKey = liveFetch ? `${key}|live` : key
+      const signal = loadMode === 'tick' ? flight.tick(flightKey) : flight.query(flightKey)
+      if (!signal) return
       const req = ++reqId.current
       const haveRow = Boolean(peekTask(key))
       if (!soft && !haveRow) {
@@ -69,24 +75,25 @@ export function IssueDetailPage() {
         setError(null)
       }
       try {
-        const d = await fetchTaskDetail(key, { live })
-        if (req !== reqId.current) return
+        const d = await fetchTaskDetail(key, { live: liveFetch, signal })
+        if (signal.aborted || req !== reqId.current) return
         rememberTask(d)
         for (const j of d.jobs || []) rememberJob(j)
         setDetail(d)
         setStale(false)
       } catch (e) {
-        if (req !== reqId.current) return
+        if (signal.aborted || isAbortError(e) || req !== reqId.current) return
         if (soft || haveRow) setStale(true)
         else {
           setDetail(null)
           setError(e instanceof Error ? e.message : 'Failed to load issue')
         }
       } finally {
-        if (req === reqId.current) setLoading(false)
+        if (req === reqId.current && !signal.aborted) setLoading(false)
+        if (flight.settle(signal)) void load(true, false, 'tick')
       }
     },
-    [issueKey],
+    [flight, issueKey],
   )
 
   useEffect(() => {
@@ -109,14 +116,15 @@ export function IssueDetailPage() {
     } else {
       setDetail(null)
     }
-    void load(Boolean(seed))
+    void load(Boolean(seed), false, 'query')
   }, [issueKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!noteLiveGeneration(genSeen, live.generation)) return
     const now = Date.now()
     if (now - lastSoft.current < 4000) return
     lastSoft.current = now
-    void load(true)
+    void load(true, false, 'tick')
   }, [live.generation, load])
 
   const routeKey = issueKey.trim().toUpperCase()
@@ -253,7 +261,7 @@ export function IssueDetailPage() {
           )}
           <button
             type="button"
-            onClick={() => void load(Boolean(detail), true)}
+            onClick={() => void load(Boolean(detail), true, 'query')}
             className="vd-btn vd-btn-secondary"
             disabled={loading}
           >

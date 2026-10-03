@@ -3,6 +3,7 @@ import {
   createOpencodeAgent,
   fetchOpencodeAgent,
   fetchOpencodeAgents,
+  isAbortError,
   saveOpencodeAgent,
   syncOpencodeAgents,
 } from '../../api/client'
@@ -49,9 +50,18 @@ export function ModesPanel({ modes, onChange }: Props) {
   }
 
   useEffect(() => {
-    reloadAgents().catch((e: unknown) =>
-      setError(e instanceof Error ? e.message : 'Could not list agents'),
-    )
+    const ac = new AbortController()
+    fetchOpencodeAgents(ac.signal)
+      .then((payload) => {
+        if (ac.signal.aborted) return
+        setAgents(payload.agents)
+        setSynced(payload.synced !== false)
+      })
+      .catch((e: unknown) => {
+        if (ac.signal.aborted || isAbortError(e)) return
+        setError(e instanceof Error ? e.message : 'Could not list agents')
+      })
+    return () => ac.abort()
   }, [])
 
   function closeEditor() {

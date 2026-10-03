@@ -109,6 +109,8 @@ def test_assert_remote_host_allowed_branches(gm, monkeypatch):
     # urlparse("https://") → no hostname
     with pytest.raises(GitCloneError, match="no host"):
         gm._assert_remote_host_allowed("https://")
+    # A local git directory is not a host we send a PAT to.
+    gm._assert_remote_host_allowed("file:///C:/repos/demo.git")
 
     # Lone GITLAB_PAT (no host map) authenticates any job remote
     gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")

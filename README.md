@@ -364,6 +364,31 @@ git submodule update --init --recursive
 Ops dashboard: **http://127.0.0.1:8080**  
 OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`).
 
+Yaver and OpenCode serve have to be the same user. The daemon creates the git clone. OpenCode serve is the process that writes and commits in that clone, and the Transcript tab reads that process's chat database. Port 8080 does not need root.
+
+A systemd unit with no `User=` runs as root. `sudo nohup opencode serve` is root as well, and `sudo` sets `HOME` to `/root`. The clone under `~/.local/share/yaver/t` is then owned by root. A serve process started as the login user cannot write it, so the agent commits in `~/.tmp/opencode`. The job can show completed, and no merge request is opened. The root dashboard reads `/root/.local/share/opencode`, while the user's serve wrote `~/.local/share/opencode`, so Transcript stays empty. Windows does not split this way: one account runs the daemon, the clone, and OpenCode.
+
+Put the login that should own the clones on the Yaver unit:
+
+```ini
+[Service]
+User=yaver
+Group=yaver
+```
+
+Start `opencode serve` as that same user, with that user's home. A user systemd service keeps it up across reboots. `nohup` is fine when it is started as that user.
+
+If a root run already created the trees, give them to that user once, then start both processes as the user:
+
+```bash
+sudo chown -R yaver:yaver \
+  /home/yaver/.local/share/yaver \
+  /home/yaver/.local/share/opencode
+sudo systemctl restart yaver
+```
+
+Replace `yaver` with the account that should own the work. While both processes stay root, new clones and the chat database live under `/root`. A later serve without `sudo` will not see that history and will not be able to write those clones.
+
 ### Windows (offline zip)
 
 See [packaging/windows/README.md](packaging/windows/README.md).
@@ -529,6 +554,7 @@ Default branch is **`develop`**. Feature MRs go into `develop`. Release: tag `vM
 | 401 / 403 Jira | Token; Cloud needs `JIRA_EMAIL` |
 | Git / MR fails | `{params}` complete; host PAT in `GITLAB_HOST_PATS` or `AZURE_COLLECTION_PATS` |
 | Dashboard down | Daemon up? `http://127.0.0.1:8080` |
+| Linux job completes with no merge request, or Transcript is empty | Yaver and `opencode serve` are different users, often root and the login. Run both as the same user. See [Linux](#linux). |
 | Windows TUI black screen | `start-opencode.bat` from the project folder |
 
 ```bash
