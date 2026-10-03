@@ -21,11 +21,9 @@ const multi = resetBody({
 assert(
   multi ===
     [
-      'Drops the resume pointer for ses_aabbcc only.',
       'Multi-repo: gitlab.example/group/x, gitlab.example/group/y.',
       'Clone folder: multi_ws.',
       'The next build job that would have resumed ses_aabbcc starts a new session. Other sessions on feature/KAN-517 → main stay.',
-      'Does not delete OpenCode’s own history.',
     ].join('\n\n'),
   'multi reset copy names the session, repos, and clone',
 )
@@ -60,7 +58,10 @@ const html = renderToStaticMarkup(
   />,
 )
 assert(html.includes('Reset ses_aabbcc?'), 'dialog title is the session id')
-assert(html.includes('Drops the resume pointer for ses_aabbcc only.'), 'dialog shows the session')
+assert(
+  html.includes('The next build job that would have resumed ses_aabbcc starts a new session.'),
+  'dialog shows the session',
+)
 assert(html.includes('Multi-repo: gitlab.example/group/x, gitlab.example/group/y.'), 'dialog shows the repo set')
 assert(html.includes('Clone folder: multi_ws.'), 'dialog shows the clone folder')
 assert(html.includes('whitespace-pre-wrap'), 'dialog keeps the blank lines')

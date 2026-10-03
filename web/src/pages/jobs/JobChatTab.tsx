@@ -548,14 +548,13 @@ export function JobChatTab({
             <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
             live
           </span>
-          Waiting for worker chat (session id + first message)…
+          Waiting for the first message…
         </p>
       )
     }
     return (
       <div className="vd-alert vd-alert-warning">
-        No session id on this job yet. Chat appears after the OpenCode agent
-        starts and a <span className="font-mono">ses_*</span> id is recorded.
+        No chat yet.
       </div>
     )
   }
@@ -566,16 +565,17 @@ export function JobChatTab({
   return (
     <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-text-muted">
-          Full OpenCode transcript for this job
-          {total ? ` · ${total} turn${total === 1 ? '' : 's'}` : ''}.
-          {liveRun ? (
-            <span className="ml-2 inline-flex items-center gap-1 text-live">
-              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
-              live
-            </span>
-          ) : null}
-        </p>
+        {(total > 0 || liveRun) && (
+          <p className="text-xs text-text-muted">
+            {total > 0 ? `${total} turn${total === 1 ? '' : 's'}` : null}
+            {liveRun ? (
+              <span className={`${total > 0 ? 'ml-2 ' : ''}inline-flex items-center gap-1 text-live`}>
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
+                live
+              </span>
+            ) : null}
+          </p>
+        )}
         {sessions.length > 1 && (
           <label className="text-xs text-text-muted">
             Session
@@ -604,7 +604,7 @@ export function JobChatTab({
 
       {total === 0 ? (
         <p className="text-text-muted">
-          Session id is recorded, but no messages were found in the local OpenCode database.
+          No messages in this chat.
         </p>
       ) : (
         <div

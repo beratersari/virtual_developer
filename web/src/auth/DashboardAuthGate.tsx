@@ -8,21 +8,16 @@ import {
   setUnauthorizedHandler,
 } from './dashboardAuth'
 
-function GateBrand({ blurb }: { blurb: string }) {
+function GateBrand({ blurb }: { blurb?: string }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2.5">
         <div className="vd-mark" aria-hidden>
           <img src="/yaver-wink.gif" alt="" width={64} height={64} />
         </div>
-        <div>
-          <div className="vd-kicker">Yaver</div>
-          <div className="font-mono text-lg font-semibold tracking-tight text-text">
-            Ops console
-          </div>
-        </div>
+        <div className="vd-kicker">Yaver</div>
       </div>
-      <p className="font-mono text-sm text-text-secondary">{blurb}</p>
+      {blurb ? <p className="font-mono text-sm text-text-secondary">{blurb}</p> : null}
     </div>
   )
 }
@@ -134,7 +129,7 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
       <GateShell>
         <form className="relative w-full max-w-[400px]" onSubmit={onSubmit}>
           <GateCard>
-            <GateBrand blurb="Sign in to view jobs, storage, and settings." />
+            <GateBrand />
             <div className="space-y-3.5">
               <label className="field !mb-0">
                 <span>Username</span>
@@ -163,9 +158,6 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
             >
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
-            <p className="text-center text-[11px] leading-relaxed text-text-muted">
-              Board poller and GitLab webhooks do not use this login.
-            </p>
           </GateCard>
         </form>
       </GateShell>

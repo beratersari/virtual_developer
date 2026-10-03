@@ -105,9 +105,8 @@ export function SessionsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="OpenCode"
         title="Sessions"
-        description="OpenCode chats for one repository + source + target. Claude Code and Codex replies are on the job Transcript tab, not in this list."
+        description="OpenCode chats for one repository, source, and target. Claude Code and Codex replies stay on the job Transcript tab."
         actions={
           <label className="block text-xs text-text-muted">
             Search

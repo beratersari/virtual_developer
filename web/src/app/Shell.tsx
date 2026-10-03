@@ -5,7 +5,7 @@ import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
-import { PageTitleRoot, useShownPageTitle } from './pageTitleContext'
+import { PageTitleRoot, useRecordTitle } from './pageTitleContext'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
@@ -91,11 +91,14 @@ function IconGear() {
 
 const ICONS = [IconJobs, IconChart, IconClock, IconSession, IconDisk, IconBoard, IconGear]
 
-function TopBarName() {
-  const name = useShownPageTitle()
+function RecordBar() {
+  const name = useRecordTitle()
+  if (!name) return null
   return (
-    <div className="hidden min-w-0 max-w-[40%] truncate sm:block" title={name}>
-      {name}
+    <div className="vd-topbar">
+      <h1 className="vd-topbar-name" title={name}>
+        {name}
+      </h1>
     </div>
   )
 }
@@ -119,7 +122,7 @@ export function Shell() {
           <div className="min-w-0">
             <div className="truncate font-mono text-sm font-semibold tracking-tight">Yaver</div>
             <div className="truncate font-mono text-[11px] text-text-muted">
-              the aide · v{live.meta?.version ?? '—'}
+              v{live.meta?.version ?? '—'}
             </div>
           </div>
         </div>
@@ -153,7 +156,7 @@ export function Shell() {
           })}
         </nav>
 
-        <div className="mt-3 space-y-2 border-t border-border px-2 pt-3 text-xs">
+        <div className="vd-sidebar-foot mt-3 space-y-2 border-t border-border px-2 pt-3 text-xs">
           <div className="hidden font-mono text-[11px] leading-snug text-accent-text md:block">
             {localClock || '—'}
           </div>
@@ -191,15 +194,7 @@ export function Shell() {
               : 'vd-main-inner space-y-5'
           }
         >
-          <div className="vd-topbar">
-            <div className="vd-topbar-path">
-              <span className="vd-prompt">yaver</span>
-              <span className="text-text-muted">:</span>
-              <span>~{location.pathname}</span>
-              <span className="vd-caret" aria-hidden />
-            </div>
-            <TopBarName />
-          </div>
+          <RecordBar />
           {live.error && <Alert>{live.error}</Alert>}
           {live.poll?.error &&
           live.poll.error.trim().toLowerCase() !== 'jira disabled' ? (

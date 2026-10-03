@@ -293,13 +293,10 @@ export function ModesPanel({ modes, onChange }: Props) {
       )}
       <div className="text-sm font-semibold text-text">Modes</div>
       <p className="text-xs text-text-muted">
-        The list is only the agents in opencoderman/agents. Edit those files
-        here. Saving or creating an agent copies them into ~/.opencode,
-        ~/.config/opencode, and the Claude home, then reloads OpenCode when
-        no job is running. Sync and Reload OpenCode do that again after you
-        change the files outside this page. Plan stops without a push. Build
-        and test push and open a merge request. A mode you add follows build.
-        Write <span className="font-mono">Mode: name</span> in the issue params.
+        Edit the agent for each mode. Saving copies the files and reloads
+        OpenCode when no job is running. Plan does not push. Build and test
+        push and open a merge request. In the issue, write{' '}
+        <span className="font-mono">Mode: name</span>.
       </p>
       {modes.map((row, index) => (
         <div key={row.builtin ? `builtin-${row.name}` : `custom-${index}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-2">

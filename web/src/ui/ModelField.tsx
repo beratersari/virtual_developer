@@ -170,13 +170,11 @@ export function ModelField({
                 ? 'Type the model id your Claude server serves.'
                 : 'Type a provider/model id.'
             : isCodex
-              ? allowEmpty
-                ? 'This job only. List is from ~/.codex/config.toml. Choose Other id… to type a custom model.'
-                : 'Ids from ~/.codex/config.toml. Choose Other id… to type a custom model.'
+              ? 'Choose Other id… to type a custom model.'
               : isClaude
-                ? 'Models served by ANTHROPIC_BASE_URL. Choose Other id… to type one the server accepts.'
+                ? 'Models from the Claude server. Choose Other id… to type one it accepts.'
                 : allowEmpty
-                  ? 'This job only. Leave default to use Settings. Choose Other id… to type a custom model.'
+                  ? 'Choose Other id… to type a custom model.'
                   : 'Inventory from OpenCode. Choose Other id… to type a custom model.'}
       </span>
       {inventory?.error && <p className="text-xs text-warning-text">{inventory.error}</p>}

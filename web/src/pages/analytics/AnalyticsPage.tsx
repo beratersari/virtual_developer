@@ -56,18 +56,23 @@ function isoFromLocal(local: string) {
   return local.length === 16 ? `${local}:00` : local
 }
 
+/** Statuses that already have a count card under the filters. */
+const STATUS_ON_CARDS = new Set(['completed', 'error', 'cancelled'])
+
 function FacetGroup({
   title,
   items,
   selected,
   onChange,
   className = '',
+  hideCountIds,
 }: {
   title: string
   items: AnalyticsFacet[]
   selected: Set<string>
   onChange: (next: Set<string>) => void
   className?: string
+  hideCountIds?: Set<string>
 }) {
   if (!items.length) return null
   return (
@@ -105,7 +110,9 @@ function FacetGroup({
               <span className="min-w-0 flex-1 truncate" title={item.label}>
                 {item.label}
               </span>
-              <span className="font-mono text-text-muted">{item.jobs}</span>
+              {!(hideCountIds && hideCountIds.has(item.id)) && (
+                <span className="font-mono text-text-muted">{item.jobs}</span>
+              )}
             </label>
           )
         })}
@@ -159,7 +166,6 @@ function CategoryMix({ rows }: { rows: AnalyticsNamedCount[] }) {
   return (
     <div className="vd-card flex min-w-0 flex-col p-4">
       <h2 className="text-sm font-semibold">Category mix</h2>
-      <p className="mt-1 text-xs text-text-muted">Share of jobs in this range.</p>
       {top.length === 0 ? (
         <p className="py-8 text-center text-sm text-text-muted">No jobs in this filter.</p>
       ) : (
@@ -417,20 +423,13 @@ export function AnalyticsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title="Analytics"
-        description="Job volume over time. Filters apply to every chart and table on this page."
         actions={
           loading ? (
             <span className="inline-flex items-center gap-2 text-xs text-text-muted">
               <Spinner /> Loading
             </span>
-          ) : (
-            <span className="text-xs text-text-muted">
-              {payload?.matched ?? 0} of {payload?.in_range ?? 0} jobs in range
-              {payload ? ` · ${payload.scanned} stored` : ''}
-            </span>
-          )
+          ) : null
         }
       />
 
@@ -490,6 +489,7 @@ export function AnalyticsPage() {
           items={facets.status || []}
           selected={status}
           onChange={setStatus}
+          hideCountIds={STATUS_ON_CARDS}
         />
         <FacetGroup
           className="min-w-52 flex-1 basis-56"

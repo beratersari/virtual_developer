@@ -32,10 +32,6 @@ function folderReviews(folder: StorageFolder): { url: string; state?: string | n
   return [{ url, state: folder.merge_request_state }]
 }
 
-function hasLinkedReview(folder: StorageFolder): boolean {
-  return folderReviews(folder).length > 0
-}
-
 function ReviewLinks({ folder }: { folder: StorageFolder }) {
   const reviews = folderReviews(folder)
   if (!reviews.length) return null
@@ -190,14 +186,6 @@ function StorageList({
                   {folder.modified_at ? ` · ${folder.modified_at}` : ''}
                   {folder.in_use ? ' · in use' : ''}
                 </div>
-                {!hasLinkedReview(folder) && !isDeleting && (
-                  <div className="mt-1.5 max-w-xl text-xs text-danger-text">
-                    No GitLab MR or Azure PR is linked to this folder. Yaver
-                    only auto-deletes a clone after a linked review is merged,
-                    completed, or abandoned. Delete this folder yourself when
-                    you no longer need it.
-                  </div>
-                )}
                 {isDeleting && (
                   <div className="mt-2 max-w-sm">
                     <div className="flex items-center justify-between text-xs text-text-secondary">
@@ -333,9 +321,8 @@ export function StoragePage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Host"
         title="Storage"
-        description={`Temp clones under TEMP_DIR_BASE. Live jobs are never deleted.${ageNote} Linked GitLab MRs and Azure PRs still delete the clone when that review is merged, completed, or abandoned.`}
+        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned.`}
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh

@@ -292,12 +292,11 @@ export function JobsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title="Jobs"
         description={
           live.connected
-            ? 'Each card is one agent run. Use the Queue tab for messages waiting for a free slot.'
-            : 'Disconnected — list may be stale.'
+            ? 'Queue holds messages waiting for a free slot.'
+            : 'Disconnected. This list may be stale.'
         }
         actions={
           <label className="block text-xs text-text-muted">
@@ -373,24 +372,6 @@ export function JobsPage() {
           </span>
         )}
       </div>
-
-      {statusFilter === 'active' && (
-        <p className="text-xs text-text-muted">
-          Running in this daemon now, plus tickets still planning/executing after a
-          restart. Queue is waiting messages, not these runs.
-        </p>
-      )}
-      {statusFilter !== 'queue' && (
-        <p className="text-xs text-text-muted">
-          Search matches issue key, title, and description.
-        </p>
-      )}
-      {showQueue && (
-        <p className="text-xs text-text-muted">
-          Only messages waiting for a free issue/workspace slot. Running work is under
-          In flight / All.
-        </p>
-      )}
 
       {error && (
         <Alert

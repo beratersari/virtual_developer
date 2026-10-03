@@ -59,7 +59,7 @@ export function JobPromptTab({
       <div className="vd-alert vd-alert-warning">
         {job.prompt_path || job.session_log_path
           ? `Could not load prompt file${job.prompt_path ? ` (${pathBasename(job.prompt_path)})` : ''}.`
-          : 'No prompt_path on this job record yet.'}
+          : 'No prompt for this job yet.'}
       </div>
     )
   }
@@ -234,11 +234,7 @@ export function JobSessionTab({
   return (
     <div className="space-y-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-text-muted">
-          {worker === 'claude'
-            ? 'Claude Code reply. CLI diagnostics are omitted.'
-            : 'Raw worker output. Latest attempt opens by default.'}
-        </p>
+        <p className="text-xs text-text-muted">Latest attempt opens by default.</p>
         {entries.length > 1 && (
           <div className="flex items-center gap-2">
             <button

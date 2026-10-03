@@ -15,7 +15,7 @@ import { MarkdownBody } from '../../ui/MarkdownBody'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { JobsTable } from '../jobs/JobsTable'
-import { usePageTitle } from '../../app/pageTitleContext'
+import { usePageTitle, useRecordTitle } from '../../app/pageTitleContext'
 import { workspacePageName } from '../../util/pageTitle'
 import {
   cloneFolder,
@@ -73,6 +73,7 @@ export function SessionWorkspacePage() {
     detail && detail.workspace.workspace_id === workspaceId.trim() ? detail : null
   const w = loaded?.workspace
   usePageTitle(workspacePageName(w?.branch, w?.target_branch))
+  const recordName = useRecordTitle()
   const target = loaded?.sessions.find((s) => s.bind_id === resetId)
   const targetKind = kindLabel(target?.kind)
 
@@ -82,15 +83,14 @@ export function SessionWorkspacePage() {
         <Link to="/sessions" className="vd-btn-ghost mb-3 inline-block text-sm">
           ← Sessions
         </Link>
-        <PageHeader
-          kicker="OpenCode workspace"
-          title={w ? `${w.branch}${w.target_branch ? ` → ${w.target_branch}` : ''}` : 'Workspace'}
-          description={
-            w
-              ? w.repository_key || w.repository_url
-              : 'Linked chats and jobs for this repository + source + target.'
-          }
-        />
+        {w ? (
+          <p className="text-sm text-text-secondary">{w.repository_key || w.repository_url}</p>
+        ) : recordName ? null : (
+          <PageHeader
+            title="Workspace"
+            description="Linked chats and jobs for this repository, source, and target."
+          />
+        )}
       </div>
       {error && <p className="text-sm text-danger-text">{error}</p>}
       {!loaded && !error && (

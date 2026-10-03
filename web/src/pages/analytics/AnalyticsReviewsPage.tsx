@@ -148,13 +148,11 @@ export function AnalyticsReviewsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title={reviewsPageName(origin, state)}
         description={
           <>
-            Unique GitLab MRs and Azure PRs from ticket work and /yaver
-            follow-ups. Opened by us = Yaver created the MR from a ticket.
-            Contributed = a /yaver follow-up on an existing MR or PR.{' '}
+            Opened by us: Yaver created the request. Contributed: a follow-up
+            on a request that already existed.{' '}
             <Link to={backTo} className="text-accent hover:underline">
               Back to Analytics
             </Link>

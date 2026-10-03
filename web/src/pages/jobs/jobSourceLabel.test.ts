@@ -28,7 +28,7 @@ function job(source: string): JobItem {
 }
 
 const overview = renderToStaticMarkup(
-  createElement(JobOverview, { job: job('azure_workitem'), elapsedLabel: '—' }),
+  createElement(JobOverview, { job: job('azure_workitem') }),
 )
 const sourceAt = overview.indexOf('Source')
 const sourceCard = overview.slice(sourceAt, sourceAt + 180)
@@ -38,7 +38,7 @@ assert(
 )
 
 const pr = renderToStaticMarkup(
-  createElement(JobOverview, { job: job('azure'), elapsedLabel: '—' }),
+  createElement(JobOverview, { job: job('azure') }),
 )
 assert(pr.includes('Azure PR'), 'azure PR jobs stay Azure PR')
 

@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import {
   applyDocumentTitle,
   pageNameFromLocation,
+  recordTitle,
   shownPageName,
   visiblePageName,
 } from '../util/pageTitle'
@@ -23,6 +24,13 @@ export function usePageTitle(name: string) {
 /** Same name the browser tab shows for this address, without the Yaver prefix. */
 export function useShownPageTitle(): string {
   return useContext(ShownPageTitle)
+}
+
+/** Issue, job, or workspace name. Empty on list pages and before the record loads. */
+export function useRecordTitle(): string | null {
+  const visible = useShownPageTitle()
+  const { pathname, search } = useLocation()
+  return recordTitle(visible, pageNameFromLocation(pathname, search))
 }
 
 /** Sets document.title from the address, unless the open record supplies its own name. */

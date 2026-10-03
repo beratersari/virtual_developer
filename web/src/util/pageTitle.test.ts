@@ -8,6 +8,7 @@ import {
   jobPageName,
   pageNameFromLocation,
   resolveDocumentTitle,
+  recordTitle,
   shownPageName,
   visiblePageNameFrom,
   reviewsPageName,
@@ -72,6 +73,17 @@ assert(
 assert(
   visiblePageNameFrom('Job', 'Yaver - Jobs', true) === 'Job',
   'opening another job does not keep the previous page name',
+)
+assert(recordTitle('Fix login', 'Job') === 'Fix login', 'the bar shows the loaded issue name')
+assert(
+  recordTitle('Fix login - Transcript', 'Job - Transcript') === 'Fix login - Transcript',
+  'a job tab keeps the issue name',
+)
+assert(recordTitle('Job', 'Job') === null, 'a placeholder is not a second title')
+assert(recordTitle('Jobs', 'Jobs') === null, 'a list page does not repeat its name')
+assert(
+  recordTitle('Existing issue', 'Existing issue') === null,
+  'a schedule mode is not a record title',
 )
 assert(titled('/jobs/job_1/transcript') === 'Yaver - Job - Transcript', 'job tab before the record loads')
 

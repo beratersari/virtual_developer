@@ -241,38 +241,19 @@ body {
 }
 
 .vd-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.15rem;
-  padding-bottom: 0.8rem;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
+  min-width: 0;
 }
 
-.vd-topbar-path {
-  min-width: 0;
+.vd-topbar-name {
+  margin: 0;
   overflow: hidden;
+  color: var(--text);
+  font-size: 1.45rem;
+  font-weight: 560;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
-}
-
-.vd-prompt {
-  color: var(--accent);
-}
-
-.vd-caret {
-  display: inline-block;
-  width: 0.45rem;
-  height: 0.8em;
-  margin-left: 0.35rem;
-  background: var(--accent);
-  vertical-align: -0.08em;
-  animation: vd-caret 1.1s steps(1) infinite;
 }
 
 .vd-main {
@@ -816,8 +797,46 @@ body {
   50% { opacity: 0.4; transform: scale(0.82); }
 }
 
-@keyframes vd-caret {
-  50% { opacity: 0; }
+@media (max-width: 899px) {
+  .vd-app {
+    display: flex;
+    flex-direction: column;
+  }
+  .vd-sidebar {
+    display: contents;
+  }
+  .vd-brand,
+  .vd-nav,
+  .vd-sidebar-foot {
+    width: 100%;
+    min-width: 0;
+    background: var(--bg-elevated);
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+  .vd-brand {
+    order: 1;
+    margin-bottom: 0;
+    padding-top: 0.85rem;
+  }
+  .vd-nav {
+    order: 2;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .vd-main {
+    order: 3;
+  }
+  .vd-sidebar-foot {
+    order: 4;
+    margin-top: 0;
+    padding-top: 0.85rem;
+    padding-bottom: 1.25rem;
+  }
+  .vd-seg {
+    display: flex;
+    width: 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -826,8 +845,7 @@ body {
   .vd-modal,
   .vd-modal-backdrop,
   .vd-spin,
-  .vd-pulse,
-  .vd-caret {
+  .vd-pulse {
     animation: none !important;
   }
   .vd-btn,
@@ -863,8 +881,9 @@ body {
 
 .vd-seg {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.28);

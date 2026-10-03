@@ -169,6 +169,16 @@ function scheduleName(parts: string[]): string {
   return parsed.tracker === 'azure' ? `${base} - Azure work item` : base
 }
 
+/**
+ * Name for the record bar. List pages keep their heading, so this stays empty.
+ * A placeholder such as "Job" stays empty until the issue name is known.
+ */
+export function recordTitle(visible: string, fallback: string): string | null {
+  if (!isRecordPlaceholder(fallback)) return null
+  if (isRecordPlaceholder(visible)) return null
+  return visible
+}
+
 /** The open record's name wins. A leftover name from another address does not. */
 export function shownPageName(
   fallback: string,
