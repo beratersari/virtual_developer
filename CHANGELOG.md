@@ -14,6 +14,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Fixed
 
+- Restarting Yaver while an agent save is still waiting reloads OpenCode before the next job starts. The running serve is kept only until that restart; the saved agents are not left behind in the old process.
 - Saving or creating an agent while a job is running leaves the jobs that are still queued where they are. Those jobs start after OpenCode reloads, so they see the new agent. The running job keeps its current serve process.
 - A failed OpenCode reload leaves queued jobs queued. They start only after a later reload succeeds and the new process is using the saved agents. The queue also stays put when that reload state cannot be read.
 - OpenCode serve stays up when the work queue cannot be read. A locked or unreadable queue is not treated as an empty queue.

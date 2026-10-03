@@ -293,6 +293,7 @@ class OpenCodeServeSupervisor:
         sleep: Optional[Callable[[float], None]] = None,
         monotonic: Optional[Callable[[], float]] = None,
         interval: float = 2.0,
+        reload_marker: Optional[Path] = None,
     ) -> None:
         self._healthy_fn = healthy
         self._spawn_fn = spawn
@@ -315,10 +316,46 @@ class OpenCodeServeSupervisor:
         self._next_start = 0.0
         self._misses = 0
         self._miss_logged = False
+        self._reload_marker = (
+            Path(reload_marker) if reload_marker is not None else _reload_marker_path()
+        )
 
     def bind(self, *, live_jobs: Callable[[], List[str]]) -> None:
         """Record who is in flight so a reload can wait."""
         self._jobs_fn = live_jobs
+
+    def _marker_present(self) -> bool:
+        """True when a save still needs a restart after this process is gone.
+
+        An unreadable marker is not "no reload". The queue must not open a
+        session on a serve that may still have the previous agents.
+        """
+        path = self._reload_marker
+        try:
+            return path.is_file()
+        except OSError:
+            return True
+
+    def _write_marker(self) -> None:
+        path = self._reload_marker
+        with self._lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("pending", encoding="utf-8")
+            except OSError as exc:
+                logger.warning(f"OpenCode reload was not recorded: {exc}")
+
+    def _clear_marker(self) -> None:
+        # ``_reloading`` is still true here: this reload has not released
+        # the claim yet. A second save sets ``_pending`` and must keep the file.
+        with self._lock:
+            if self._pending:
+                return
+            path = self._reload_marker
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"OpenCode reload marker was not cleared: {exc}")
 
     def _jobs(self) -> Optional[List[str]]:
         """Live issue keys, or ``None`` when the list cannot be read.
@@ -660,6 +697,9 @@ class OpenCodeServeSupervisor:
                 }
             )
         self._mark_healthy()
+        # This process read the agent files at start. A second save during
+        # the wait sets ``_pending`` and keeps the marker for another pass.
+        self._clear_marker()
         if kind == "started":
             result = {"status": "started", "message": "OpenCode serve started."}
         else:
@@ -755,6 +795,17 @@ class OpenCodeServeSupervisor:
             return self._stopping_result()
         if self._healthy():
             self._mark_healthy()
+            with self._lock:
+                remembered = bool(self._pending or self._reloading)
+            # Same process: a deferred reload stays deferred until the queue
+            # or the watch applies it. A new process has an empty flag and
+            # only the marker, so a healthy serve from before the restart
+            # still has to read the saved agents.
+            if not remembered and self._marker_present():
+                blockers = self._blocking_jobs()
+                if blockers:
+                    return self._defer(blockers)
+                return self.request_reload()
             result = {
                 "status": "ready",
                 "message": "OpenCode serve is already running.",
@@ -793,7 +844,13 @@ class OpenCodeServeSupervisor:
         A second call while a restart is in progress does not start another
         process and does not clear the in-flight flag. That call is applied
         when the first restart finishes, unless a job is running by then.
+
+        The marker is written before the restart. Shutdown and a force-kill
+        both drop the in-memory flag. The serve process often keeps running
+        (the launcher started it, or this child is in its own process group).
+        The next daemon reads the marker and restarts that serve.
         """
+        self._write_marker()
         with self._lock:
             if self._stopping:
                 return {"status": "failed", "message": "Yaver is stopping."}
@@ -832,6 +889,8 @@ class OpenCodeServeSupervisor:
                     again = bool(self._pending)
                 if not again:
                     self._keep_failed_reload_pending(result)
+                    if str(result.get("status") or "") == "reloaded":
+                        self._clear_marker()
                     return result
                 blockers = self._blocking_jobs()
                 if blockers:
@@ -842,7 +901,9 @@ class OpenCodeServeSupervisor:
     def reload_outstanding(self) -> bool:
         """True when saved agent files still need a restart."""
         with self._lock:
-            return bool(self._pending or self._reloading)
+            if self._pending or self._reloading:
+                return True
+        return self._marker_present()
 
     def apply_pending_reload(self, timeout: float = 90.0) -> Dict[str, str]:
         """Finish a deferred agent reload once no session is open.
@@ -936,6 +997,8 @@ class OpenCodeServeSupervisor:
             pending = self._pending
             deferred_message = self._deferred_message
             last = dict(self._last) if self._last else None
+        if not pending and self._marker_present():
+            pending = True
         if pending and last and last.get("status") == "failed":
             return last
         if pending:
@@ -987,6 +1050,8 @@ class OpenCodeServeSupervisor:
                 if self._reloading:
                     continue
                 pending = self._pending
+            if not pending and self._marker_present():
+                pending = True
             try:
                 if pending:
                     jobs = await asyncio.to_thread(self._jobs)
@@ -1032,6 +1097,17 @@ def _project_cwd() -> Optional[str]:
     if root and Path(str(root)).is_dir():
         return str(root)
     return None
+
+
+def _reload_marker_path() -> Path:
+    """File that remembers an agent reload across a daemon restart."""
+    try:
+        from src.paths import agent_data_dir
+
+        root = Path(agent_data_dir())
+    except Exception:
+        root = Path(tempfile.gettempdir())
+    return root / "opencode-serve-reload.pending"
 
 
 def _log_path() -> Path:

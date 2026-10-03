@@ -6,11 +6,13 @@ import asyncio
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
+from pathlib import Path
 
 from src.dashboard.api import create_dashboard_app
 from src.opencode_serve_supervisor import (
@@ -67,6 +69,12 @@ def _supervisor(**overrides):
         return proc
 
     jobs = {"keys": list(overrides.pop("jobs", []))}
+    marker = overrides.pop("reload_marker", None)
+    if marker is None:
+        fd, name = tempfile.mkstemp(prefix="yaver-serve-reload-", suffix=".pending")
+        os.close(fd)
+        os.unlink(name)
+        marker = Path(name)
     sup = OpenCodeServeSupervisor(
         healthy=overrides.pop("healthy_fn", lambda: healthy["up"]),
         spawn=overrides.pop("spawn", spawn),
@@ -77,6 +85,7 @@ def _supervisor(**overrides):
         sleep=clock.sleep,
         monotonic=clock.monotonic,
         interval=overrides.pop("interval", 2.0),
+        reload_marker=marker,
     )
     return sup, killed, spawned, healthy, jobs, listeners
 
@@ -1135,3 +1144,107 @@ async def test_dispatch_arriving_during_a_deferred_reload_is_not_lost(
     assert state["apply"] >= 2
     assert state["outstanding"] is False
     assert started == ["KAN-640", "KAN-641"]
+
+
+def test_down_serve_start_uses_agents_saved_before_the_restart(tmp_path):
+    """A dead serve plus a leftover marker is one start, not a second kill."""
+    marker = tmp_path / "opencode-serve-reload.pending"
+    marker.write_text("pending", encoding="utf-8")
+    sup, _killed, spawned, _healthy, _jobs, _listeners = _supervisor(
+        healthy=False,
+        listeners=[],
+        reload_marker=marker,
+    )
+    result = sup.ensure_started()
+    assert result["status"] == "started", result
+    assert spawned == [7]
+    assert not marker.is_file()
+    assert sup.reload_outstanding() is False
+
+
+def test_restart_reloads_an_external_serve_after_a_deferred_agent_save(tmp_path):
+    """A save during a job must still reload after Yaver is restarted.
+
+    The serve started by the launcher is not this daemon's child. Shutdown
+    leaves that process running. The saved agents are not in its memory.
+    """
+    marker = tmp_path / "opencode-serve-reload.pending"
+    sup, killed, _spawned, _healthy, _jobs, _listeners = _supervisor(
+        jobs=["KAN-9"],
+        reload_marker=marker,
+    )
+    deferred = sup.request_reload()
+    assert deferred["status"] == "deferred"
+    assert killed == []
+    assert marker.is_file()
+    sup.stop_owned()
+    assert marker.is_file()
+    assert killed == []
+
+    restarted, killed_again, spawned_again, _healthy2, _jobs2, _listeners2 = (
+        _supervisor(reload_marker=marker)
+    )
+    assert restarted.reload_outstanding() is True
+    result = restarted.ensure_started()
+    assert result["status"] == "reloaded", result
+    assert killed_again == [7]
+    assert spawned_again == [7]
+    assert restarted.reload_outstanding() is False
+    assert not marker.is_file()
+
+
+@pytest.mark.asyncio
+async def test_startup_queue_reloads_before_a_job_when_only_the_marker_remains(
+    monkeypatch, tmp_path
+):
+    """Recovered queue rows must not open a session on the pre-restart serve."""
+    import src.opencode_serve_supervisor as serve_sup
+    from src.config import settings
+    from src.processor import JobProcessor
+
+    marker = tmp_path / "opencode-serve-reload.pending"
+    marker.write_text("pending", encoding="utf-8")
+    sup, killed, spawned, _healthy, _jobs, _listeners = _supervisor(
+        reload_marker=marker
+    )
+    assert sup._pending is False
+    monkeypatch.setattr(settings, "jira_host", "")
+    monkeypatch.setattr(settings, "jira_api_token", "")
+    monkeypatch.setattr(serve_sup, "supervisor", sup)
+    proc = JobProcessor()
+    proc.queue_store.enqueue(source="jira", issue_key="KAN-644", summary="after restart")
+    order: list[str] = []
+
+    async def run(rec):
+        order.append(str(rec.get("issue_key")))
+        assert killed == [7]
+        assert spawned == [7]
+
+    monkeypatch.setattr(proc, "_run_queue_item", run)
+    assert await proc.dispatch_queue() == 1
+    await asyncio.sleep(0)
+    assert order == ["KAN-644"]
+    assert sup.reload_outstanding() is False
+    assert not marker.is_file()
+
+
+@pytest.mark.asyncio
+async def test_watch_reloads_when_only_the_marker_is_left(tmp_path):
+    marker = tmp_path / "opencode-serve-reload.pending"
+    marker.write_text("pending", encoding="utf-8")
+    sup, killed, spawned, _healthy, _jobs, _listeners = _supervisor(
+        reload_marker=marker,
+        interval=0.01,
+    )
+    assert sup._pending is False
+    running = {"on": True}
+
+    async def stop() -> None:
+        await asyncio.sleep(0.08)
+        running["on"] = False
+
+    await asyncio.gather(sup.watch(lambda: running["on"]), stop())
+    assert killed == [7]
+    assert spawned == [7]
+    assert not marker.is_file()
+    assert sup.reload_outstanding() is False
