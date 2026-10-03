@@ -1,3 +1,15 @@
+# Yaver 0.9.70
+
+A follow-up comment on one repository of a multi-repo job checks the other repository out on feature/{KEY} when its saved source is a primary base (develop, main, master, trunk, dev, or release/*). The follow-up reuses the first run's folder, so that repository's feature commits stay in the workspace. The commented repository stays on the branch named in the review.
+
+Dashboard pages no longer stay blank while an earlier read still holds the browser's connections. Leaving a page cancels that page's read. A live update waits for the read already in flight. Jobs, Sessions, and Scheduled stay on Loading until the response for the list you opened arrives.
+
+Storage review links are !N for every merge request on a folder, including a multi-repo folder. The repository path stays in the link target.
+
+A file: clone is allowed when a GitLab or Azure token is configured. That remote has no hostname and does not receive a token.
+
+On Linux, Yaver and OpenCode serve have to run as the same user. A systemd unit sets User= and Group=. After a root run, chown the data and OpenCode trees once, then start both as that user. Port 8080 does not need root.
+
 # Yaver 0.9.69
 
 Jobs, the queue, schedules, session binds, and issue state now live in one yaver.sqlite file in the Yaver data folder. The first start imports the JSON files that were already there. Plans, session logs, and clone folders stay on disk. Analytics still counts a run after a merged review deletes the issue state, because the job row remains.
