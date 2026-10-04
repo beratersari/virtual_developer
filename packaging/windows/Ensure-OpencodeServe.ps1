@@ -14,19 +14,12 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
-function Test-ServeHealthy([int]$Port) {
-    try {
-        $url = "http://127.0.0.1:$Port/global/health"
-        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3
-        $code = [int]$resp.StatusCode
-        $body = [string]$resp.Content
-        if ($code -ge 200 -and $code -lt 500 -and ($body -match "healthy")) {
-            return $true
-        }
-    } catch {
-    }
-    return $false
+$authPs1 = Join-Path $PSScriptRoot "ServeAuth.ps1"
+if (-not (Test-Path -LiteralPath $authPs1)) {
+    Write-Host "[ERROR] ServeAuth.ps1 not found next to Ensure-OpencodeServe.ps1"
+    exit 1
 }
+. $authPs1
 
 function Test-PortListening([int]$Port) {
     if ($Port -le 0) { return $false }
@@ -42,14 +35,45 @@ function Test-PortListening([int]$Port) {
     return $false
 }
 
-if (Test-ServeHealthy $ServePort) {
-    Write-Host "[OK] OpenCode serve already healthy on port $ServePort"
-    exit 0
-}
-
 $waitPs1 = Join-Path $PSScriptRoot "Wait-Http.ps1"
 if (-not (Test-Path -LiteralPath $waitPs1)) {
     Write-Host "[ERROR] Wait-Http.ps1 not found next to Ensure-OpencodeServe.ps1"
+    exit 1
+}
+
+# Existing process env wins. Fill only keys that are unset, then the serve
+# window inherits them. Do not put the password on the cmd line.
+Import-OpencodeServeAuth -ProjectDir $ProjectDir
+$auth = Get-OpencodeServeAuthorization
+$health = "http://127.0.0.1:$ServePort/global/health"
+
+function Invoke-ServeWait([int]$Seconds, [switch]$OneShot) {
+    # Hashtable splat binds by name. An array splat is positional and would
+    # pass the health URL to TimeoutSec.
+    $params = @{
+        Url = $health
+        OkPattern = "healthy"
+        FailOnUnauthorized = $true
+    }
+    if ($auth) {
+        $params.Authorization = $auth
+    }
+    if ($OneShot) {
+        $params.Once = $true
+    } else {
+        $params.TimeoutSec = $Seconds
+    }
+    & $waitPs1 @params
+    return $LASTEXITCODE
+}
+
+$first = Invoke-ServeWait -OneShot
+if ($first -eq 0) {
+    Write-Host "[OK] OpenCode serve already healthy on port $ServePort"
+    exit 0
+}
+if ($first -eq 3) {
+    Write-Host "[ERROR] OpenCode serve rejected the password (HTTP 401)."
     exit 1
 }
 
@@ -74,7 +98,10 @@ if (Test-PortListening $ServePort) {
     Start-Process -FilePath $env:ComSpec -ArgumentList $startArgs -WorkingDirectory $ProjectDir | Out-Null
 }
 
-$health = "http://127.0.0.1:$ServePort/global/health"
 Write-Host "Waiting for $health ..."
-& $waitPs1 -Url $health -TimeoutSec $TimeoutSec -OkPattern "healthy"
-exit $LASTEXITCODE
+$waited = Invoke-ServeWait -Seconds $TimeoutSec
+if ($waited -eq 3) {
+    Write-Host "[ERROR] OpenCode serve rejected the password (HTTP 401)."
+    exit 1
+}
+exit $waited
