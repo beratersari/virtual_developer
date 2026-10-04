@@ -8,10 +8,15 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.71] — 2026-10-04
+
+OpenCode serve starts with Yaver and reloads when agents change. Storage and Sessions is one tab, and the dashboard names the open issue.
+
 ### Added
 
 - The sidebar shows OpenCode serve health at the bottom left on every page. The line reads healthy, restarting, reload waiting, not answering, down, or failed. Hover shows the detail from the serve check. A status that cannot be read stays unavailable.
 - The daemon always starts OpenCode serve when it is down, and starts that child again if it exits. A serve that is already healthy is left running. Saving, creating, or syncing an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. A running job keeps the current process until it finishes. Settings has Reload OpenCode for a change made outside the editor.
+- Storage and Sessions is one sidebar tab. Details on a folder lists the OpenCode chats whose working directory is that clone or a checkout inside it. An old /sessions address opens Storage. Claude Code and Codex replies stay on the job Transcript tab.
 
 ### Fixed
 
@@ -24,6 +29,13 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 - A planning or executing issue still blocks a reload when the issue-state database cannot be read. That read used to look like no jobs, so an agent save restarted serve during clone.
 - A missed OpenCode health check no longer stops serve while a job already has a session. The process stays up when it is still listening. A job that starts during a reload waits for that restart, and Yaver does not open a second serve beside it. A job that appears at the moment of a stop keeps the current process.
 - A job that has not reached OpenCode fails within a few seconds when serve is listening but does not answer. That opening check does not use the agent time budget. The job leaves executing, and the quiet process can then be replaced.
+
+### Changed
+
+- The dashboard is a dark phosphor console with square controls. The top bar shows the open issue name, the same name as the browser tab.
+- List pages no longer repeat their name in a kicker. Job pages no longer repeat the issue name, status, and worker. Settings and storage keep the rules that stop a bad action.
+
+[0.9.71]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.71
 
 ## [0.9.70] — 2026-10-03
 
