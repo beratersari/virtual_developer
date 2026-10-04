@@ -430,9 +430,9 @@ html[data-theme="light"] .vd-mark {
 .vd-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .vd-btn-secondary:disabled {
   opacity: 1;
-  color: var(--text);
-  background: var(--wash);
-  border-color: var(--border-strong);
+  color: var(--text-muted);
+  background: transparent;
+  border-color: var(--border);
 }
 
 .vd-btn-primary {
