@@ -425,7 +425,7 @@ Useful pages:
 
 - **Tasks / Jobs** — live and past runs (prompts and logs are per selected job)
 - **Poll** — last Jira board snapshot
-- **Storage** — temp clones. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
+- **Storage and Sessions** — temp clones, with Details for the OpenCode chats that use each folder. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
 - **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
 - **Settings** — board id, poll interval, trigger names, Azure collection PATs (no token values shown)
 

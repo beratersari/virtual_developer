@@ -11,6 +11,7 @@ import {
   recordTitle,
   shownPageName,
   visiblePageNameFrom,
+  folderPageName,
   reviewsPageName,
   workspacePageName,
 } from './pageTitle'
@@ -123,13 +124,17 @@ assert(titled('/scheduled/mr') === 'Yaver - Existing MR', 'existing mr')
 assert(titled('/scheduled/pr') === 'Yaver - Existing PR', 'existing pr')
 assert(titled('/schedules') === 'Yaver - Existing issue', 'old schedules path')
 
-assert(titled('/sessions') === 'Yaver - Sessions', 'sessions')
-assert(titled('/sessions/2') === 'Yaver - Sessions', 'sessions page 2')
-assert(titled('/sessions/osw_1') === 'Yaver - Workspace', 'workspace before it loads')
+assert(titled('/sessions') === 'Yaver - Storage and Sessions', 'old sessions address')
+assert(titled('/sessions/2') === 'Yaver - Storage and Sessions', 'old sessions page')
+assert(titled('/sessions/osw_1') === 'Yaver - Storage and Sessions', 'old workspace address')
 assert(workspacePageName('feature/KAN-1', 'develop') === 'feature/KAN-1 → develop', 'workspace branches')
 assert(workspacePageName('develop', '') === 'develop', 'workspace without a target')
+assert(folderPageName({ issue_key: 'KAN-1', summary: 'Fix login', name: 'repo' }) === 'KAN-1 — Fix login', 'folder title uses the issue')
+assert(folderPageName({ name: 'repo_abc' }) === 'repo_abc', 'folder title falls back to the directory')
 
-assert(titled('/storage') === 'Yaver - Storage', 'storage')
+assert(titled('/storage') === 'Yaver - Storage and Sessions', 'storage')
+assert(titled('/storage/repo_abc') === 'Yaver - repo_abc', 'folder details')
+assert(titled('/storage/a/b') === 'Yaver - Jobs', 'storage has no deeper path')
 assert(titled('/poll') === 'Yaver - Board', 'board')
 assert(titled('/settings') === 'Yaver - Settings - Jira', 'settings default')
 assert(titled('/settings/jira') === 'Yaver - Settings - Jira', 'jira settings')

@@ -860,6 +860,13 @@ export type StorageFolder = {
   merge_request_state?: string | null
   merge_requests?: StorageReviewLink[]
   delete?: StorageFolderDelete | null
+  exists?: boolean
+}
+
+export type StorageFolderSessions = {
+  folder: StorageFolder
+  sessions: OpencodeSessionBind[]
+  server_time?: string
 }
 
 export type StoragePayload = {

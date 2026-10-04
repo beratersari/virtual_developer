@@ -3585,3 +3585,43 @@ def build_opencode_workspace_detail(
         merge_requests=_merge_request_urls_for_jobs(matched),
         server_time=build_meta().server_time,
     )
+
+
+_FOLDER_SESSION_KIND_ORDER = {
+    "plan": 0,
+    "build": 1,
+    "test": 2,
+    "review": 3,
+    "": 4,
+}
+
+
+def build_storage_folder_sessions(name: str) -> Dict[str, Any]:
+    """OpenCode chats whose working directory is this temp clone."""
+    from src.dashboard.temp_storage import (
+        load_storage_folder,
+        working_directory_uses_folder,
+    )
+    from src.state.session_bind_store import session_bind_store as binds
+
+    folder = load_storage_folder(name)
+    root = Path(str(folder.get("path") or ""))
+    recs = [
+        rec
+        for rec in binds.list_binds(limit=None)
+        if _bind_is_opencode_workspace_session(rec)
+        and working_directory_uses_folder(
+            str(rec.get("working_directory") or ""), root
+        )
+    ]
+    recs.sort(key=lambda rec: str(rec.get("updated_at") or ""), reverse=True)
+    recs.sort(
+        key=lambda rec: _FOLDER_SESSION_KIND_ORDER.get(
+            str(rec.get("kind") or "").strip(), 9
+        )
+    )
+    return {
+        "folder": folder,
+        "sessions": [_bind_to_schema(rec).model_dump() for rec in recs],
+        "server_time": build_meta().server_time,
+    }

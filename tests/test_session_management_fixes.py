@@ -711,13 +711,13 @@ def test_sessions_page_lists_opencode_only_and_keeps_scope(
 
 
 def test_session_reset_copy_renders():
-    page = (WEB / "src/pages/sessions/SessionWorkspacePage.tsx").read_text(
+    page = (WEB / "src/pages/storage/StorageFolderPage.tsx").read_text(
         encoding="utf-8"
     )
     assert "resetBody(target)" in page
     assert "Reset ${target.session_id}?" in page
     assert "' · multi-repo'" in page
-    assert "s.bind_id" in page
+    assert "session.bind_id" in page
     npx = shutil.which("npx")
     if not npx:
         pytest.skip("npx is required to render the session reset copy")

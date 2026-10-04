@@ -1127,6 +1127,17 @@ def create_dashboard_app(
         result["server_time"] = build_meta().server_time
         return result
 
+    @app.get("/api/storage/folders/{name}/sessions")
+    def storage_folder_sessions(name: str) -> dict:
+        """OpenCode sessions whose working directory is this temp clone."""
+        from src.dashboard.service import build_storage_folder_sessions
+        from src.dashboard.temp_storage import TempStorageError
+
+        try:
+            return build_storage_folder_sessions(name)
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+
     @app.get("/api/opencode-sessions")
     def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
         """OpenCode sessions bound to repo + source + target, split by plan/build."""

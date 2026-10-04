@@ -132,6 +132,18 @@ export function issuePageName(
   return tab ? `${base} - ${tab}` : base
 }
 
+export function folderPageName(folder: {
+  issue_key?: string | null
+  summary?: string | null
+  name?: string | null
+}): string {
+  const key = collapse(folder.issue_key)
+  const title = collapse(folder.summary)
+  const name = collapse(folder.name)
+  if (key && title) return `${key} — ${title}`
+  return key || title || name || 'Folder'
+}
+
 export function workspacePageName(
   branch?: string | null,
   targetBranch?: string | null,
@@ -249,14 +261,13 @@ export function pageNameFromLocation(pathname: string, search = ''): string {
 
   if (head === 'schedules') return 'Existing issue'
 
-  if (head === 'sessions') {
-    if (parts.length === 1) return 'Sessions'
-    if (parts.length === 2 && pageNumber(parts[1])) return 'Sessions'
-    if (parts.length === 2) return 'Workspace'
+  if (head === 'sessions') return 'Storage and Sessions'
+
+  if (head === 'storage') {
+    if (parts.length === 1) return 'Storage and Sessions'
+    if (parts.length === 2) return collapse(parts[1]) || 'Folder'
     return 'Jobs'
   }
-
-  if (head === 'storage' && parts.length === 1) return 'Storage'
   if (head === 'poll' && parts.length === 1) return 'Board'
 
   if (head === 'settings') {

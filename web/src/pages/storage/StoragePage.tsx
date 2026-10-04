@@ -6,63 +6,14 @@ import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
-import { storageMrLabel } from './mrLabel'
+import { folderPageName } from '../../util/pageTitle'
+import { ReviewLinks } from './folderDisplay'
+import { storageFolderPath } from './folderPath'
 
 function folderHref(folder: StorageFolder): string | null {
   if (folder.job_id) return `/jobs/${encodeURIComponent(folder.job_id)}`
   if (folder.issue_key) return `/tasks/${encodeURIComponent(folder.issue_key)}`
   return null
-}
-
-function mrStateLabel(state?: string | null): string {
-  const raw = (state || '').trim().toLowerCase()
-  if (!raw) return '…'
-  if (raw === 'opened' || raw === 'open') return 'open'
-  if (raw === 'unknown') return 'unknown'
-  return raw
-}
-
-function folderReviews(folder: StorageFolder): { url: string; state?: string | null }[] {
-  const listed = (folder.merge_requests || [])
-    .map((row) => ({ url: (row.url || '').trim(), state: row.state }))
-    .filter((row) => row.url)
-  if (listed.length) return listed
-  const url = (folder.merge_request_url || '').trim()
-  if (!url) return []
-  return [{ url, state: folder.merge_request_state }]
-}
-
-function ReviewLinks({ folder }: { folder: StorageFolder }) {
-  const reviews = folderReviews(folder)
-  if (!reviews.length) return null
-  return (
-    <>
-      {reviews.map((review) => (
-        <span key={review.url} className="inline-flex items-baseline gap-1">
-          <a
-            href={review.url}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-xs text-accent-text hover:underline"
-          >
-            {storageMrLabel(review.url)}
-          </a>
-          <span className="vd-tag">
-            {mrStateLabel(review.state)}
-          </span>
-        </span>
-      ))}
-    </>
-  )
-}
-
-function folderLabel(folder: StorageFolder): string {
-  const key = folder.issue_key?.trim()
-  const title = folder.summary?.trim()
-  if (key && title) return `${key} — ${title}`
-  if (key) return key
-  if (title) return title
-  return folder.name
 }
 
 function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]): StoragePayload | null {
@@ -206,22 +157,30 @@ function StorageList({
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                className="vd-btn vd-btn-danger text-xs"
-                disabled={isDeleting || folder.in_use}
-                title={
-                  folder.in_use
-                    ? 'Clone is in use by a running job; stop the job first'
-                    : undefined
-                }
-                onClick={() => {
-                  if (folder.in_use || isDeleting) return
-                  onDelete(folder)
-                }}
-              >
-                {isDeleting ? `${pct}%` : folder.in_use ? 'In use' : 'Delete'}
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <Link
+                  to={storageFolderPath(folder.name)}
+                  className="vd-btn vd-btn-secondary text-xs no-underline"
+                >
+                  Details
+                </Link>
+                <button
+                  type="button"
+                  className="vd-btn vd-btn-danger text-xs"
+                  disabled={isDeleting || folder.in_use}
+                  title={
+                    folder.in_use
+                      ? 'Clone is in use by a running job; stop the job first'
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (folder.in_use || isDeleting) return
+                    onDelete(folder)
+                  }}
+                >
+                  {isDeleting ? `${pct}%` : folder.in_use ? 'In use' : 'Delete'}
+                </button>
+              </div>
             </li>
           )
         })}
@@ -321,8 +280,8 @@ export function StoragePage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        title="Storage"
-        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned.`}
+        title="Storage and Sessions"
+        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned. Details lists the OpenCode chats that use a folder.`}
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
@@ -375,7 +334,7 @@ export function StoragePage() {
         title="Force-delete this clone?"
         body={
           pending
-            ? `Permanently delete ${folderLabel(pending)}\n${pending.path}\n\nThis cannot be undone.`
+            ? `Permanently delete ${folderPageName(pending)}\n${pending.path}\n\nThis cannot be undone.`
             : ''
         }
         confirmLabel="Delete"

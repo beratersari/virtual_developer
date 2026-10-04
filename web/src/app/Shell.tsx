@@ -11,8 +11,11 @@ const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
   { to: '/analytics', label: 'Analytics', match: (p: string) => p.startsWith('/analytics') },
   { to: '/scheduled/jira', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
-  { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
-  { to: '/storage', label: 'Storage', match: (p: string) => p.startsWith('/storage') },
+  {
+    to: '/storage',
+    label: 'Storage and Sessions',
+    match: (p: string) => p.startsWith('/storage'),
+  },
   { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
   { to: '/settings/jira', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
 ] as const
@@ -56,15 +59,6 @@ function IconBoard() {
     </svg>
   )
 }
-function IconSession() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="3" y="2.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.9" />
-      <rect x="3" y="6.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.55" />
-      <rect x="3" y="10.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.35" />
-    </svg>
-  )
-}
 function IconDisk() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -89,7 +83,7 @@ function IconGear() {
   )
 }
 
-const ICONS = [IconJobs, IconChart, IconClock, IconSession, IconDisk, IconBoard, IconGear]
+const ICONS = [IconJobs, IconChart, IconClock, IconDisk, IconBoard, IconGear]
 
 function RecordBar() {
   const name = useRecordTitle()

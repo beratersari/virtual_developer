@@ -9,6 +9,7 @@ import {
 import { issueTabFromSection, issueTabPath } from './issues/issueTabUrl'
 import { jobsFilterFromPath, jobsFilterPath, jobsPageFromPath } from './jobs/jobsFilterUrl'
 import { listPageFromSegment, withListPage } from '../util/listPageUrl'
+import { storageFolderPath } from './storage/folderPath'
 import {
   canonicalSchedulePath,
   parseSchedulePath,
@@ -72,6 +73,8 @@ assert(jobsPageFromPath('/jobs/job_1') === 1, 'a job id is not a page number')
 assert(listPageFromSegment('0') === null, 'page 0 is not a page segment')
 assert(withListPage('/jobs/queue', 1) === '/jobs/queue', 'page 1 omits the number')
 assert(withListPage('/sessions', 4) === '/sessions/4', 'later pages append the number')
+assert(storageFolderPath('KAN-1') === '/storage/KAN-1', 'folder details path')
+assert(storageFolderPath('repo a') === '/storage/repo%20a', 'folder names are encoded')
 
 assert(analyticsPeriodFromParam(undefined) === '30d', 'analytics default is 30d')
 assert(analyticsPeriodFromParam('7d') === '7d', '7d period')

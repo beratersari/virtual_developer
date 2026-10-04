@@ -29,6 +29,7 @@ import type {
   SettingsPatch,
   SettingsPayload,
   StorageDeletesPayload,
+  StorageFolderSessions,
   StoragePayload,
   TaskDetail,
   QueuePayload,
@@ -624,6 +625,13 @@ export function fetchStorage(opts?: { refresh?: boolean; signal?: AbortSignal })
 
 export function fetchStorageDeletes(signal?: AbortSignal) {
   return request<StorageDeletesPayload>('/api/storage/deletes', { signal })
+}
+
+export function fetchStorageFolderSessions(name: string, signal?: AbortSignal) {
+  return request<StorageFolderSessions>(
+    `/api/storage/folders/${encodeURIComponent(name)}/sessions`,
+    { signal },
+  )
 }
 
 export function deleteTempFolder(name: string) {
