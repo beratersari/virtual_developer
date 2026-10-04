@@ -258,10 +258,91 @@ vd_dotenv_unquoted() {
   vd_dot_value="$s"
 }
 
-vd_dotenv_key() {
+# ${NAME} and ${NAME:-default} only. Earlier file keys win over the
+# environment. Substituted text is not expanded again.
+vd_dotenv_ref() {
+  local name="$1" has_default="$2" default="$3"
+  if [[ "${vd_dot_map["$name"]+set}" == set ]]; then
+    vd_dot_value="${vd_dot_map["$name"]}"
+    return 0
+  fi
+  if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [[ -n "${!name+x}" ]]; then
+    vd_dot_value="${!name}"
+    return 0
+  fi
+  if [[ "$has_default" == 1 ]]; then
+    vd_dot_value="$default"
+  else
+    vd_dot_value=""
+  fi
+  return 0
+}
+
+vd_dotenv_expand() {
+  local text="$1"
+  local out="" i=0 n c j k p name default matched closed
+  n=${#text}
+  while (( i < n )); do
+    c="${text:i:1}"
+    if [[ "$c" == '$' && $((i + 1)) -lt $n && "${text:i+1:1}" == '{' ]]; then
+      j=$((i + 2))
+      name=""
+      matched=0
+      while (( j < n )); do
+        c="${text:j:1}"
+        if [[ "$c" == '}' ]]; then
+          vd_dotenv_ref "$name" 0 ""
+          out+="$vd_dot_value"
+          i=$((j + 1))
+          matched=1
+          break
+        fi
+        if [[ "$c" == ':' ]]; then
+          closed=0
+          if (( j + 1 < n )) && [[ "${text:j+1:1}" == '-' ]]; then
+            p=$((j + 2))
+            default=""
+            while (( p < n )); do
+              c="${text:p:1}"
+              if [[ "$c" == '}' ]]; then
+                closed=1
+                break
+              fi
+              default+="$c"
+              p=$((p + 1))
+            done
+            if [[ "$closed" == 1 ]]; then
+              vd_dotenv_ref "$name" 1 "$default"
+              out+="$vd_dot_value"
+              i=$((p + 1))
+              matched=1
+            fi
+          fi
+          break
+        fi
+        name+="$c"
+        j=$((j + 1))
+      done
+      if [[ "$matched" == 1 ]]; then
+        continue
+      fi
+      out+='$'
+      i=$((i + 1))
+      continue
+    fi
+    out+="$c"
+    i=$((i + 1))
+  done
+  vd_dot_value="$out"
+}
+
+vd_dotenv_read() {
   local file="$1" key="$2"
   [[ -f "$file" ]] || return 1
-  local line trimmed rest name found=0 val=""
+  unset vd_dot_map 2>/dev/null || true
+  declare -gA vd_dot_map
+  local line trimmed rest name found=0 raw
+  vd_dot_value=""
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
     line="${line#$'\ufeff'}"
@@ -274,41 +355,53 @@ vd_dotenv_key() {
     [[ "$trimmed" == *=* ]] || continue
     name="${trimmed%%=*}"
     name="${name%"${name##*[![:space:]]}"}"
-    [[ "$name" == "$key" ]] || continue
     rest="${trimmed#*=}"
     rest="${rest#"${rest%%[![:space:]]*}"}"
     if [[ "${rest:0:1}" == '"' || "${rest:0:1}" == "'" ]]; then
-      if vd_dotenv_unquote "$rest"; then
-        found=1
-        val="$vd_dot_value"
-      fi
+      vd_dotenv_unquote "$rest" || continue
+      raw="$vd_dot_value"
     else
       vd_dotenv_unquoted "$rest"
+      raw="$vd_dot_value"
+    fi
+    vd_dotenv_expand "$raw"
+    vd_dot_map["$name"]="$vd_dot_value"
+    if [[ "$name" == "$key" ]]; then
       found=1
-      val="$vd_dot_value"
     fi
   done <"$file"
-  [[ "$found" -eq 1 ]] || return 1
-  printf '%s' "$val"
+  if [[ "$found" -ne 1 ]]; then
+    vd_dot_value=""
+    unset vd_dot_map 2>/dev/null || true
+    return 1
+  fi
+  vd_dot_value="${vd_dot_map["$key"]}"
+  unset vd_dot_map 2>/dev/null || true
+  return 0
+}
+
+vd_dotenv_key() {
+  vd_dotenv_read "$1" "$2" || return 1
+  printf '%s' "$vd_dot_value"
 }
 
 vd_dotenv_get() {
-  local val=""
-  if val="$(vd_dotenv_key "$1" "$2")"; then
-    printf '%s' "$val"
+  if vd_dotenv_read "$1" "$2"; then
+    printf '%s' "$vd_dot_value"
   fi
   return 0
 }
 
 vd_import_opencode_serve_auth() {
-  local file="$1" key val
+  local file="$1" key
   [[ -f "$file" ]] || return 0
   for key in OPENCODE_SERVER_PASSWORD OPENCODE_SERVER_USERNAME; do
     if [[ -n "${!key+x}" ]]; then
       continue
     fi
-    if val="$(vd_dotenv_key "$file" "$key")"; then
-      printf -v "$key" '%s' "$val"
+    vd_dot_value=""
+    if vd_dotenv_read "$file" "$key"; then
+      printf -v "$key" '%s' "$vd_dot_value"
       export "$key"
     fi
   done

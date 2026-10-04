@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -20,14 +21,23 @@ from pathlib import Path
 
 import pytest
 
-from src.config import _dotenv_quote
-from src.opencode_serve_supervisor import serve_auth_headers
+from src.config import _dotenv_quote, settings
+from src.opencode_serve_supervisor import (
+    default_listener_pids,
+    probe_healthy,
+    resolve_opencode_binary,
+    serve_auth_headers,
+    serve_command,
+    serve_env,
+)
+from src.process_kill import kill_pid
 
 ROOT = Path(__file__).resolve().parents[1]
 WIN = ROOT / "packaging" / "windows"
 LINUX = ROOT / "packaging" / "linux"
 SECRET = "launcher-secret-7f3a"
 OTHER_SECRET = "dotenv-other-secret"
+EXPAND = "expand-secret-7f3a"
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -633,3 +643,249 @@ def test_linux_import_prefers_an_empty_process_password(tmp_path: Path):
     assert code == 0, out
     assert out.strip().endswith("EMPTY"), out
     assert SECRET not in out
+
+
+def _dotenv_cases() -> list[tuple[str, str, str | None]]:
+    """Forms python-dotenv expands. The launchers must return the same bytes.
+
+    ``required`` is the daemon value where both dotenv 1.2.3 and 1.2.4 agree.
+    Inline ``KEY= # comment`` is left to ``dotenv_values`` because 1.2.4 treats
+    it as empty and 1.2.3 keeps the comment text.
+    """
+    return [
+        ("inline-comment", "OPENCODE_SERVER_PASSWORD= # comment\n", None),
+        (
+            "file-interpolation",
+            f"VD_DOTENV_FILE={EXPAND}\nOPENCODE_SERVER_PASSWORD=${{VD_DOTENV_FILE}}\n",
+            EXPAND,
+        ),
+        (
+            "process-interpolation",
+            "OPENCODE_SERVER_PASSWORD=${VD_DOTENV_OTHER}\n",
+            EXPAND,
+        ),
+        (
+            "double-quoted",
+            'OPENCODE_SERVER_PASSWORD="${VD_DOTENV_OTHER}"\n',
+            EXPAND,
+        ),
+        (
+            "single-quoted",
+            "OPENCODE_SERVER_PASSWORD='${VD_DOTENV_OTHER}'\n",
+            EXPAND,
+        ),
+        (
+            "default",
+            f"OPENCODE_SERVER_PASSWORD=${{VD_DOTENV_MISSING:-{EXPAND}}}\n",
+            EXPAND,
+        ),
+        ("trailing-newline", 'OPENCODE_SERVER_PASSWORD="end\\n"\n', "end\n"),
+    ]
+
+
+def _prepare_dotenv_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VD_DOTENV_OTHER", EXPAND)
+    monkeypatch.delenv("VD_DOTENV_FILE", raising=False)
+    monkeypatch.delenv("VD_DOTENV_MISSING", raising=False)
+
+
+def _daemon_password(path: Path, required: str | None) -> str:
+    pytest.importorskip("dotenv")
+    from dotenv import dotenv_values
+
+    value = dotenv_values(path).get("OPENCODE_SERVER_PASSWORD")
+    assert value is not None, path.read_text(encoding="utf-8")
+    if required is not None:
+        assert value == required
+    return value
+
+
+def _b64(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def test_windows_dotenv_reader_matches_daemon_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The serve launcher must load the same password the daemon will send.
+
+    python-dotenv expands ``${NAME}`` from the file and the process environment,
+    including ``${NAME:-default}`` and both quote styles. A launcher that keeps
+    the literal starts serve with a different secret. The daemon then replaces
+    that process, and the next start-backend health check is HTTP 401.
+    """
+    ps = _powershell()
+    if ps is None:
+        pytest.skip("powershell is not available")
+    _prepare_dotenv_env(monkeypatch)
+    probe = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{(WIN / 'ServeAuth.ps1').as_posix()}'\n"
+        "$got = Read-DotEnvKey -Path $args[0] -Key 'OPENCODE_SERVER_PASSWORD'\n"
+        "if (-not $got.Found) { Write-Output 'MISSING' } else {\n"
+        "  Write-Output ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$got.Value)))\n"
+        "}\n"
+    )
+    script = tmp_path / "read.ps1"
+    script.write_text(probe, encoding="utf-8")
+    mismatches: list[str] = []
+    for label, text, required in _dotenv_cases():
+        path = tmp_path / f"{label}.env"
+        path.write_bytes(text.encode("utf-8"))
+        expected = _daemon_password(path, required)
+        code, out, _elapsed = _run(
+            [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), str(path)],
+            _env("OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME", VD_DOTENV_OTHER=EXPAND),
+            20,
+        )
+        assert code == 0, out
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        got = lines[-1] if lines else ""
+        want = _b64(expected)
+        if got != want:
+            mismatches.append(label)
+    assert not mismatches, mismatches
+
+
+def test_linux_import_matches_daemon_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Linux import must keep the daemon's password, including a trailing newline.
+
+    ``vd_import_opencode_serve_auth`` reads the value with ``$(...)``, which
+    strips trailing newlines before the serve process inherits it.
+    """
+    if _bash() is None:
+        pytest.skip("bash is not available")
+    _prepare_dotenv_env(monkeypatch)
+    mismatches: list[str] = []
+    for label, text, required in _dotenv_cases():
+        path = tmp_path / f"{label}.env"
+        path.write_bytes(text.encode("utf-8"))
+        expected = _daemon_password(path, required)
+        code, out, _elapsed = _bash_script(
+            "unset OPENCODE_SERVER_PASSWORD\n"
+            "unset OPENCODE_SERVER_USERNAME\n"
+            'vd_import_opencode_serve_auth "$VD_ENV_FILE"\n'
+            "printf '%s' \"$OPENCODE_SERVER_PASSWORD\" | base64 | tr -d '\\n\\r'\n",
+            {"VD_ENV_FILE": str(path)},
+        )
+        assert code == 0, out
+        got = out.strip().splitlines()[-1].strip()
+        want = _b64(expected)
+        if got != want:
+            mismatches.append(label)
+        assert EXPAND not in out
+    assert not mismatches, mismatches
+
+
+@contextmanager
+def _real_password_serve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, password: str):
+    """One OpenCode serve bound to a free port, with the daemon's password."""
+    binary = resolve_opencode_binary()
+    if not binary:
+        pytest.skip("opencode is not installed")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    monkeypatch.setattr(settings, "opencode_serve_url", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", password)
+    monkeypatch.delenv("OPENCODE_SERVER_USERNAME", raising=False)
+    work = tmp_path / "serve-cwd"
+    work.mkdir()
+    proc = subprocess.Popen(
+        serve_command(binary, "127.0.0.1", port),
+        cwd=str(work),
+        env=serve_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=0x08000000 | 0x00000200 if os.name == "nt" else 0,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if probe_healthy():
+                break
+            if proc.poll() is not None:
+                pytest.fail("opencode serve exited before it accepted the daemon password")
+            time.sleep(0.2)
+        else:
+            pytest.fail("opencode serve did not accept the daemon password")
+        yield port
+    finally:
+        kill_pid(int(proc.pid))
+        for pid in default_listener_pids(port):
+            if pid != int(proc.pid):
+                kill_pid(pid)
+
+
+def test_real_serve_accepts_the_launcher_password_from_the_same_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """start-backend must accept the serve the daemon would start from this .env.
+
+    The file stores the password as a ``${}`` reference. The daemon expands it.
+    Ensure-OpencodeServe.ps1 and ``vd_wait_serve_health`` send whatever they
+    parsed. A 401 makes start-backend exit before the dashboard process starts.
+    """
+    if _powershell() is None and _bash() is None:
+        pytest.skip("no launcher shell")
+    _prepare_dotenv_env(monkeypatch)
+    text = f"VD_DOTENV_FILE={EXPAND}\nOPENCODE_SERVER_PASSWORD=${{VD_DOTENV_FILE}}\n"
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(text.encode("utf-8"))
+    password = _daemon_password(env_file, EXPAND)
+    failures: list[str] = []
+    with _real_password_serve(tmp_path, monkeypatch, password) as port:
+        ps = _powershell()
+        if ps is not None:
+            launcher_env = _env(
+                "OPENCODE_SERVER_PASSWORD",
+                "OPENCODE_SERVER_USERNAME",
+                VD_DOTENV_OTHER=EXPAND,
+            )
+            code, out, _elapsed = _run(
+                [
+                    ps,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(WIN / "Ensure-OpencodeServe.ps1"),
+                    "-ProjectDir",
+                    str(tmp_path),
+                    "-ServeHost",
+                    "127.0.0.1",
+                    "-ServePort",
+                    str(port),
+                    "-TimeoutSec",
+                    "15",
+                ],
+                launcher_env,
+                25,
+            )
+            if code != 0:
+                failures.append(f"windows-exit-{code}")
+            assert EXPAND not in out
+        if _bash() is not None:
+            code, out, _elapsed = _bash_script(
+                "unset OPENCODE_SERVER_PASSWORD\n"
+                "unset OPENCODE_SERVER_USERNAME\n"
+                'vd_import_opencode_serve_auth "$VD_ENV_FILE"\n'
+                'vd_wait_serve_health "$VD_URL" 8\n'
+                "printf 'RC:%s\\n' $?\n",
+                {
+                    "VD_ENV_FILE": str(env_file),
+                    "VD_URL": f"http://127.0.0.1:{port}/global/health",
+                },
+                timeout=20,
+            )
+            status = ""
+            for line in out.splitlines():
+                if line.startswith("RC:"):
+                    status = line[3:].strip()
+            if code != 0 or status != "0":
+                failures.append(f"linux-status-{status or code}")
+            assert EXPAND not in out
+    assert not failures, failures

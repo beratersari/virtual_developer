@@ -75,6 +75,89 @@ function ConvertFrom-DotEnvUnquoted {
     return $cut.TrimEnd()
 }
 
+# ${NAME} and ${NAME:-default} only. Earlier file keys win over the process
+# environment. Substituted text is not expanded again.
+function Resolve-DotEnvReference {
+    param(
+        [AllowEmptyString()][string]$Name,
+        [System.Collections.Hashtable]$Known,
+        [bool]$HasDefault,
+        [AllowEmptyString()][string]$DefaultValue
+    )
+    if ($null -ne $Known -and $Known.ContainsKey($Name)) {
+        return [string]$Known[$Name]
+    }
+    if ($Name -cmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+        try {
+            $item = Get-Item -LiteralPath ("Env:" + $Name) -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                return [string]$item.Value
+            }
+        } catch {
+            # The provider rejected the name. Treat it as unset.
+        }
+    }
+    if ($HasDefault) { return [string]$DefaultValue }
+    return ""
+}
+
+function Expand-DotEnvReferences {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [System.Collections.Hashtable]$Known
+    )
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    $sb = New-Object System.Text.StringBuilder
+    $i = 0
+    $n = $Text.Length
+    while ($i -lt $n) {
+        $matched = $false
+        if ($Text[$i] -eq '$' -and ($i + 1) -lt $n -and $Text[$i + 1] -eq '{') {
+            $j = $i + 2
+            $nameSb = New-Object System.Text.StringBuilder
+            while ($j -lt $n) {
+                $c = $Text[$j]
+                if ($c -eq '}') {
+                    $piece = Resolve-DotEnvReference -Name $nameSb.ToString() -Known $Known -HasDefault $false -DefaultValue ""
+                    [void]$sb.Append([string]$piece)
+                    $i = $j + 1
+                    $matched = $true
+                    break
+                }
+                if ($c -eq ':') {
+                    $closed = $false
+                    if (($j + 1) -lt $n -and $Text[$j + 1] -eq '-') {
+                        $k = $j + 2
+                        $defSb = New-Object System.Text.StringBuilder
+                        while ($k -lt $n) {
+                            $d = $Text[$k]
+                            if ($d -eq '}') {
+                                $closed = $true
+                                break
+                            }
+                            [void]$defSb.Append($d)
+                            $k++
+                        }
+                        if ($closed) {
+                            $piece = Resolve-DotEnvReference -Name $nameSb.ToString() -Known $Known -HasDefault $true -DefaultValue $defSb.ToString()
+                            [void]$sb.Append([string]$piece)
+                            $i = $k + 1
+                            $matched = $true
+                        }
+                    }
+                    break
+                }
+                [void]$nameSb.Append($c)
+                $j++
+            }
+        }
+        if ($matched) { continue }
+        [void]$sb.Append($Text[$i])
+        $i++
+    }
+    return $sb.ToString()
+}
+
 function Read-DotEnvKey {
     param([string]$Path, [string]$Key)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
@@ -83,8 +166,8 @@ function Read-DotEnvKey {
     if ($text.Length -gt 0 -and [int]$text[0] -eq 0xFEFF) {
         $text = $text.Substring(1)
     }
+    $known = New-Object System.Collections.Hashtable -ArgumentList ([StringComparer]::Ordinal)
     $found = $false
-    $value = ""
     foreach ($raw in ($text -split "`n", -1)) {
         $line = $raw.TrimEnd([char]13).TrimStart()
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
@@ -96,23 +179,26 @@ function Read-DotEnvKey {
         $eq = $line.IndexOf([char]61)
         if ($eq -lt 1) { continue }
         $name = $line.Substring(0, $eq).Trim()
-        if ($name -ne $Key) { continue }
         $rest = $line.Substring($eq + 1).TrimStart()
+        $decoded = ""
         if ($rest.Length -gt 0 -and ($rest[0] -eq $script:DotEnvDq -or $rest[0] -eq $script:DotEnvSq)) {
             $ok = $false
             $parsed = ConvertFrom-DotEnvQuoted -Text $rest -Ok ([ref]$ok)
             if (-not $ok) { continue }
-            $found = $true
-            $value = [string]$parsed
+            $decoded = [string]$parsed
         } else {
+            $decoded = [string](ConvertFrom-DotEnvUnquoted $rest)
+        }
+        $expanded = [string](Expand-DotEnvReferences -Text $decoded -Known $known)
+        $known[$name] = $expanded
+        if ([string]::Equals($name, $Key, [System.StringComparison]::Ordinal)) {
             $found = $true
-            $value = ConvertFrom-DotEnvUnquoted $rest
         }
     }
     if (-not $found) {
         return [pscustomobject]@{ Found = $false; Value = "" }
     }
-    return [pscustomobject]@{ Found = $true; Value = [string]$value }
+    return [pscustomobject]@{ Found = $true; Value = [string]$known[$Key] }
 }
 
 function Import-OpencodeServeAuth {
