@@ -885,6 +885,7 @@ export type StoragePayload = {
   sessions_label?: string
   sizes_pending?: boolean
   mr_states_pending?: boolean
+  sessions_without_folder?: OpencodeSessionBind[]
   server_time?: string
 }
 

@@ -15,6 +15,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Fixed
 
+- Storage and Sessions lists OpenCode chats whose clone folder was deleted. Age delete keeps the session so a later job can resume it. Those chats stay on the page, with Reset, after the folder is gone.
 - Restarting Yaver while an agent save is still waiting reloads OpenCode before the next job starts. The running serve is kept only until that restart; the saved agents are not left behind in the old process.
 - Saving or creating an agent while a job is running leaves the jobs that are still queued where they are. Those jobs start after OpenCode reloads, so they see the new agent. The running job keeps its current serve process.
 - A failed OpenCode reload leaves queued jobs queued. They start only after a later reload succeeds and the new process is using the saved agents. The queue also stays put when that reload state cannot be read.

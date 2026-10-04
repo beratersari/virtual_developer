@@ -51,6 +51,7 @@ from src.dashboard.service import (
     settings_response,
     build_task_detail,
     build_tasks,
+    opencode_sessions_without_folder,
     collect_job_chat,
     collect_job_text_artifacts,
     build_queue,
@@ -1100,6 +1101,9 @@ def create_dashboard_app(
             payload = build_storage_view()
         except TempStorageError as e:
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        payload["sessions_without_folder"] = opencode_sessions_without_folder(
+            list(payload.get("folders") or [])
+        )
         payload["server_time"] = build_meta().server_time
         return payload
 

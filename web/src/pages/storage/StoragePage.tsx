@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteTempFolder, fetchStorage, fetchStorageDeletes, isAbortError } from '../../api/client'
+import { deleteTempFolder, fetchStorage, fetchStorageDeletes, isAbortError, resetOpencodeSession } from '../../api/client'
 import { usePageLoad } from '../../api/pageLoad'
-import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
+import type { OpencodeSessionBind, StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { folderPageName } from '../../util/pageTitle'
+import { kindLabel, resetBody } from '../sessions/sessionResetCopy'
 import { ReviewLinks } from './folderDisplay'
 import { storageFolderPath } from './folderPath'
+import { SessionRow } from './StorageFolderPage'
 
 function folderHref(folder: StorageFolder): string | null {
   if (folder.job_id) return `/jobs/${encodeURIComponent(folder.job_id)}`
@@ -190,10 +192,47 @@ function StorageList({
   )
 }
 
+function SessionsWithoutFolder({
+  sessions,
+  onReset,
+}: {
+  sessions: OpencodeSessionBind[]
+  onReset: (bindId: string) => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+          Sessions without a folder
+        </h2>
+        <div className="text-xs text-text-secondary">
+          {sessions.length} session{sessions.length === 1 ? '' : 's'}
+        </div>
+      </div>
+      <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
+        {sessions.map((session) => (
+          <SessionRow
+            key={session.bind_id}
+            session={session}
+            folderName=""
+            showDirectory
+            onReset={onReset}
+          />
+        ))}
+        {sessions.length === 0 && (
+          <li className="py-6 text-sm text-text-muted">No OpenCode session is missing a folder.</li>
+        )}
+      </ul>
+    </div>
+  )
+}
+
 export function StoragePage() {
   const [data, setData] = useState<StoragePayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<StorageFolder | null>(null)
+  const [resetId, setResetId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const flight = usePageLoad()
 
   const reload = useCallback(async (refresh = false) => {
@@ -276,12 +315,15 @@ export function StoragePage() {
     ageDays && ageDays > 0
       ? ` Unused folders older than ${ageDays} days are deleted hourly.`
       : ' Automatic age delete is off.'
+  const loose = data?.sessions_without_folder || []
+  const resetTarget = loose.find((session) => session.bind_id === resetId)
+  const resetKind = kindLabel(resetTarget?.kind)
 
   return (
     <section className="space-y-5">
       <PageHeader
         title="Storage and Sessions"
-        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned. Details lists the OpenCode chats that use a folder.`}
+        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned. Details lists the OpenCode chats that use a folder. Chats whose folder was deleted stay listed below.`}
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
@@ -329,6 +371,12 @@ export function StoragePage() {
         items={data?.folders || []}
         onDelete={(folder) => setPending(folder)}
       />
+      {data && (
+        <SessionsWithoutFolder
+          sessions={data.sessions_without_folder || []}
+          onReset={setResetId}
+        />
+      )}
       <ConfirmDialog
         open={Boolean(pending)}
         title="Force-delete this clone?"
@@ -341,6 +389,28 @@ export function StoragePage() {
         danger
         onConfirm={onDelete}
         onCancel={() => setPending(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(resetId)}
+        title={resetTarget ? `Reset ${resetTarget.session_id}?` : `Reset this ${resetKind} session?`}
+        body={resetTarget ? resetBody(resetTarget) : 'Next job on this bind starts a new session.'}
+        confirmLabel="Reset session"
+        danger
+        busy={busy}
+        onConfirm={async () => {
+          if (!resetId) return
+          setBusy(true)
+          try {
+            await resetOpencodeSession(resetId)
+            setResetId(null)
+            await reload()
+          } catch (e) {
+            setError(e instanceof Error ? e.message : 'Reset failed')
+          } finally {
+            setBusy(false)
+          }
+        }}
+        onCancel={() => setResetId(null)}
       />
     </section>
   )

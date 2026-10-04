@@ -3625,3 +3625,31 @@ def build_storage_folder_sessions(name: str) -> Dict[str, Any]:
         "sessions": [_bind_to_schema(rec).model_dump() for rec in recs],
         "server_time": build_meta().server_time,
     }
+
+
+def opencode_sessions_without_folder(
+    folders: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """OpenCode chats that no current storage folder can open.
+
+    Age delete removes the clone and keeps the bind so a later job can
+    resume. Those chats are not under any folder row. Claude and Codex
+    stay on the job Transcript tab. Newest ``updated_at`` stays first.
+    """
+    from src.dashboard.temp_storage import working_directory_uses_folder
+    from src.state.session_bind_store import session_bind_store as binds
+
+    roots: List[Path] = []
+    for folder in folders:
+        text = str((folder or {}).get("path") or "").strip()
+        if text:
+            roots.append(Path(text))
+    out: List[Dict[str, Any]] = []
+    for rec in binds.list_binds(limit=None):
+        if not _bind_is_opencode_workspace_session(rec):
+            continue
+        wd = str(rec.get("working_directory") or "")
+        if any(working_directory_uses_folder(wd, root) for root in roots):
+            continue
+        out.append(_bind_to_schema(rec).model_dump())
+    return out

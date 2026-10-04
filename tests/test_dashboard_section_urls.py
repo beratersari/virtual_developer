@@ -90,6 +90,9 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     storage = _read("src/pages/storage/StoragePage.tsx")
     assert "to={storageFolderPath(folder.name)}" in storage
     assert "Details" in storage
+    assert "Sessions without a folder" in storage
+    assert "sessions_without_folder" in storage
+    assert "showDirectory" in storage
     shell = _read("src/app/Shell.tsx")
     assert "label: 'Storage and Sessions'" in shell
     assert "label: 'Sessions'" not in shell
