@@ -5948,6 +5948,44 @@ class JobProcessor:
             )
         return n
 
+    async def _serve_reload_allows_new_jobs(self) -> bool:
+        """Hold new claims until a pending agent reload has succeeded.
+
+        Deferred means the files are saved and a live job, or a restart
+        already in progress, is keeping the old process. Reloading means
+        that restart is running now. Failed means the restart ran and the
+        saved agents are not loaded. All three leave the queue where it is.
+        An unreadable reload flag does too. The next job has to open its
+        session on the reloaded process.
+        """
+        from src.opencode_serve_supervisor import supervisor
+
+        try:
+            outstanding = bool(supervisor.reload_outstanding())
+        except Exception as exc:
+            logger.warning(f"OpenCode reload state could not be read: {exc}")
+            return False
+        if not outstanding:
+            return True
+        try:
+            result = await asyncio.to_thread(supervisor.apply_pending_reload)
+        except Exception as exc:
+            logger.warning(f"OpenCode agent reload failed: {exc}")
+            return False
+        status = str((result or {}).get("status") or "")
+        try:
+            still = bool(supervisor.reload_outstanding())
+        except Exception:
+            still = True
+        if still or status in {"deferred", "reloading", "failed"}:
+            message = str(
+                (result or {}).get("message")
+                or "OpenCode is reloading saved agents."
+            )
+            logger.info(f"Queue left waiting: {message}")
+            return False
+        return True
+
     async def dispatch_queue(self) -> int:
         """Claim and start every currently runnable queue item."""
         started = 0
@@ -5968,6 +6006,13 @@ class JobProcessor:
                 )
             while True:
                 self._queue_dispatch_again = False
+                if not await self._serve_reload_allows_new_jobs():
+                    # A kick during the reload check means a job finished or
+                    # a row was added. Try once more. The reload may have
+                    # succeeded, or it may still be deferred or failed.
+                    if self._queue_dispatch_again:
+                        continue
+                    return started
                 max_jobs = max(1, int(settings.max_concurrent_jobs or 1))
                 blocked = set(self.list_live_processing_keys())
                 item = self.queue_store.claim_next(

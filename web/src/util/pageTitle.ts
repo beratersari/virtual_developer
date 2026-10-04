@@ -132,6 +132,18 @@ export function issuePageName(
   return tab ? `${base} - ${tab}` : base
 }
 
+export function folderPageName(folder: {
+  issue_key?: string | null
+  summary?: string | null
+  name?: string | null
+}): string {
+  const key = collapse(folder.issue_key)
+  const title = collapse(folder.summary)
+  const name = collapse(folder.name)
+  if (key && title) return `${key} — ${title}`
+  return key || title || name || 'Folder'
+}
+
 export function workspacePageName(
   branch?: string | null,
   targetBranch?: string | null,
@@ -167,6 +179,43 @@ function scheduleName(parts: string[]): string {
   if (parsed.mode === 'pr') return 'Existing PR'
   const base = parsed.mode === 'new' ? 'New issue' : 'Existing issue'
   return parsed.tracker === 'azure' ? `${base} - Azure work item` : base
+}
+
+/**
+ * Name for the record bar. List pages keep their heading, so this stays empty.
+ * A placeholder such as "Job" stays empty until the issue name is known.
+ */
+export function recordTitle(visible: string, fallback: string): string | null {
+  if (!isRecordPlaceholder(fallback)) return null
+  if (isRecordPlaceholder(visible)) return null
+  return visible
+}
+
+/** The open record's name wins. A leftover name from another address does not. */
+export function shownPageName(
+  fallback: string,
+  override: { path: string; name: string } | null,
+  pathname: string,
+): string {
+  return override && override.path === pathname ? override.name : fallback
+}
+
+/** Tab text without the "Yaver - " prefix. A placeholder yields to a real title already on the document. */
+export function visiblePageNameFrom(
+  name: string,
+  currentTitle: string,
+  seenReal: boolean,
+): string {
+  const title = resolveDocumentTitle(currentTitle, name, seenReal).title
+  const prefix = 'Yaver - '
+  if (title.startsWith(prefix)) return title.slice(prefix.length)
+  return collapse(name) || name
+}
+
+/** Same name the browser tab is showing for this page. */
+export function visiblePageName(name: string): string {
+  if (typeof document === 'undefined') return name
+  return visiblePageNameFrom(name, document.title, seenRealTitle)
 }
 
 /** Name after "Yaver - ". Record pages stay generic until the page supplies the title. */
@@ -212,14 +261,13 @@ export function pageNameFromLocation(pathname: string, search = ''): string {
 
   if (head === 'schedules') return 'Existing issue'
 
-  if (head === 'sessions') {
-    if (parts.length === 1) return 'Sessions'
-    if (parts.length === 2 && pageNumber(parts[1])) return 'Sessions'
-    if (parts.length === 2) return 'Workspace'
+  if (head === 'sessions') return 'Storage and Sessions'
+
+  if (head === 'storage') {
+    if (parts.length === 1) return 'Storage and Sessions'
+    if (parts.length === 2) return collapse(parts[1]) || 'Folder'
     return 'Jobs'
   }
-
-  if (head === 'storage' && parts.length === 1) return 'Storage'
   if (head === 'poll' && parts.length === 1) return 'Board'
 
   if (head === 'settings') {

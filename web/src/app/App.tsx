@@ -5,8 +5,8 @@ import { IssueDetailPage } from '../pages/issues/IssueDetailPage'
 import { JobsAtJobOrPage, JobsPage } from '../pages/jobs/JobsPage'
 import { PollPage } from '../pages/poll/PollPage'
 import { SchedulesPage } from '../pages/schedules/SchedulesPage'
-import { SessionsAtId, SessionsPage } from '../pages/sessions/SessionsPage'
 import { SettingsPage } from '../pages/settings/SettingsPage'
+import { StorageFolderPage } from '../pages/storage/StorageFolderPage'
 import { StoragePage } from '../pages/storage/StoragePage'
 import { DashboardAuthGate } from '../auth/DashboardAuthGate'
 import { LiveProvider } from './LiveProvider'
@@ -37,9 +37,10 @@ export default function App() {
             <Route path="/poll" element={<PollPage />} />
             <Route path="/scheduled/:mode?/:tracker?/:page?" element={<SchedulesPage />} />
             <Route path="/schedules" element={<Navigate to="/scheduled/jira" replace />} />
-            <Route path="/sessions" element={<SessionsPage />} />
-            <Route path="/sessions/:workspaceId" element={<SessionsAtId />} />
+            <Route path="/sessions/*" element={<Navigate to="/storage" replace />} />
+            <Route path="/sessions" element={<Navigate to="/storage" replace />} />
             <Route path="/storage" element={<StoragePage />} />
+            <Route path="/storage/:folderName" element={<StorageFolderPage />} />
             <Route path="/settings/:section?" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/jobs" replace />} />
           </Route>

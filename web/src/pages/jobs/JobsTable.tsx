@@ -2,9 +2,16 @@ import type { JobItem } from '../../api/types'
 import { jobChannelLabel } from '../../util/jobChannel'
 import { sortJobsByCreatedAt } from '../../util/jobs'
 import { jobIsDeletable, statusToneClass } from '../../util/status'
-import { resolveJobWorker, workerLabel } from '../../util/worker'
+import { resolveJobWorker, workerLabel, type WorkerId } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { StatusBadge } from '../../ui/StatusBadge'
+
+function usualWorker(fallback: string): WorkerId {
+  const name = fallback.trim().toLowerCase()
+  if (name === 'codex' || name === 'openai' || name === 'openai-codex') return 'codex'
+  if (name === 'claude' || name === 'claude-code' || name === 'anthropic') return 'claude'
+  return 'opencode'
+}
 
 export function JobsTable({
   jobs,
@@ -41,6 +48,7 @@ export function JobsTable({
         const canSelect = jobIsDeletable(j.status, Boolean(j.live))
         const isChecked = Boolean(selectedIds?.has(j.job_id))
         const channel = jobChannelLabel(j)
+        const worker = resolveJobWorker(j, fallbackWorker)
         return (
           <div
             key={j.job_id}
@@ -62,34 +70,32 @@ export function JobsTable({
                   {j.issue_key}
                 </span>
                 {!channel && (j.source || 'jira') === 'gitlab' && (
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     GitLab
                   </span>
                 )}
                 {!channel &&
                   ((j.source || 'jira') === 'azure' ||
                     (j.source || 'jira') === 'azure_workitem') && (
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     Azure
                   </span>
                 )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
                 {channel && (
-                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  <span className="vd-tag">
                     {channel}
                   </span>
                 )}
-                <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-                  {workerLabel(resolveJobWorker(j, fallbackWorker))}
-                </span>
+                {worker !== usualWorker(fallbackWorker) && (
+                  <span className="vd-tag">{workerLabel(worker)}</span>
+                )}
               </div>
               <div className={`mt-1 truncate text-text ${compact ? 'text-sm' : 'text-[15px]'}`}>
                 {j.summary || 'Untitled run'}
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-text-muted">
-                <span>{j.job_id.length > 22 ? `${j.job_id.slice(0, 20)}…` : j.job_id}</span>
-                {j.workflow_type && !channel && <span>{j.workflow_type}</span>}
                 {j.agent && <span>{j.agent}</span>}
                 <span>{j.started_at ?? 'not started'}</span>
                 {j.merge_request_url && (

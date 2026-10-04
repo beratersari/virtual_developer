@@ -34,12 +34,11 @@ export function resetBody(session: {
   const branch = `${session.branch}${session.target_branch ? ` → ${session.target_branch}` : ''}`
   const repos = multiRepoLabel(session.scope)
   const clone = cloneFolder(session.working_directory)
-  const lines = [`Drops the resume pointer for ${session.session_id} only.`]
+  const lines: string[] = []
   if (repos) lines.push(`Multi-repo: ${repos}.`)
   if (clone) lines.push(`Clone folder: ${clone}.`)
   lines.push(
     `The next ${kind} job that would have resumed ${session.session_id} starts a new session. Other sessions on ${branch} stay.`,
   )
-  lines.push('Does not delete OpenCode’s own history.')
   return lines.join('\n\n')
 }

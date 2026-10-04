@@ -50,8 +50,11 @@ def test_document_title_matches_the_open_page():
     assert document_title("/analytics/7d") == "Yaver - Analytics - 7 days"
     assert document_title("/analytics") == "Yaver - Analytics"
     assert document_title("/poll") == "Yaver - Board"
-    assert document_title("/storage") == "Yaver - Storage"
-    assert document_title("/sessions") == "Yaver - Sessions"
+    assert document_title("/storage") == "Yaver - Storage and Sessions"
+    assert document_title("/storage/repo_abc") == "Yaver - repo_abc"
+    assert document_title("/storage/a/b") == "Yaver - Jobs"
+    assert document_title("/sessions") == "Yaver - Storage and Sessions"
+    assert document_title("/sessions/osw_1") == "Yaver - Storage and Sessions"
     assert (
         document_title("/analytics/reviews", "origin=ours&state=opened")
         == "Yaver - Opened by us · open"
@@ -130,10 +133,10 @@ def test_pages_publish_the_title_they_show():
     assert "usePageTitle(jobPageName(" in job
     issue = (WEB / "src" / "pages" / "issues" / "IssueDetailPage.tsx").read_text(encoding="utf-8")
     assert "usePageTitle(" in issue and "issuePageName(null, null, section)" in issue
-    session = (WEB / "src" / "pages" / "sessions" / "SessionWorkspacePage.tsx").read_text(
+    folder = (WEB / "src" / "pages" / "storage" / "StorageFolderPage.tsx").read_text(
         encoding="utf-8"
     )
-    assert "usePageTitle(workspacePageName(" in session
+    assert "usePageTitle(folder ? folderPageName(folder) : name || 'Folder')" in folder
     gate = (WEB / "src" / "auth" / "DashboardAuthGate.tsx").read_text(encoding="utf-8")
     assert "applyDocumentTitle('Sign in')" in gate
     reviews = (WEB / "src" / "pages" / "analytics" / "AnalyticsReviewsPage.tsx").read_text(

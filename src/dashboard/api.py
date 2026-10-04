@@ -51,6 +51,7 @@ from src.dashboard.service import (
     settings_response,
     build_task_detail,
     build_tasks,
+    opencode_sessions_without_folder,
     collect_job_chat,
     collect_job_text_artifacts,
     build_queue,
@@ -1100,6 +1101,9 @@ def create_dashboard_app(
             payload = build_storage_view()
         except TempStorageError as e:
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        payload["sessions_without_folder"] = opencode_sessions_without_folder(
+            list(payload.get("folders") or [])
+        )
         payload["server_time"] = build_meta().server_time
         return payload
 
@@ -1126,6 +1130,17 @@ def create_dashboard_app(
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
         result["server_time"] = build_meta().server_time
         return result
+
+    @app.get("/api/storage/folders/{name}/sessions")
+    def storage_folder_sessions(name: str) -> dict:
+        """OpenCode sessions whose working directory is this temp clone."""
+        from src.dashboard.service import build_storage_folder_sessions
+        from src.dashboard.temp_storage import TempStorageError
+
+        try:
+            return build_storage_folder_sessions(name)
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
     @app.get("/api/opencode-sessions")
     def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
@@ -1480,19 +1495,50 @@ def create_dashboard_app(
         """Dashboard settings, including the stored project list and repo sets."""
         return settings_response()
 
+    @app.get("/api/opencode-serve")
+    def opencode_serve_health() -> dict:
+        """Serve health for the sidebar. A failed read is not healthy."""
+        from src.logger import logger
+        from src.opencode_serve_supervisor import supervisor
+
+        try:
+            serve = supervisor.status()
+        except Exception as exc:
+            logger.warning(f"OpenCode serve status could not be read: {exc}")
+            serve = None
+        if not isinstance(serve, dict):
+            return {
+                "status": "unavailable",
+                "message": "OpenCode serve status is unavailable.",
+            }
+        status = str(serve.get("status") or "").strip().lower() or "unavailable"
+        message = str(serve.get("message") or "").strip()
+        if not message and status == "unavailable":
+            message = "OpenCode serve status is unavailable."
+        return {"status": status, "message": message}
+
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
         from src.opencode_agents import list_agents, sync_status
+        from src.opencode_serve_supervisor import supervisor
 
         status = sync_status()
-        return {"agents": list_agents(), **status}
+        try:
+            serve = supervisor.status()
+        except Exception:
+            serve = {
+                "status": "down",
+                "message": "OpenCode serve status is unavailable.",
+            }
+        return {"agents": list_agents(), **status, "serve": serve}
 
     @app.post("/api/opencode-agents/sync")
     def opencode_agents_sync() -> dict:
-        from src.opencode_agents import AgentFileError, sync_agents
+        from src.opencode_agents import AgentFileError
+        from src.opencode_serve_supervisor import publish_catalog
 
         try:
-            return sync_agents()
+            return publish_catalog()
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1509,23 +1555,42 @@ def create_dashboard_app(
     @app.put("/api/opencode-agents/{name}")
     def opencode_agent_save(name: str, body: AgentWrite) -> dict:
         from src.opencode_agents import AgentFileError, write_agent
+        from src.opencode_serve_supervisor import publish_catalog
 
         try:
             path = write_agent(name, body.text)
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"name": name, "path": str(path)}
+        try:
+            published = publish_catalog()
+        except AgentFileError as exc:
+            return {
+                "name": name,
+                "path": str(path),
+                "serve": {"status": "failed", "message": str(exc)},
+            }
+        return {"name": name, "path": str(path), **published}
 
     @app.post("/api/opencode-agents")
     def opencode_agent_create(body: AgentCreate) -> dict:
         from src.opencode_agents import AgentFileError, new_agent_template, write_agent
+        from src.opencode_serve_supervisor import publish_catalog
 
         text = body.text.strip() or new_agent_template()
         try:
             path = write_agent(body.name, text, create=True)
         except AgentFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"name": body.name.strip(), "path": str(path), "text": text}
+        try:
+            published = publish_catalog()
+        except AgentFileError as exc:
+            published = {"serve": {"status": "failed", "message": str(exc)}}
+        return {
+            "name": body.name.strip(),
+            "path": str(path),
+            "text": text,
+            **published,
+        }
 
     @app.post("/api/settings/gitlab/test")
     def settings_gitlab_test(body: GitlabConnectionTestRequest) -> dict:

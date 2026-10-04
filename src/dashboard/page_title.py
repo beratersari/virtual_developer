@@ -208,14 +208,14 @@ def page_name(path: str, query: str = "", record_name: Optional[str] = None) -> 
         return "Existing issue"
 
     if head == "sessions":
-        if len(parts) == 1 or (len(parts) == 2 and _page_number(parts[1])):
-            return "Sessions"
-        if len(parts) == 2:
-            return collapse(record_name) or "Workspace"
-        return "Jobs"
+        return "Storage and Sessions"
 
-    if head == "storage" and len(parts) == 1:
-        return "Storage"
+    if head == "storage":
+        if len(parts) == 1:
+            return "Storage and Sessions"
+        if len(parts) == 2:
+            return collapse(record_name) or collapse(parts[1]) or "Folder"
+        return "Jobs"
     if head == "poll" and len(parts) == 1:
         return "Board"
 

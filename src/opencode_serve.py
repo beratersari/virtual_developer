@@ -669,11 +669,16 @@ class OpenCodeServeClient:
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=30.0),
             verify=False,
-            headers={"Accept": "application/json"},
+            headers={"Accept": "application/json", **self._auth_headers()},
         )
 
+    def _auth_headers(self) -> Dict[str, str]:
+        from src.opencode_serve_supervisor import serve_auth_headers
+
+        return serve_auth_headers()
+
     def _headers(self) -> Dict[str, str]:
-        h: Dict[str, str] = {}
+        h: Dict[str, str] = dict(self._auth_headers())
         if self.directory:
             # OpenCode uses this to scope project/workspace for the request
             h["x-opencode-directory"] = self.directory
@@ -683,8 +688,14 @@ class OpenCodeServeClient:
         if self._owned_client:
             await self._client.aclose()
 
-    async def health(self) -> Dict[str, Any]:
-        r = await self._client.get("/global/health", headers=self._headers())
+    async def health(self, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"headers": self._headers()}
+        if timeout is not None:
+            seconds = float(timeout)
+            kwargs["timeout"] = httpx.Timeout(
+                seconds, connect=min(30.0, max(seconds, 0.1))
+            )
+        r = await self._client.get("/global/health", **kwargs)
         r.raise_for_status()
         return r.json()
 
@@ -1903,19 +1914,46 @@ class ServeOrchestrator:
             except Exception:
                 return False
 
-        # Health
-        try:
-            health = await self.client.health()
-            _emit("stdout", f"[serve] health={health}")
-        except Exception as e:
+        # A reload already in progress is waited out here. Ready means
+        # /global/health answered. A listener that does not answer fails
+        # this attempt. The model-turn client keeps the job budget.
+        def _not_answering(exc: Optional[BaseException] = None) -> ServeTurnResult:
+            detail = ""
+            if exc is not None:
+                text = str(exc).strip()
+                detail = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+            note = "[serve] OpenCode serve is not answering"
+            if detail:
+                note = f"{note}: {detail}"
+            _emit("stdout", note)
             return ServeTurnResult(
                 session_id=session_id,
                 returncode=1,
                 stdout="\n".join(lines),
-                stderr=f"[serve] health check failed: {e}",
-                incomplete=True,
-                incomplete_reasons=[f"serve unreachable: {e}"],
+                stderr=note,
+                incomplete=False,
+                incomplete_reasons=["OpenCode serve is not answering"],
             )
+
+        try:
+            from src.opencode_serve_supervisor import (
+                HEALTH_PROBE_TIMEOUT_SECONDS,
+                supervisor,
+            )
+
+            if not await asyncio.to_thread(supervisor.wait_until_ready, 45.0):
+                return _not_answering()
+        except Exception as exc:
+            return _not_answering(exc)
+
+        try:
+            health = await asyncio.wait_for(
+                self.client.health(timeout=HEALTH_PROBE_TIMEOUT_SECONDS),
+                timeout=HEALTH_PROBE_TIMEOUT_SECONDS + 1.0,
+            )
+            _emit("stdout", f"[serve] health={health}")
+        except Exception as exc:
+            return _not_answering(exc)
 
         # Workdir before create/resume — OpenCode 500s on missing paths
         try:

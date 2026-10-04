@@ -1,23 +1,18 @@
 import type { JobItem, JobRetryAttempt } from '../../api/types'
-import { IN_FLIGHT_STATUSES } from '../../util/status'
 import { pathBasename } from '../../util/paths'
 import { jobChannelLabel } from '../../util/jobChannel'
 import { resolveJobWorker, sessionIdLabel, workerLabel } from '../../util/worker'
-import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
 import { JiraLinkedText } from '../../ui/JiraLinkedText'
-import { StatusBadge } from '../../ui/StatusBadge'
 import { groupDeliveries } from './repoDeliveries'
 import type { GitDelivery } from '../../api/types'
 
 export function JobOverview({
   job,
-  elapsedLabel,
   fallbackWorker = '',
   jiraHost = '',
 }: {
   job: JobItem
-  elapsedLabel: string
   fallbackWorker?: string
   jiraHost?: string
 }) {
@@ -58,7 +53,6 @@ export function JobOverview({
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <MetaCard label="Job id" mono value={job.job_id} />
-        <MetaCard label="Status" valueNode={<StatusBadge status={job.status} />} />
         <MetaCard
           label="Workflow"
           value={jobChannelLabel(job) || job.workflow_type || '—'}
@@ -69,7 +63,6 @@ export function JobOverview({
           mono
           value={job.model?.trim() ? job.model : '—'}
         />
-        <MetaCard label="Issue" mono value={job.issue_key || '—'} />
         <MetaCard
           label="Source"
           value={
@@ -112,22 +105,6 @@ export function JobOverview({
         />
         <MetaCard label="Started" mono value={job.started_at ?? '—'} />
         <MetaCard label="Completed" mono value={job.completed_at ?? '—'} />
-        <MetaCard
-          label="Elapsed"
-          valueNode={
-            elapsedLabel === '—' ? (
-              <span className="text-sm text-text">—</span>
-            ) : (
-              <div className="flex items-baseline gap-2">
-                <span className="font-mono text-sm tabular-nums text-text">{elapsedLabel}</span>
-                {!job.completed_at &&
-                  (job.live || IN_FLIGHT_STATUSES.has((job.status || '').toLowerCase())) && (
-                    <LiveDot />
-                  )}
-              </div>
-            )
-          }
-        />
         {job.error_message && (
           <div className="sm:col-span-2 lg:col-span-3">
             <div className="mb-1 text-xs font-medium text-danger-text">Error</div>

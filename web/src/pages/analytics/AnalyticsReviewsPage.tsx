@@ -148,13 +148,11 @@ export function AnalyticsReviewsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title={reviewsPageName(origin, state)}
         description={
           <>
-            Unique GitLab MRs and Azure PRs from ticket work and /yaver
-            follow-ups. Opened by us = Yaver created the MR from a ticket.
-            Contributed = a /yaver follow-up on an existing MR or PR.{' '}
+            Opened by us: Yaver created the request. Contributed: a follow-up
+            on a request that already existed.{' '}
             <Link to={backTo} className="text-accent hover:underline">
               Back to Analytics
             </Link>
@@ -177,33 +175,27 @@ export function AnalyticsReviewsPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {ORIGINS.map((s) => (
             <button
               key={s.id}
               type="button"
+              aria-pressed={origin === s.id}
               onClick={() => setOrigin(s.id)}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                origin === s.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-secondary hover:text-text'
-              }`}
+              className={`vd-seg-btn ${origin === s.id ? 'is-on' : ''}`}
             >
               {s.label}
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {STATES.map((s) => (
             <button
               key={s.id}
               type="button"
+              aria-pressed={state === s.id}
               onClick={() => setState(s.id)}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                state === s.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-secondary hover:text-text'
-              }`}
+              className={`vd-seg-btn ${state === s.id ? 'is-on' : ''}`}
             >
               {s.label}
             </button>

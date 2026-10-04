@@ -8,15 +8,14 @@ export function Tabs<T extends string>({
   onChange: (id: T) => void
 }) {
   return (
-    <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+    <div className="vd-seg">
       {tabs.map((t) => (
         <button
           key={t.id}
           type="button"
+          aria-pressed={value === t.id}
           onClick={() => onChange(t.id)}
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors transition-transform duration-150 ${
-            value === t.id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          } active:scale-[0.97]`}
+          className={`vd-seg-btn ${value === t.id ? 'is-on' : ''}`}
         >
           {t.label}
           {t.count != null && t.count > 0 ? (

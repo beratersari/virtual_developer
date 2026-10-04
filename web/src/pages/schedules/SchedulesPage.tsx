@@ -167,49 +167,42 @@ export function SchedulesPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Later"
         title="Scheduled"
         description={
-          <>
-            Queue a run for a chosen time. Existing MR or PR posts your prompt
-            on the merge request / pull request when it fires, then posts the
-            agent answer when the worker finishes.
-          </>
+          mode === 'mr' || mode === 'pr'
+            ? 'At the chosen time the prompt is posted on the request. The answer is posted when the worker finishes.'
+            : 'Queue a run for a chosen time.'
         }
       />
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+      <div className="vd-seg">
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'existing' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'existing' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'existing'}
           onClick={() => navigate(schedulePath('existing'))}
         >
           Existing issue
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'new' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'new' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'new'}
           onClick={() => navigate(schedulePath('new'))}
         >
           New issue
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'mr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'mr' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'mr'}
           onClick={() => navigate(schedulePath('mr'))}
         >
           Existing MR
         </button>
         <button
           type="button"
-          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
-            mode === 'pr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${mode === 'pr' ? 'is-on' : ''}`}
+          aria-pressed={mode === 'pr'}
           onClick={() => navigate(schedulePath('pr'))}
         >
           Existing PR
@@ -261,88 +254,75 @@ export function SchedulesPage() {
       <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
         {!listPending && rows.map((s) => (
           <li key={s.schedule_id} className="py-3 text-sm">
-            {s.issue_key ? (
-              <Link className="font-mono text-accent-text hover:underline" to={`/tasks/${encodeURIComponent(s.issue_key)}`}>
-                {s.issue_key}
-              </Link>
-            ) : (
-              '—'
-            )}{' '}
-            {s.source === 'gitlab_mr' && s.mr_iid ? (
-              <>
-                {s.merge_request_url ? (
-                  <a
-                    className="font-mono text-accent-text hover:underline"
-                    href={s.merge_request_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    !{s.mr_iid}
-                  </a>
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <div className="min-w-0">
+                {s.issue_key ? (
+                  <Link className="font-mono text-accent-text hover:underline" to={`/tasks/${encodeURIComponent(s.issue_key)}`}>
+                    {s.issue_key}
+                  </Link>
                 ) : (
-                  <span className="font-mono">!{s.mr_iid}</span>
+                  <span className="text-text-muted">—</span>
                 )}{' '}
-              </>
-            ) : null}
-            {s.source === 'azure_pr' && s.pr_id ? (
-              <>
-                {s.merge_request_url ? (
-                  <a
-                    className="font-mono text-accent-text hover:underline"
-                    href={s.merge_request_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    !{s.pr_id}
-                  </a>
-                ) : (
-                  <span className="font-mono">!{s.pr_id}</span>
-                )}{' '}
-              </>
-            ) : null}
-            {s.title} ·{' '}
-            {s.source === 'gitlab_mr'
-              ? 'mr follow-up'
-              : s.source === 'azure_pr'
-                ? 'pr follow-up'
-                : s.mode}
-            {s.backend ? (
-              <>
-                {' '}
-                · <span className="font-mono text-xs text-text-secondary">{s.backend}</span>
-              </>
-            ) : null}
-            {s.model ? (
-              <>
-                {' '}
-                · <span className="font-mono text-xs text-text-secondary">{s.model}</span>
-              </>
-            ) : null}{' '}
-            · {formatScheduleWhen(s.scheduled_at)} · <StatusBadge status={s.status} size="sm" />
-            {(s.status === 'scheduled' || s.status === 'error') && (
-              <>
-                {' '}
+                {s.source === 'gitlab_mr' && s.mr_iid ? (
+                  s.merge_request_url ? (
+                    <a
+                      className="font-mono text-accent-text hover:underline"
+                      href={s.merge_request_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      !{s.mr_iid}
+                    </a>
+                  ) : (
+                    <span className="font-mono">!{s.mr_iid}</span>
+                  )
+                ) : null}{' '}
+                {s.source === 'azure_pr' && s.pr_id ? (
+                  s.merge_request_url ? (
+                    <a
+                      className="font-mono text-accent-text hover:underline"
+                      href={s.merge_request_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      !{s.pr_id}
+                    </a>
+                  ) : (
+                    <span className="font-mono">!{s.pr_id}</span>
+                  )
+                ) : null}{' '}
+                <span className="text-text">{s.title}</span>
+              </div>
+              <StatusBadge status={s.status} size="sm" />
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+              <span>
+                {s.source === 'gitlab_mr'
+                  ? 'MR follow-up'
+                  : s.source === 'azure_pr'
+                    ? 'PR follow-up'
+                    : s.mode}
+              </span>
+              <span>{formatScheduleWhen(s.scheduled_at)}</span>
+              {(s.status === 'scheduled' || s.status === 'error') && (
                 <button
                   type="button"
                   className="vd-btn-ghost text-accent-text"
                   onClick={() => setRunId(s.schedule_id)}
                 >
-                  run now
+                  Run now
                 </button>
-              </>
-            )}
-            {(s.status === 'scheduled' || s.status === 'error') && (
-              <>
-                {' '}
+              )}
+              {(s.status === 'scheduled' || s.status === 'error') && (
                 <button
                   type="button"
                   className="vd-btn-ghost text-danger-text"
                   onClick={() => setCancelId(s.schedule_id)}
                 >
-                  cancel
+                  Cancel
                 </button>
-              </>
-            )}
+              )}
+            </div>
           </li>
         ))}
         {(listPending || rows.length === 0) && (
@@ -1034,12 +1014,11 @@ function Existing({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={(e) => void submit(e)}>
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+      <div className="vd-seg mb-3">
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'jira' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'jira'}
           onClick={() => {
             navigate(schedulePath('existing', 'jira'))
             setPreview(null)
@@ -1049,9 +1028,8 @@ function Existing({ onDone }: { onDone: () => void }) {
         </button>
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'azure' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'azure'}
           onClick={() => {
             navigate(schedulePath('existing', 'azure'))
             setPreview(null)
@@ -1342,21 +1320,19 @@ function CreateNew({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={(e) => void submit(e)}>
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+      <div className="vd-seg mb-3">
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'jira' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'jira'}
           onClick={() => navigate(schedulePath('new', 'jira'))}
         >
           Jira
         </button>
         <button
           type="button"
-          className={`rounded-full px-3 py-1 text-sm font-medium ${
-            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-          }`}
+          className={`vd-seg-btn ${tracker === 'azure' ? 'is-on' : ''}`}
+          aria-pressed={tracker === 'azure'}
           onClick={() => navigate(schedulePath('new', 'azure'))}
         >
           Azure work item

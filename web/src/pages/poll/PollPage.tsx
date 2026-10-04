@@ -16,9 +16,8 @@ export function PollPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Intake"
         title="Board"
-        description="What the poller saw last cycle. Work starts when a To Do ticket is assigned to the bot."
+        description="Work starts when a To Do ticket is assigned to the bot."
       />
 
       <div className="vd-hero">
@@ -27,28 +26,23 @@ export function PollPage() {
           <div className="mt-1 font-mono text-4xl font-semibold tracking-tight text-text">
             {formatCountdown(live.pollCountdown)}
           </div>
-          <div className="mt-2 text-sm text-text-secondary">
-            Phase <span className="capitalize text-text">{poll.phase}</span>
-            {' · '}every {poll.poll_interval_seconds}s
-          </div>
         </div>
         <div className="vd-panel px-5 py-5">
           <div className="text-sm text-text-muted">Will process</div>
           <div className="mt-1 text-4xl font-semibold text-accent-text">{poll.will_process_count}</div>
-          <div className="mt-2 text-sm text-text-secondary">
-            of {poll.matched_count} matched this cycle
-          </div>
+          {poll.matched_count > 0 && (
+            <div className="mt-2 text-sm text-text-secondary">
+              of {poll.matched_count} on the board
+            </div>
+          )}
         </div>
         <div className="vd-panel px-5 py-5">
           <div className="text-sm text-text-muted">Source</div>
-          <div className="mt-2 text-lg font-medium">{poll.source ?? '—'}</div>
-          <div className="mt-1 text-sm text-text-secondary">Board {poll.board_id ?? '—'}</div>
+          <div className="mt-2 text-lg font-medium">
+            {poll.board_id != null ? `Board ${poll.board_id}` : poll.source ?? '—'}
+          </div>
           <div className="mt-3 text-xs text-text-muted">
             Last {formatChatTime(poll.last_poll_at) || poll.last_poll_at || '—'}
-            {poll.next_poll_at
-              ? ` · next ${formatChatTime(poll.next_poll_at) || poll.next_poll_at}`
-              : ''}
-            {' · '}cycle {poll.cycle}
           </div>
         </div>
       </div>
@@ -80,7 +74,7 @@ export function PollPage() {
                 {i.matched_label && <span className="text-success-text">trigger label</span>}
                 {i.is_todo && <span>To Do</span>}
                 {i.labels.slice(0, 6).map((l) => (
-                  <span key={l} className="rounded-full bg-bg px-2 py-0.5">
+                  <span key={l} className="vd-tag">
                     {l}
                   </span>
                 ))}
@@ -88,7 +82,7 @@ export function PollPage() {
             </div>
             <div>
               {i.will_process ? (
-                <span className="vd-pill bg-accent text-[#1a0d08]">This cycle</span>
+                <span className="vd-pill vd-pill-solid">This cycle</span>
               ) : (
                 <span className="text-xs text-text-muted">Skip</span>
               )}

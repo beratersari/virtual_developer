@@ -68,7 +68,7 @@ class _HungClient(OpenCodeServeClient):
         self._client = None  # type: ignore
         self._backend = backend
 
-    async def health(self):
+    async def health(self, timeout=None):
         return await self._backend.health()
 
     async def create_session(self, title, **kw):

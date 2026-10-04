@@ -28,11 +28,11 @@ const PERIODS: { id: AnalyticsPeriod; label: string }[] = ANALYTICS_PERIODS.map(
 type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
-  { id: 'total', label: 'Total', color: '#ff7a45' },
-  { id: 'completed', label: 'Completed', color: '#3ecf8e' },
-  { id: 'error', label: 'Error', color: '#f25c54' },
-  { id: 'cancelled', label: 'Cancelled', color: '#7b88a8' },
-  { id: 'in_flight', label: 'In flight', color: '#c9a227' },
+  { id: 'total', label: 'Total', color: '#3dffb0' },
+  { id: 'completed', label: 'Completed', color: '#5ec8ff' },
+  { id: 'error', label: 'Error', color: '#ff5d73' },
+  { id: 'cancelled', label: 'Cancelled', color: '#8aa0b5' },
+  { id: 'in_flight', label: 'In flight', color: '#ffc857' },
 ]
 
 function csv(set: Set<string>) {
@@ -56,18 +56,23 @@ function isoFromLocal(local: string) {
   return local.length === 16 ? `${local}:00` : local
 }
 
+/** Statuses that already have a count card under the filters. */
+const STATUS_ON_CARDS = new Set(['completed', 'error', 'cancelled'])
+
 function FacetGroup({
   title,
   items,
   selected,
   onChange,
   className = '',
+  hideCountIds,
 }: {
   title: string
   items: AnalyticsFacet[]
   selected: Set<string>
   onChange: (next: Set<string>) => void
   className?: string
+  hideCountIds?: Set<string>
 }) {
   if (!items.length) return null
   return (
@@ -105,7 +110,9 @@ function FacetGroup({
               <span className="min-w-0 flex-1 truncate" title={item.label}>
                 {item.label}
               </span>
-              <span className="font-mono text-text-muted">{item.jobs}</span>
+              {!(hideCountIds && hideCountIds.has(item.id)) && (
+                <span className="font-mono text-text-muted">{item.jobs}</span>
+              )}
             </label>
           )
         })}
@@ -159,7 +166,6 @@ function CategoryMix({ rows }: { rows: AnalyticsNamedCount[] }) {
   return (
     <div className="vd-card flex min-w-0 flex-col p-4">
       <h2 className="text-sm font-semibold">Category mix</h2>
-      <p className="mt-1 text-xs text-text-muted">Share of jobs in this range.</p>
       {top.length === 0 ? (
         <p className="py-8 text-center text-sm text-text-muted">No jobs in this filter.</p>
       ) : (
@@ -417,31 +423,25 @@ export function AnalyticsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title="Analytics"
-        description="Job volume over time. Filters apply to every chart and table on this page."
         actions={
           loading ? (
             <span className="inline-flex items-center gap-2 text-xs text-text-muted">
               <Spinner /> Loading
             </span>
-          ) : (
-            <span className="text-xs text-text-muted">
-              {payload?.matched ?? 0} of {payload?.in_range ?? 0} jobs in range
-              {payload ? ` · ${payload.scanned} stored` : ''}
-            </span>
-          )
+          ) : null
         }
       />
 
       {error && <Alert>{error}</Alert>}
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {PERIODS.map((p) => (
             <button
               key={p.id}
               type="button"
+              aria-pressed={period === p.id}
               onClick={() => {
                 if (p.id === 'custom') {
                   const start = payload?.range.start || ''
@@ -451,11 +451,7 @@ export function AnalyticsPage() {
                 }
                 navigate(analyticsPeriodPath(p.id))
               }}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                period === p.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-secondary hover:text-text'
-              }`}
+              className={`vd-seg-btn ${period === p.id ? 'is-on' : ''}`}
             >
               {p.label}
             </button>
@@ -493,6 +489,7 @@ export function AnalyticsPage() {
           items={facets.status || []}
           selected={status}
           onChange={setStatus}
+          hideCountIds={STATUS_ON_CARDS}
         />
         <FacetGroup
           className="min-w-52 flex-1 basis-56"

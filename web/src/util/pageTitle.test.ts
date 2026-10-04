@@ -8,6 +8,10 @@ import {
   jobPageName,
   pageNameFromLocation,
   resolveDocumentTitle,
+  recordTitle,
+  shownPageName,
+  visiblePageNameFrom,
+  folderPageName,
   reviewsPageName,
   workspacePageName,
 } from './pageTitle'
@@ -46,6 +50,42 @@ assert(jobPageName('Fix login', 'daemon') === 'Fix login - Daemon', 'daemon tab'
 assert(jobPageName('Fix login', 'prompt') === 'Fix login - Prompt', 'prompt tab')
 assert(jobPageName('Fix login', 'output') === 'Fix login - Output', 'output tab')
 assert(titled('/jobs/job_1') === 'Yaver - Job', 'job url before the record loads')
+assert(
+  shownPageName('Job', { path: '/jobs/job_1', name: 'Fix login' }, '/jobs/job_1') === 'Fix login',
+  'open job name replaces the address placeholder',
+)
+assert(
+  shownPageName('Job', { path: '/jobs/job_1', name: 'Fix login' }, '/jobs/job_2') === 'Job',
+  'a name from another job does not leak',
+)
+assert(
+  visiblePageNameFrom('Job', 'Yaver - Fix login', false) === 'Fix login',
+  'the bar keeps the issue name the server already wrote',
+)
+assert(
+  visiblePageNameFrom('Job - Transcript', 'Yaver - Fix login - Transcript', false) ===
+    'Fix login - Transcript',
+  'the bar keeps the issue name on a job tab',
+)
+assert(
+  visiblePageNameFrom('Fix login - Transcript', 'Yaver - Job', true) === 'Fix login - Transcript',
+  'a loaded issue name replaces the placeholder',
+)
+assert(
+  visiblePageNameFrom('Job', 'Yaver - Jobs', true) === 'Job',
+  'opening another job does not keep the previous page name',
+)
+assert(recordTitle('Fix login', 'Job') === 'Fix login', 'the bar shows the loaded issue name')
+assert(
+  recordTitle('Fix login - Transcript', 'Job - Transcript') === 'Fix login - Transcript',
+  'a job tab keeps the issue name',
+)
+assert(recordTitle('Job', 'Job') === null, 'a placeholder is not a second title')
+assert(recordTitle('Jobs', 'Jobs') === null, 'a list page does not repeat its name')
+assert(
+  recordTitle('Existing issue', 'Existing issue') === null,
+  'a schedule mode is not a record title',
+)
 assert(titled('/jobs/job_1/transcript') === 'Yaver - Job - Transcript', 'job tab before the record loads')
 
 assert(issuePageName('Board bug', 'KAN-9', '') === 'Board bug', 'issue title')
@@ -84,13 +124,17 @@ assert(titled('/scheduled/mr') === 'Yaver - Existing MR', 'existing mr')
 assert(titled('/scheduled/pr') === 'Yaver - Existing PR', 'existing pr')
 assert(titled('/schedules') === 'Yaver - Existing issue', 'old schedules path')
 
-assert(titled('/sessions') === 'Yaver - Sessions', 'sessions')
-assert(titled('/sessions/2') === 'Yaver - Sessions', 'sessions page 2')
-assert(titled('/sessions/osw_1') === 'Yaver - Workspace', 'workspace before it loads')
+assert(titled('/sessions') === 'Yaver - Storage and Sessions', 'old sessions address')
+assert(titled('/sessions/2') === 'Yaver - Storage and Sessions', 'old sessions page')
+assert(titled('/sessions/osw_1') === 'Yaver - Storage and Sessions', 'old workspace address')
 assert(workspacePageName('feature/KAN-1', 'develop') === 'feature/KAN-1 → develop', 'workspace branches')
 assert(workspacePageName('develop', '') === 'develop', 'workspace without a target')
+assert(folderPageName({ issue_key: 'KAN-1', summary: 'Fix login', name: 'repo' }) === 'KAN-1 — Fix login', 'folder title uses the issue')
+assert(folderPageName({ name: 'repo_abc' }) === 'repo_abc', 'folder title falls back to the directory')
 
-assert(titled('/storage') === 'Yaver - Storage', 'storage')
+assert(titled('/storage') === 'Yaver - Storage and Sessions', 'storage')
+assert(titled('/storage/repo_abc') === 'Yaver - repo_abc', 'folder details')
+assert(titled('/storage/a/b') === 'Yaver - Jobs', 'storage has no deeper path')
 assert(titled('/poll') === 'Yaver - Board', 'board')
 assert(titled('/settings') === 'Yaver - Settings - Jira', 'settings default')
 assert(titled('/settings/jira') === 'Yaver - Settings - Jira', 'jira settings')

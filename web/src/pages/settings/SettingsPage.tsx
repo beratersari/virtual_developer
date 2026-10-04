@@ -1073,13 +1073,12 @@ export function SettingsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Configuration"
         title="Settings"
-        description="Save writes only the fields you changed. After restart, a .env key is used unless you later save that same field here. Leave secret fields blank to keep the current value."
+        description="Leave a secret blank to keep the saved value."
         actions={saveButton}
       />
 
-      <div className="flex w-full gap-1 overflow-x-auto rounded-full border border-border bg-bg-elevated p-1 lg:w-fit lg:overflow-visible">
+      <div className="vd-seg vd-seg-wide">
         {(
           [
             ['jira', 'Jira'],
@@ -1097,9 +1096,8 @@ export function SettingsPage() {
               if (id === 'model' && section !== 'model') setModelsLoading(true)
               navigate(settingsSectionPath(id))
             }}
-            className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-transform duration-150 active:scale-95 ${
-              section === id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
-            }`}
+            aria-pressed={section === id}
+            className={`vd-seg-btn ${section === id ? 'is-on' : ''}`}
           >
             {label}
           </button>
@@ -1125,16 +1123,13 @@ export function SettingsPage() {
       </div>
       <div className="grid items-start gap-5 lg:grid-cols-2">
       <SettingsGroup title="Connection">
-      <p className="text-xs text-text-muted">
-        Site URL and API token. A blank token keeps the saved value.
-      </p>
       <label className="field">
         <span>Host</span>
         <input value={draft.jira_host} onChange={(e) => mark('jira_host', e.target.value)} />
       </label>
       <label className="field">
         <span>
-          API token {settings.jira_token_configured ? '(set — blank keeps it)' : '(missing)'}
+          API token{settings.jira_token_configured ? '' : ' (missing)'}
         </span>
         <input
           type="password"
@@ -1197,15 +1192,15 @@ export function SettingsPage() {
         </span>
       </label>
       <label className="field">
-        <span>Project keys (JIRA_PROJECTS)</span>
+        <span>Project keys</span>
         <input
           value={draft.jira_projects}
           onChange={(e) => mark('jira_projects', e.target.value)}
           placeholder="KAN, PLATFORM"
         />
         <span className="text-xs text-text-muted">
-          Comma-separated Jira keys used to bind GitLab MR and Azure PR titles
-          (feat(KAN-12): …) to a ticket. Empty falls back to PROJ.
+          Keys used to read a ticket id from a merge request title. Separate
+          with commas.
         </span>
       </label>
       <label className="field">
@@ -1223,7 +1218,7 @@ export function SettingsPage() {
       </SettingsGroup>
       <SettingsGroup title="Intake">
       <label className="field">
-        <span>Trigger user (JIRA_TRIGGER_USER)</span>
+        <span>Trigger user</span>
         <input
           value={draft.jira_trigger_user}
           onChange={(e) => mark('jira_trigger_user', e.target.value)}
@@ -1236,7 +1231,7 @@ export function SettingsPage() {
         </span>
       </label>
       <label className="field">
-        <span>Trigger label (JIRA_TRIGGER_LABEL)</span>
+        <span>Trigger label</span>
         <input
           value={draft.jira_trigger_label}
           onChange={(e) => mark('jira_trigger_label', e.target.value)}
@@ -1248,10 +1243,6 @@ export function SettingsPage() {
           bot. Comma-separated if there is more than one.
         </span>
       </label>
-      <p className="text-xs text-text-muted">
-        Optional later: set JIRA_EMAIL in .env for Cloud HTTP Basic. Daily
-        use is host + token (Bearer).
-      </p>
       </SettingsGroup>
       </div>
       </div>
@@ -1276,9 +1267,7 @@ export function SettingsPage() {
       <div className="grid items-start gap-5 lg:grid-cols-2">
       <SettingsGroup title="Credentials">
       <p className="text-xs text-text-muted">
-        One personal access token per GitLab host. A host with a PAT is
-        allowed — there is no separate host list. Leave PAT blank to keep
-        the stored token.
+        One personal access token per GitLab host.
       </p>
       {draft.gitlab_cred_rows.map((row, idx) => (
         <div key={idx}>
@@ -1396,7 +1385,7 @@ export function SettingsPage() {
       <div className="grid gap-5">
       <SettingsGroup title="Trigger username">
       <label className="field">
-        <span>Trigger user (GITLAB_TRIGGER_USER)</span>
+        <span>Trigger user</span>
         <input
           value={draft.gitlab_trigger_user}
           onChange={(e) => mark('gitlab_trigger_user', e.target.value)}
@@ -1415,9 +1404,7 @@ export function SettingsPage() {
       <SettingsGroup title="Project webhook">
         <div className="text-sm">
         <p className="mt-1 text-xs text-text-muted">
-          Register a project hook for comments and merge-request events. Merged
-          or closed merge requests delete the matching temp clone. The secret
-          is sent as X-Gitlab-Token.
+          Register a project hook for comments and merge-request events.
         </p>
         <label className="field">
           <span>
@@ -1433,11 +1420,10 @@ export function SettingsPage() {
           />
         </label>
         <span className="text-xs text-text-muted">
-          @bot /review and /ask on merge and pull requests always run
-          derman-reviewer. Assign the bot as reviewer, or open an MR
-          that already lists it, to start a review. New commits do not
-          re-review. No push or new MR. Work-item /review and /ask stay
-          silent.
+          @bot /review and /ask on merge and pull requests run a review.
+          Assign the bot as reviewer, or open a request that already lists
+          it, to start one. New commits do not re-review. No push or new
+          request. Work-item /review and /ask stay silent.
         </span>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
@@ -1472,10 +1458,7 @@ export function SettingsPage() {
         https://tfs.example.com/tfs/DefaultCollection when the server
         has a /tfs virtual directory, or
         https://tfs.example.com/DefaultCollection when it does not. A
-        host-only or /tfs URL without a collection name is rejected on
-        save. Auth is Basic pat:PAT. Leave PAT blank to keep the stored
-        token. Test authenticates at the server identity root
-        (/tfs/_apis/connectionData when the URL includes /tfs).
+        host-only URL is rejected on save.
       </p>
       {draft.azure_cred_rows.map((row, idx) => (
         <div key={idx}>
@@ -1596,7 +1579,7 @@ export function SettingsPage() {
       <div className="grid gap-5">
       <SettingsGroup title="Trigger username">
       <label className="field">
-        <span>Trigger user (AZURE_TRIGGER_USER)</span>
+        <span>Trigger user</span>
         <input
           value={draft.azure_trigger_user}
           onChange={(e) => mark('azure_trigger_user', e.target.value)}
@@ -1615,14 +1598,12 @@ export function SettingsPage() {
         <p className="mt-1 text-xs text-text-muted">
           Register a project Web Hook for pull-request commented,
           pull-request updated / merged / abandoned, and work item
-          created / updated / commented. Completed or abandoned pull
-          requests delete the matching temp clone. New work starts when a
-          To Do or In Progress item is assigned to the bot (or New,
-          Active, Doing). Resolved and Done are ignored. Moving In
-          Progress back to To Do does not re-queue. After a plan, mention
-          the bot with /planRefactor or /planExecute — not tags. Mention
-          without those commands gets a usage note on the work item. No
-          webhook secret.
+          created / updated / commented. New work starts when a To Do or
+          In Progress item is assigned to the bot (or New, Active, Doing).
+          Resolved and Done are ignored. Moving In Progress back to To Do
+          does not re-queue. After a plan, mention the bot with
+          /planRefactor or /planExecute — not tags. Mention without those
+          commands gets a usage note on the work item.
         </p>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
@@ -1826,10 +1807,8 @@ export function SettingsPage() {
           <option value="claude">Claude Code</option>
         </select>
         <span className="mt-1 block text-xs text-text-muted">
-          Default worker for new jobs. An issue {'{params}'} Backend field
-          overrides this. Provider credentials stay in each tool&apos;s own
-          config (OpenCode: opencode.json · Codex: ~/.codex/config.toml ·
-          Claude: ANTHROPIC_BASE_URL).
+          Default worker for new jobs. A Backend field in the issue overrides
+          this.
         </span>
       </label>
       <p className="text-xs text-text-muted">
@@ -1949,22 +1928,13 @@ export function SettingsPage() {
       </SettingsGroup>
       <SettingsGroup title="Data location">
       <p className="text-xs text-text-muted">
-        Set <span className="font-mono">YAVER_BASE_DIR</span> in .env. Yaver
-        creates <span className="font-mono">yaver</span> and{' '}
-        <span className="font-mono">t</span> under that folder.
+        Set <span className="font-mono">YAVER_BASE_DIR</span> in .env.
       </p>
       <dl className="space-y-1 font-mono text-[11px] text-text-secondary">
         <div>Base: {settings.base_dir || '(not one folder)'}</div>
         <div>Data: {settings.data_dir || '(default)'}</div>
         <div>Clones: {settings.temp_dir_base || '(default)'}</div>
       </dl>
-
-      <p className="quiet">
-        Jira token {settings.jira_token_configured ? 'set' : 'missing'} · GitLab{' '}
-        {settings.gitlab_pat_configured ? 'set' : 'missing'} · Azure{' '}
-        {settings.azure_pat_configured ? 'set' : 'missing'} · dashboard{' '}
-        {settings.dashboard_host}:{settings.dashboard_port}
-      </p>
       </SettingsGroup>
       </div>
       </div>

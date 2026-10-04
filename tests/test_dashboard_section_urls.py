@@ -56,7 +56,8 @@ def test_routes_keep_a_section_slot_for_each_tabbed_page() -> None:
         'path="/analytics/:period"',
         'path="/tasks/:issueKey/:section?"',
         'path="/scheduled/:mode?/:tracker?/:page?"',
-        'path="/sessions/:workspaceId"',
+        'path="/storage/:folderName"',
+        'path="/sessions" element={<Navigate to="/storage" replace />}',
         'path="/settings/:section?"',
     ):
         assert route in APP, route
@@ -86,8 +87,15 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     assert "jobsFilterFromPath(pathname)" in jobs
     assert "navigate(withListPage(jobsFilterPath(statusFilter), currentPage + 1))" in jobs
 
-    sessions = _read("src/pages/sessions/SessionsPage.tsx")
-    assert "navigate(withListPage('/sessions', currentPage + 1))" in sessions
+    storage = _read("src/pages/storage/StoragePage.tsx")
+    assert "to={storageFolderPath(folder.name)}" in storage
+    assert "Details" in storage
+    assert "Sessions without a folder" in storage
+    assert "sessions_without_folder" in storage
+    assert "showDirectory" in storage
+    shell = _read("src/app/Shell.tsx")
+    assert "label: 'Storage and Sessions'" in shell
+    assert "label: 'Sessions'" not in shell
 
     reviews = _read("src/pages/analytics/AnalyticsReviewsPage.tsx")
     assert "withListPage('/analytics/reviews', nextPage)" in reviews

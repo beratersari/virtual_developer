@@ -164,6 +164,88 @@ def describe_clone_folder(raw_path: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _path_identity_keys(path: Path) -> List[str]:
+    """Normalized absolute forms of *path*, with and without symlink resolve."""
+    texts = [str(path)]
+    try:
+        texts.append(str(path.resolve()))
+    except OSError:
+        pass
+    out: List[str] = []
+    seen: Set[str] = set()
+    for text in texts:
+        key = os.path.normcase(os.path.normpath(text)).rstrip("\\/")
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def working_directory_uses_folder(raw: str, folder: Path) -> bool:
+    """True when *raw* is this clone folder or a checkout inside it.
+
+    ``KAN-1`` does not match ``KAN-10``. A missing directory still matches
+    the stored path, so Details can list chats while a delete is finishing.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return False
+    child_keys = _path_identity_keys(Path(text))
+    folder_keys = _path_identity_keys(folder)
+    for child in child_keys:
+        for root in folder_keys:
+            if child == root or child.startswith(root + os.sep):
+                return True
+    return False
+
+
+def load_storage_folder(name: str) -> Dict[str, Any]:
+    """One temp-clone row for Storage details. 404 when the name is unknown."""
+    base = resolve_temp_base()
+    target = _safe_child(base, name)
+    folder_name = (name or "").strip()
+    jobs = list_delete_jobs()
+    job = jobs.get(folder_name)
+    try:
+        exists = target.is_dir()
+    except OSError:
+        exists = False
+    if not exists and not job:
+        raise TempStorageError(f"Folder not found: {folder_name}", status_code=404)
+    if exists:
+        described = describe_clone_folder(str(target)) or {}
+        row: Dict[str, Any] = {
+            "name": folder_name,
+            "path": described.get("path") or str(target),
+            "exists": True,
+            "size_bytes": int(described.get("size_bytes") or 0),
+            "size_label": described.get("size_label"),
+            "size_pending": bool(described.get("size_pending")),
+            "modified_at": described.get("modified_at"),
+            "in_use": bool(described.get("in_use")),
+            **_issue_fields_for(target, folder_name, _clone_issue_index()),
+        }
+    else:
+        gone = Path(str((job or {}).get("path") or target))
+        size = int((job or {}).get("size_bytes") or 0)
+        row = {
+            "name": folder_name,
+            "path": str(gone),
+            "exists": False,
+            "size_bytes": size,
+            "size_label": format_bytes(size),
+            "size_pending": False,
+            "modified_at": None,
+            "in_use": False,
+            **_issue_fields_for(gone, folder_name, _clone_issue_index()),
+        }
+    if job and not (exists and job.get("status") == "done"):
+        row["delete"] = _delete_dto(job)
+    if _apply_live_mr_state(row):
+        _ensure_mr_state_scan()
+    return row
+
+
 def _dir_size_bytes(path: Path) -> int:
     total = 0
     try:

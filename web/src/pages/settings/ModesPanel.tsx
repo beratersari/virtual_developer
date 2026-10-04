@@ -33,6 +33,7 @@ export function ModesPanel({ modes, onChange }: Props) {
   const [nameDraft, setNameDraft] = useState('')
   const [creating, setCreating] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [reloadPending, setReloadPending] = useState(false)
   const [existsName, setExistsName] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -48,6 +49,33 @@ export function ModesPanel({ modes, onChange }: Props) {
     setAgents(payload.agents)
     setSynced(payload.synced !== false)
   }
+
+  function noteServe(prefix: string, serve?: { status?: string; message?: string }) {
+    setReloadPending(serve?.status === 'deferred')
+    const detail = serve?.message?.trim()
+    setMessage(detail ? `${prefix} ${detail}` : prefix)
+  }
+
+  useEffect(() => {
+    if (!reloadPending) return
+    let stop = false
+    const timer = window.setInterval(() => {
+      void fetchOpencodeAgents()
+        .then((payload) => {
+          if (stop) return
+          setAgents(payload.agents)
+          setSynced(payload.synced !== false)
+          if (payload.serve?.status === 'deferred') return
+          setReloadPending(false)
+          if (payload.serve?.message) setMessage(payload.serve.message)
+        })
+        .catch(() => {})
+    }, 3000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
+  }, [reloadPending])
 
   useEffect(() => {
     const ac = new AbortController()
@@ -140,9 +168,9 @@ export function ModesPanel({ modes, onChange }: Props) {
     if (!editor || editor.loading || editor.saving) return
     setEditor({ ...editor, saving: true, error: null })
     try {
-      await saveOpencodeAgent(editor.name, editor.text)
+      const saved = await saveOpencodeAgent(editor.name, editor.text)
       await reloadAgents()
-      setMessage(`Saved ${editor.name}`)
+      noteServe(`Saved ${editor.name}.`, saved.serve)
       closeEditor()
     } catch (e) {
       setEditor({
@@ -178,7 +206,7 @@ export function ModesPanel({ modes, onChange }: Props) {
     setMessage(null)
     try {
       const result = await syncOpencodeAgents()
-      setMessage(`Synced ${result.agents.length} agents to OpenCode and Claude.`)
+      noteServe(`Synced ${result.agents.length} agents.`, result.serve)
       await reloadAgents()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not sync agents')
@@ -243,7 +271,7 @@ export function ModesPanel({ modes, onChange }: Props) {
         saving: false,
         error: null,
       })
-      setMessage(`Created ${created.name}`)
+      noteServe(`Created ${created.name}.`, created.serve)
     } catch (e) {
       const text = e instanceof Error ? e.message : 'Could not create agent'
       const match = text.match(/^Agent (.+) already exists$/)
@@ -265,11 +293,10 @@ export function ModesPanel({ modes, onChange }: Props) {
       )}
       <div className="text-sm font-semibold text-text">Modes</div>
       <p className="text-xs text-text-muted">
-        The list is only the agents in opencoderman/agents. Edit those files
-        here. Sync copies them into ~/.opencode and ~/.config/opencode, and
-        into the Claude home, which is where jobs read agents. Plan stops without a push. Build and test push
-        and open a merge request. A mode you add follows build. Write{' '}
-        <span className="font-mono">Mode: name</span> in the issue params.
+        Edit the agent for each mode. Saving copies the files and reloads
+        OpenCode when no job is running. Plan does not push. Build and test
+        push and open a merge request. In the issue, write{' '}
+        <span className="font-mono">Mode: name</span>.
       </p>
       {modes.map((row, index) => (
         <div key={row.builtin ? `builtin-${row.name}` : `custom-${index}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-2">
@@ -348,6 +375,14 @@ export function ModesPanel({ modes, onChange }: Props) {
           onClick={() => syncAgents()}
         >
           {syncing ? 'Syncing…' : 'Sync'}
+        </button>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={creating || syncing || agents.length === 0}
+          onClick={() => syncAgents()}
+        >
+          {syncing ? 'Reloading…' : 'Reload OpenCode'}
         </button>
       </div>
       {editOpen && (

@@ -8,27 +8,16 @@ import {
   setUnauthorizedHandler,
 } from './dashboardAuth'
 
-function GateBrand({ blurb }: { blurb: string }) {
+function GateBrand({ blurb }: { blurb?: string }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2.5">
-        <img
-          src="/yaver-wink.gif"
-          alt=""
-          width={64}
-          height={64}
-          className="h-16 w-16 rounded-xl"
-        />
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">
-            Yaver
-          </div>
-          <div className="text-lg font-semibold tracking-tight text-text">
-            Ops console
-          </div>
+        <div className="vd-mark" aria-hidden>
+          <img src="/yaver-wink.gif" alt="" width={64} height={64} />
         </div>
+        <div className="vd-kicker">Yaver</div>
       </div>
-      <p className="text-sm text-text-secondary">{blurb}</p>
+      {blurb ? <p className="font-mono text-sm text-text-secondary">{blurb}</p> : null}
     </div>
   )
 }
@@ -36,21 +25,6 @@ function GateBrand({ blurb }: { blurb: string }) {
 function GateShell({ children }: { children: ReactNode }) {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-10">
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            'radial-gradient(900px 480px at 50% -10%, rgba(255,122,69,0.18), transparent 55%), radial-gradient(700px 420px at 100% 100%, rgba(91,157,255,0.10), transparent 50%)',
-        }}
-      />
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.07]"
-        style={{
-          backgroundImage:
-            'linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px)',
-          backgroundSize: '48px 48px',
-        }}
-      />
       {children}
     </div>
   )
@@ -58,8 +32,8 @@ function GateShell({ children }: { children: ReactNode }) {
 
 function GateCard({ children }: { children: ReactNode }) {
   return (
-    <div className="relative w-full max-w-[400px] overflow-hidden rounded-2xl border border-border bg-surface/90 shadow-[0_24px_80px_rgba(0,0,0,0.45)] backdrop-blur-md">
-      <div className="h-1 w-full bg-accent" />
+    <div className="relative w-full max-w-[400px] overflow-hidden border border-border-strong bg-surface shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+      <div className="h-0.5 w-full bg-accent" />
       <div className="space-y-6 px-8 pb-8 pt-7">{children}</div>
     </div>
   )
@@ -155,7 +129,7 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
       <GateShell>
         <form className="relative w-full max-w-[400px]" onSubmit={onSubmit}>
           <GateCard>
-            <GateBrand blurb="Sign in to view jobs, storage, and settings." />
+            <GateBrand />
             <div className="space-y-3.5">
               <label className="field !mb-0">
                 <span>Username</span>
@@ -184,9 +158,6 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
             >
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
-            <p className="text-center text-[11px] leading-relaxed text-text-muted">
-              Board poller and GitLab webhooks do not use this login.
-            </p>
           </GateCard>
         </form>
       </GateShell>
@@ -206,7 +177,7 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
                   : 'Checking this session.'
             }
           />
-          <div className="flex items-center gap-3 rounded-xl border border-border bg-bg-elevated/70 px-3.5 py-3">
+          <div className="flex items-center gap-3 border border-border bg-bg px-3.5 py-3">
             {!failed ? (
               <Spinner className="text-accent" />
             ) : (

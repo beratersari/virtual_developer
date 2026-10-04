@@ -57,8 +57,7 @@ def test_gets_wait_for_a_slot_and_release_it() -> None:
 def test_list_pages_abort_on_leave_and_keep_loading_until_this_view() -> None:
     for rel in (
         "src/pages/jobs/JobsPage.tsx",
-        "src/pages/sessions/SessionsPage.tsx",
-        "src/pages/sessions/SessionWorkspacePage.tsx",
+        "src/pages/storage/StorageFolderPage.tsx",
         "src/pages/schedules/SchedulesPage.tsx",
         "src/pages/storage/StoragePage.tsx",
         "src/pages/jobs/JobDetailPage.tsx",
@@ -68,9 +67,9 @@ def test_list_pages_abort_on_leave_and_keep_loading_until_this_view() -> None:
     jobs = _read("src/pages/jobs/JobsPage.tsx")
     assert "shownFor !== viewKey" in jobs
     assert "Loading jobs…" in jobs
-    sessions = _read("src/pages/sessions/SessionsPage.tsx")
-    assert "shownFor !== viewKey" in sessions
-    assert "Loading sessions…" in sessions
+    folder = _read("src/pages/storage/StorageFolderPage.tsx")
+    assert "detail.folder.name === name" in folder
+    assert "Loading sessions…" in folder
     schedules = _read("src/pages/schedules/SchedulesPage.tsx")
     assert "shownPage !== page" in schedules
     assert "Loading schedules…" in schedules

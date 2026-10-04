@@ -490,16 +490,25 @@ class JiraStateManager:
                 return None
             return state
 
-    def get_all_states(self) -> List[JiraAgentState]:
-        """Load every persisted issue state (all statuses)."""
+    def get_all_states(self, *, raise_on_error: bool = False) -> List[JiraAgentState]:
+        """Load every persisted issue state (all statuses).
+
+        Callers that decide whether serve may be killed pass
+        ``raise_on_error``. An empty list means there are no rows. A database
+        that cannot be read must not look like that.
+        """
         with self._lock:
             conn = self._conn
             if conn is None:
+                if raise_on_error:
+                    raise RuntimeError("issue state database is unavailable")
                 return []
             try:
                 rows = conn.execute("SELECT document FROM issue_states").fetchall()
             except Exception as e:
                 logger.error(f"Error loading issue states: {e}")
+                if raise_on_error:
+                    raise
                 return []
         found: List[JiraAgentState] = []
         for row in rows:
@@ -512,10 +521,14 @@ class JiraStateManager:
                 logger.error(f"Error loading issue state: {e}")
         return found
 
-    def get_active_issues(self) -> List[JiraAgentState]:
+    def get_active_issues(self, *, raise_on_error: bool = False) -> List[JiraAgentState]:
         """Get all issues that are not in a terminal state."""
         terminal_states = {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}
-        return [s for s in self.get_all_states() if s.status not in terminal_states]
+        return [
+            s
+            for s in self.get_all_states(raise_on_error=raise_on_error)
+            if s.status not in terminal_states
+        ]
 
     def delete_state(self, issue_key: str) -> bool:
         """Delete the issue-state row. Returns True when a row was removed."""

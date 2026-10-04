@@ -366,6 +366,8 @@ OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`)
 
 Yaver and OpenCode serve have to be the same user. The daemon creates the git clone. OpenCode serve is the process that writes and commits in that clone, and the Transcript tab reads that process's chat database. Port 8080 does not need root.
 
+The daemon always starts `opencode serve` when `OPENCODE_SERVE_URL` is down, as that same user, and starts it again if that child exits. A serve that is already healthy is left running. A missed health check does not stop a process that is still listening while a job already has a session. A job that has not reached OpenCode fails within a few seconds when serve does not answer, then leaves executing so the quiet process can be replaced. That opening check does not use the agent time budget. A job that starts while serve is reloading waits for that restart. Saving or creating an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. Jobs that are still queued stay queued while that reload is waiting, in progress, or failed. They start after a reload succeeds. A failed reload has not loaded the saved agents.
+
 A systemd unit with no `User=` runs as root. `sudo nohup opencode serve` is root as well, and `sudo` sets `HOME` to `/root`. The clone under `~/.local/share/yaver/t` is then owned by root. A serve process started as the login user cannot write it, so the agent commits in `~/.tmp/opencode`. The job can show completed, and no merge request is opened. The root dashboard reads `/root/.local/share/opencode`, while the user's serve wrote `~/.local/share/opencode`, so Transcript stays empty. Windows does not split this way: one account runs the daemon, the clone, and OpenCode.
 
 Put the login that should own the clones on the Yaver unit:
@@ -376,7 +378,7 @@ User=yaver
 Group=yaver
 ```
 
-Start `opencode serve` as that same user, with that user's home. A user systemd service keeps it up across reboots. `nohup` is fine when it is started as that user.
+The daemon starts serve as that same user. A serve you already started as that user, with that user's home, stays up while its health check passes. A user systemd service keeps that process up across reboots. `nohup` is fine when it is started as that user. Do not start it as root.
 
 If a root run already created the trees, give them to that user once, then start both processes as the user:
 
@@ -423,7 +425,7 @@ Useful pages:
 
 - **Tasks / Jobs** — live and past runs (prompts and logs are per selected job)
 - **Poll** — last Jira board snapshot
-- **Storage** — temp clones. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
+- **Storage and Sessions** — temp clones, with Details for the OpenCode chats that use each folder. Chats whose folder was deleted stay on this page so they can be reset. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
 - **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
 - **Settings** — board id, poll interval, trigger names, Azure collection PATs (no token values shown)
 

@@ -19,6 +19,7 @@ export function StatusBadge({
   const pad = size === 'sm' ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'
   return (
     <span className={`vd-pill ${pad} ${TONE[meta.tone]}`} title={status}>
+      <span className="h-1.5 w-1.5 shrink-0 bg-current" aria-hidden />
       {meta.label}
     </span>
   )

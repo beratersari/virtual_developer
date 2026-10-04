@@ -292,12 +292,11 @@ export function JobsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Workbench"
         title="Jobs"
         description={
           live.connected
-            ? 'Each card is one agent run. Use the Queue tab for messages waiting for a free slot.'
-            : 'Disconnected — list may be stale.'
+            ? 'Queue holds messages waiting for a free slot.'
+            : 'Disconnected. This list may be stale.'
         }
         actions={
           <label className="block text-xs text-text-muted">
@@ -329,17 +328,14 @@ export function JobsPage() {
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+        <div className="vd-seg">
           {FILTERS.map((f) => (
             <button
               key={f.id}
               type="button"
+              aria-pressed={statusFilter === f.id}
               onClick={() => navigate(jobsFilterPath(f.id))}
-              className={`rounded-full px-3 py-1 text-xs font-semibold transition-transform duration-150 active:scale-95 ${
-                statusFilter === f.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-muted hover:text-text'
-              }`}
+              className={`vd-seg-btn ${statusFilter === f.id ? 'is-on' : ''}`}
             >
               {f.id === 'queue' ? `Queue (${badgeQueued})` : f.label}
             </button>
@@ -376,24 +372,6 @@ export function JobsPage() {
           </span>
         )}
       </div>
-
-      {statusFilter === 'active' && (
-        <p className="text-xs text-text-muted">
-          Running in this daemon now, plus tickets still planning/executing after a
-          restart. Queue is waiting messages, not these runs.
-        </p>
-      )}
-      {statusFilter !== 'queue' && (
-        <p className="text-xs text-text-muted">
-          Search matches issue key, title, and description.
-        </p>
-      )}
-      {showQueue && (
-        <p className="text-xs text-text-muted">
-          Only messages waiting for a free issue/workspace slot. Running work is under
-          In flight / All.
-        </p>
-      )}
 
       {error && (
         <Alert

@@ -15,7 +15,7 @@ export function MetaCard({
 }) {
   return (
     <div className={className}>
-      <div className="text-[11px] text-text-muted">{label}</div>
+      <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
       {valueNode ? (
         <div className="mt-0.5">{valueNode}</div>
       ) : (

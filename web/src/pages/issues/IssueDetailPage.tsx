@@ -13,7 +13,7 @@ import { MetaCard } from '../../ui/MetaCard'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { JobsTable } from '../jobs/JobsTable'
-import { usePageTitle } from '../../app/pageTitleContext'
+import { usePageTitle, useRecordTitle } from '../../app/pageTitleContext'
 import { issuePageName } from '../../util/pageTitle'
 import { issueTabFromSection, issueTabPath, type IssueTab } from './issueTabUrl'
 import { groupDeliveries } from '../jobs/repoDeliveries'
@@ -46,6 +46,7 @@ export function IssueDetailPage() {
       ? issuePageName(detail.summary, detail.issue_key || issueKey, section)
       : issuePageName(null, null, section),
   )
+  const recordName = useRecordTitle()
   const [loading, setLoading] = useState(!cached)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
@@ -195,16 +196,15 @@ export function IssueDetailPage() {
           <Link to="/jobs" className="vd-btn-ghost mb-3 inline-block text-sm">
             ← Jobs
           </Link>
-          <h1 className="font-mono text-2xl font-semibold tracking-tight text-text">
-            {detail?.issue_key ?? (loading ? '…' : '—')}
-          </h1>
-          <p className="mt-1 text-lg text-text">
-            {detail?.summary ? (
-              <JiraLinkedText text={detail.summary} jiraHost={live.settings?.jira_host || ''} />
-            ) : (
-              '—'
-            )}
-          </p>
+          {detail?.issue_key ? (
+            <p className="font-mono text-lg font-semibold tracking-tight text-text">
+              {detail.issue_key}
+            </p>
+          ) : recordName ? null : (
+            <h1 className="font-mono text-lg font-semibold tracking-tight text-text">
+              {loading ? '…' : '—'}
+            </h1>
+          )}
           {detail && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <StatusBadge status={detail.status} />
@@ -219,8 +219,7 @@ export function IssueDetailPage() {
           {planReady && (
             <p className="mt-2 text-xs text-text-muted">
               Plan is ready. Implement starts the build. Revise asks for a
-              change, then updates the plan. Jira labels and Azure comments
-              still work the same way.
+              change, then updates the plan.
             </p>
           )}
           {notice && <p className="mt-2 text-sm text-text-secondary">{notice}</p>}

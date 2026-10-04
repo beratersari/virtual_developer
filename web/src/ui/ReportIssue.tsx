@@ -168,9 +168,6 @@ export function ReportIssue() {
               onClick={() => setSelectedIds([])}
             >
               <span className="font-medium text-text">General issue</span>
-              <span className="block text-[11px] text-text-muted">
-                Settings, poll, queue, serve logs, and your note
-              </span>
             </button>
             {loadingJobs && (
               <div className="flex items-center gap-2 px-2 py-2 text-xs text-text-muted">

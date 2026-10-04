@@ -32,16 +32,15 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
 import { PromptBlock } from '../../ui/PromptBlock'
-import { JiraLinkedText } from '../../ui/JiraLinkedText'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { isDaemonChatter } from '../../util/daemonLogs'
 import { jobChannelLabel } from '../../util/jobChannel'
-import { resolveJobWorker, workerLabel } from '../../util/worker'
+import { resolveJobWorker } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
 import { JobChatTab } from './JobChatTab'
-import { usePageTitle } from '../../app/pageTitleContext'
+import { usePageTitle, useRecordTitle } from '../../app/pageTitleContext'
 import { jobPageName } from '../../util/pageTitle'
 import { jobTabFromSection, jobTabPath, type JobTab } from './jobTabUrl'
 
@@ -53,6 +52,7 @@ export function JobDetailPage() {
   const cached = peekJob(jobId.trim())
   const [job, setJob] = useState<JobItem | null>(cached)
   usePageTitle(jobPageName(job?.summary, section, job?.issue_key))
+  const recordName = useRecordTitle()
   const [prompts, setPrompts] = useState<TextArtifact[]>([])
   const [sessionLogs, setSessionLogs] = useState<TextArtifact[]>([])
   const [systemLogs, setSystemLogs] = useState<SystemLogLine[]>([])
@@ -349,13 +349,8 @@ export function JobDetailPage() {
             )}
             {job && <StatusBadge status={job.status} />}
             {channel && (
-              <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+              <span className="vd-tag">
                 {channel}
-              </span>
-            )}
-            {job && (
-              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
-                {workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}
               </span>
             )}
             {job?.live && <LiveDot />}
@@ -363,23 +358,12 @@ export function JobDetailPage() {
               <span className="font-mono text-sm text-text-secondary">{elapsed}</span>
             )}
           </div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-            {job?.summary ? (
-              <JiraLinkedText text={job.summary} jiraHost={live.settings?.jira_host || ''} />
-            ) : loading ? (
-              'Loading…'
+          {!job && loading &&
+            (recordName ? (
+              <p className="mt-2 text-sm text-text-muted">Loading…</p>
             ) : (
-              'Job'
-            )}
-          </h1>
-          <p className="mt-1 font-mono text-xs text-text-muted">
-            {job?.job_id}
-            {job ? ` · ${channel || job.workflow_type || ''}` : ''}
-            {job
-              ? ` · ${workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}`
-              : ''}
-            {job?.model ? ` · ${job.model}` : ''}
-          </p>
+              <h1 className="mt-2 text-lg font-semibold tracking-tight text-text">Loading…</h1>
+            ))}
           {showImplement && (
             <p className="mt-2 max-w-xl text-xs text-text-muted">
               Plan is ready. Implement starts the build. Revise asks for a change, then updates the plan.
@@ -526,7 +510,6 @@ export function JobDetailPage() {
           <div key="overview" className="vd-fade">
             <JobOverview
               job={job}
-              elapsedLabel={elapsed}
               fallbackWorker={live.settings?.agent_backend || ''}
               jiraHost={live.settings?.jira_host || ''}
             />
@@ -584,9 +567,7 @@ export function JobDetailPage() {
         {job && tab === 'logs' && (
           <div key="logs" className="vd-fade space-y-2 text-sm">
             <p className="text-xs text-text-muted">
-              Daemon start/exit/failure lines for{' '}
-              <span className="font-mono">{job.job_id}</span>. Assistant
-              replies and tool chatter are on the Transcript tab.
+              Assistant replies are on the Transcript tab.
             </p>
             {systemLogs.filter((line) => !isDaemonChatter(line.message)).length === 0 && (
               <p className="text-text-muted">No system log lines for this job.</p>

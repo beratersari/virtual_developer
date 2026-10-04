@@ -96,6 +96,11 @@ def test_agent_file_round_trip(tmp_path, monkeypatch):
 
 def test_agent_http_create_and_edit(tmp_path, monkeypatch):
     monkeypatch.setattr("src.opencode_agents.agents_dir", lambda: tmp_path)
+    monkeypatch.setattr("src.opencode_agents.opencode_agents_dir", lambda: tmp_path / "oc")
+    monkeypatch.setattr(
+        "src.opencode_agents.opencode_xdg_agents_dir", lambda: tmp_path / "xdg"
+    )
+    monkeypatch.setattr("src.opencode_agents.claude_agents_dir", lambda: tmp_path / "claude")
     app = create_dashboard_app()
     client = TestClient(app)
     created = client.post("/api/opencode-agents", json={"name": "derman-docs", "text": ""})
@@ -109,4 +114,7 @@ def test_agent_http_create_and_edit(tmp_path, monkeypatch):
     body = client.get("/api/opencode-agents/derman-docs")
     assert "Write the guide." in body.json()["text"]
     assert (tmp_path / "derman-docs.md").is_file()
+    assert "Write the guide." in (tmp_path / "oc" / "derman-docs.md").read_text(
+        encoding="utf-8"
+    )
     assert client.post("/api/opencode-agents", json={"name": "../x", "text": "no"}).status_code == 400

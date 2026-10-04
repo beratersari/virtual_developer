@@ -1,17 +1,21 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { ServeHealth } from './ServeHealth'
 import { signOutDashboard } from '../auth/dashboardAuth'
 import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
-import { PageTitleRoot } from './pageTitleContext'
+import { PageTitleRoot, useRecordTitle } from './pageTitleContext'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
   { to: '/analytics', label: 'Analytics', match: (p: string) => p.startsWith('/analytics') },
   { to: '/scheduled/jira', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
-  { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
-  { to: '/storage', label: 'Storage', match: (p: string) => p.startsWith('/storage') },
+  {
+    to: '/storage',
+    label: 'Storage and Sessions',
+    match: (p: string) => p.startsWith('/storage'),
+  },
   { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
   { to: '/settings/jira', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
 ] as const
@@ -55,15 +59,6 @@ function IconBoard() {
     </svg>
   )
 }
-function IconSession() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="3" y="2.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.9" />
-      <rect x="3" y="6.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.55" />
-      <rect x="3" y="10.5" width="10" height="3" rx="1" fill="currentColor" opacity="0.35" />
-    </svg>
-  )
-}
 function IconDisk() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -88,7 +83,19 @@ function IconGear() {
   )
 }
 
-const ICONS = [IconJobs, IconChart, IconClock, IconSession, IconDisk, IconBoard, IconGear]
+const ICONS = [IconJobs, IconChart, IconClock, IconDisk, IconBoard, IconGear]
+
+function RecordBar() {
+  const name = useRecordTitle()
+  if (!name) return null
+  return (
+    <div className="vd-topbar">
+      <h1 className="vd-topbar-name" title={name}>
+        {name}
+      </h1>
+    </div>
+  )
+}
 
 export function Shell() {
   const live = useLive()
@@ -107,9 +114,9 @@ export function Shell() {
             <img src="/yaver-wink.gif" alt="" width={64} height={64} />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold tracking-tight">Yaver</div>
-            <div className="text-[11px] text-text-muted">
-              the aide · v{live.meta?.version ?? '—'}
+            <div className="truncate font-mono text-sm font-semibold tracking-tight">Yaver</div>
+            <div className="truncate font-mono text-[11px] text-text-muted">
+              v{live.meta?.version ?? '—'}
             </div>
           </div>
         </div>
@@ -125,30 +132,29 @@ export function Shell() {
                 className={active ? 'active' : undefined}
                 aria-current={active ? 'page' : undefined}
               >
+                <span className="vd-nav-idx" aria-hidden>
+                  {String(i + 1).padStart(2, '0')}
+                </span>
                 <Icon />
                 <span className="flex-1">{item.label}</span>
                 {item.to === '/jobs' && workQueued > 0 && (
-                  <span
-                    className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]"
-                    title="Messages waiting in the work queue"
-                  >
+                  <span className="vd-count" title="Messages waiting in the work queue">
                     {workQueued}
                   </span>
                 )}
                 {item.to === '/poll' && boardMatched > 0 && (
-                  <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]">
-                    {boardMatched}
-                  </span>
+                  <span className="vd-count">{boardMatched}</span>
                 )}
               </NavLink>
             )
           })}
         </nav>
 
-        <div className="mt-3 space-y-2 px-2 text-xs">
-          <div className="hidden font-mono text-[11px] leading-snug text-text md:block">
+        <div className="vd-sidebar-foot mt-3 space-y-2 border-t border-border px-2 pt-3 text-xs">
+          <div className="hidden font-mono text-[11px] leading-snug text-accent-text md:block">
             {localClock || '—'}
           </div>
+          <ServeHealth />
           <div className="hidden items-center gap-2 md:flex">
             <span
               className={`h-2 w-2 rounded-full ${
@@ -182,6 +188,7 @@ export function Shell() {
               : 'vd-main-inner space-y-5'
           }
         >
+          <RecordBar />
           {live.error && <Alert>{live.error}</Alert>}
           {live.poll?.error &&
           live.poll.error.trim().toLowerCase() !== 'jira disabled' ? (

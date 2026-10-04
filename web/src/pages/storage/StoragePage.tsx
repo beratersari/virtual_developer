@@ -1,72 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteTempFolder, fetchStorage, fetchStorageDeletes, isAbortError } from '../../api/client'
+import { deleteTempFolder, fetchStorage, fetchStorageDeletes, isAbortError, resetOpencodeSession } from '../../api/client'
 import { usePageLoad } from '../../api/pageLoad'
-import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
+import type { OpencodeSessionBind, StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
-import { storageMrLabel } from './mrLabel'
+import { folderPageName } from '../../util/pageTitle'
+import { kindLabel, resetBody } from '../sessions/sessionResetCopy'
+import { ReviewLinks } from './folderDisplay'
+import { storageFolderPath } from './folderPath'
+import { SessionRow } from './StorageFolderPage'
 
 function folderHref(folder: StorageFolder): string | null {
   if (folder.job_id) return `/jobs/${encodeURIComponent(folder.job_id)}`
   if (folder.issue_key) return `/tasks/${encodeURIComponent(folder.issue_key)}`
   return null
-}
-
-function mrStateLabel(state?: string | null): string {
-  const raw = (state || '').trim().toLowerCase()
-  if (!raw) return '…'
-  if (raw === 'opened' || raw === 'open') return 'open'
-  if (raw === 'unknown') return 'unknown'
-  return raw
-}
-
-function folderReviews(folder: StorageFolder): { url: string; state?: string | null }[] {
-  const listed = (folder.merge_requests || [])
-    .map((row) => ({ url: (row.url || '').trim(), state: row.state }))
-    .filter((row) => row.url)
-  if (listed.length) return listed
-  const url = (folder.merge_request_url || '').trim()
-  if (!url) return []
-  return [{ url, state: folder.merge_request_state }]
-}
-
-function hasLinkedReview(folder: StorageFolder): boolean {
-  return folderReviews(folder).length > 0
-}
-
-function ReviewLinks({ folder }: { folder: StorageFolder }) {
-  const reviews = folderReviews(folder)
-  if (!reviews.length) return null
-  return (
-    <>
-      {reviews.map((review) => (
-        <span key={review.url} className="inline-flex items-baseline gap-1">
-          <a
-            href={review.url}
-            target="_blank"
-            rel="noreferrer"
-            className="font-mono text-xs text-accent-text hover:underline"
-          >
-            {storageMrLabel(review.url)}
-          </a>
-          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-            {mrStateLabel(review.state)}
-          </span>
-        </span>
-      ))}
-    </>
-  )
-}
-
-function folderLabel(folder: StorageFolder): string {
-  const key = folder.issue_key?.trim()
-  const title = folder.summary?.trim()
-  if (key && title) return `${key} — ${title}`
-  if (key) return key
-  if (title) return title
-  return folder.name
 }
 
 function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]): StoragePayload | null {
@@ -190,14 +139,6 @@ function StorageList({
                   {folder.modified_at ? ` · ${folder.modified_at}` : ''}
                   {folder.in_use ? ' · in use' : ''}
                 </div>
-                {!hasLinkedReview(folder) && !isDeleting && (
-                  <div className="mt-1.5 max-w-xl text-xs text-danger-text">
-                    No GitLab MR or Azure PR is linked to this folder. Yaver
-                    only auto-deletes a clone after a linked review is merged,
-                    completed, or abandoned. Delete this folder yourself when
-                    you no longer need it.
-                  </div>
-                )}
                 {isDeleting && (
                   <div className="mt-2 max-w-sm">
                     <div className="flex items-center justify-between text-xs text-text-secondary">
@@ -218,22 +159,30 @@ function StorageList({
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                className="vd-btn vd-btn-danger text-xs"
-                disabled={isDeleting || folder.in_use}
-                title={
-                  folder.in_use
-                    ? 'Clone is in use by a running job; stop the job first'
-                    : undefined
-                }
-                onClick={() => {
-                  if (folder.in_use || isDeleting) return
-                  onDelete(folder)
-                }}
-              >
-                {isDeleting ? `${pct}%` : folder.in_use ? 'In use' : 'Delete'}
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <Link
+                  to={storageFolderPath(folder.name)}
+                  className="vd-btn vd-btn-secondary text-xs no-underline"
+                >
+                  Details
+                </Link>
+                <button
+                  type="button"
+                  className="vd-btn vd-btn-danger text-xs"
+                  disabled={isDeleting || folder.in_use}
+                  title={
+                    folder.in_use
+                      ? 'Clone is in use by a running job; stop the job first'
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (folder.in_use || isDeleting) return
+                    onDelete(folder)
+                  }}
+                >
+                  {isDeleting ? `${pct}%` : folder.in_use ? 'In use' : 'Delete'}
+                </button>
+              </div>
             </li>
           )
         })}
@@ -243,10 +192,47 @@ function StorageList({
   )
 }
 
+function SessionsWithoutFolder({
+  sessions,
+  onReset,
+}: {
+  sessions: OpencodeSessionBind[]
+  onReset: (bindId: string) => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+          Sessions without a folder
+        </h2>
+        <div className="text-xs text-text-secondary">
+          {sessions.length} session{sessions.length === 1 ? '' : 's'}
+        </div>
+      </div>
+      <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
+        {sessions.map((session) => (
+          <SessionRow
+            key={session.bind_id}
+            session={session}
+            folderName=""
+            showDirectory
+            onReset={onReset}
+          />
+        ))}
+        {sessions.length === 0 && (
+          <li className="py-6 text-sm text-text-muted">No OpenCode session is missing a folder.</li>
+        )}
+      </ul>
+    </div>
+  )
+}
+
 export function StoragePage() {
   const [data, setData] = useState<StoragePayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<StorageFolder | null>(null)
+  const [resetId, setResetId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const flight = usePageLoad()
 
   const reload = useCallback(async (refresh = false) => {
@@ -329,13 +315,15 @@ export function StoragePage() {
     ageDays && ageDays > 0
       ? ` Unused folders older than ${ageDays} days are deleted hourly.`
       : ' Automatic age delete is off.'
+  const loose = data?.sessions_without_folder || []
+  const resetTarget = loose.find((session) => session.bind_id === resetId)
+  const resetKind = kindLabel(resetTarget?.kind)
 
   return (
     <section className="space-y-5">
       <PageHeader
-        kicker="Host"
-        title="Storage"
-        description={`Temp clones under TEMP_DIR_BASE. Live jobs are never deleted.${ageNote} Linked GitLab MRs and Azure PRs still delete the clone when that review is merged, completed, or abandoned.`}
+        title="Storage and Sessions"
+        description={`Live jobs are never deleted.${ageNote} A linked review deletes its clone when that review is merged, completed, or abandoned. Details lists the OpenCode chats that use a folder. Chats whose folder was deleted stay listed below.`}
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
@@ -383,18 +371,46 @@ export function StoragePage() {
         items={data?.folders || []}
         onDelete={(folder) => setPending(folder)}
       />
+      {data && (
+        <SessionsWithoutFolder
+          sessions={data.sessions_without_folder || []}
+          onReset={setResetId}
+        />
+      )}
       <ConfirmDialog
         open={Boolean(pending)}
         title="Force-delete this clone?"
         body={
           pending
-            ? `Permanently delete ${folderLabel(pending)}\n${pending.path}\n\nThis cannot be undone.`
+            ? `Permanently delete ${folderPageName(pending)}\n${pending.path}\n\nThis cannot be undone.`
             : ''
         }
         confirmLabel="Delete"
         danger
         onConfirm={onDelete}
         onCancel={() => setPending(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(resetId)}
+        title={resetTarget ? `Reset ${resetTarget.session_id}?` : `Reset this ${resetKind} session?`}
+        body={resetTarget ? resetBody(resetTarget) : 'Next job on this bind starts a new session.'}
+        confirmLabel="Reset session"
+        danger
+        busy={busy}
+        onConfirm={async () => {
+          if (!resetId) return
+          setBusy(true)
+          try {
+            await resetOpencodeSession(resetId)
+            setResetId(null)
+            await reload()
+          } catch (e) {
+            setError(e instanceof Error ? e.message : 'Reset failed')
+          } finally {
+            setBusy(false)
+          }
+        }}
+        onCancel={() => setResetId(null)}
       />
     </section>
   )
