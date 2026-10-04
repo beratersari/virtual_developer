@@ -397,7 +397,7 @@ JIRA_API_TOKEN=your-api-token-here
 | API | FastAPI in the **daemon process** (with poller + jobs) |
 | Live updates | WebSocket `/ws` |
 | Frontend | Vite + React + TypeScript + Tailwind (`web/`) — **display only** |
-| Palette | Phosphor console (`web/src/index.css` tokens): near-black surfaces, hairline borders, one phosphor-green accent, mono labels. Status keeps a tone mark plus a text label. The wink mark stays on navy `#11182c`. Job detail is run-scoped (prompts/logs for selected job only; other runs collapsed). |
+| Palette | Phosphor console (`web/src/index.css` tokens): near-black surfaces, hairline borders, one phosphor-green accent, mono labels. Status keeps a tone mark plus a text label. Dark theme fills the wink mark with navy `#11182c`. Light theme fills that same transparent gif with the light surface. Job detail is run-scoped (prompts/logs for selected job only; other runs collapsed). |
 
 ### Rules
 

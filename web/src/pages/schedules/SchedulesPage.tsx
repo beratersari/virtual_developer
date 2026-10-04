@@ -550,7 +550,12 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
         />
       </label>
       <p className="actions">
-        <button type="button" disabled={looking || !repo.trim() || !iid.trim()} onClick={() => void get()}>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={looking || !repo.trim() || !iid.trim()}
+          onClick={() => void get()}
+        >
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
@@ -769,7 +774,12 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
         />
       </label>
       <p className="actions">
-        <button type="button" disabled={looking || !repo.trim() || !iid.trim()} onClick={() => void get()}>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={looking || !repo.trim() || !iid.trim()}
+          onClick={() => void get()}
+        >
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
@@ -1093,7 +1103,12 @@ function Existing({ onDone }: { onDone: () => void }) {
         </>
       )}
       <p className="actions">
-        <button type="button" disabled={looking || !canLookUp} onClick={() => void get()}>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={looking || !canLookUp}
+          onClick={() => void get()}
+        >
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
