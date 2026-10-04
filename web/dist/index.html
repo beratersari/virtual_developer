@@ -5,6 +5,15 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Yaver</title>
+    <script>
+      (function () {
+        var theme = "dark";
+        try {
+          if (localStorage.getItem("yaver.theme") === "light") theme = "light";
+        } catch (e) {}
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <style>
       html, body {
         background-color: #07090d;
@@ -53,9 +62,39 @@
       @media (prefers-reduced-motion: reduce) {
         .vd-boot-spin { animation: none; }
       }
+      html[data-theme="light"], html[data-theme="light"] body {
+        background-color: #f3f6f4;
+        color: #122018;
+        background-image:
+          linear-gradient(rgba(12, 122, 72, 0.06) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(12, 122, 72, 0.06) 1px, transparent 1px);
+      }
+      html[data-theme="light"] .vd-boot-card {
+        border-color: #7f9d8e;
+        background: #ffffff;
+        box-shadow: 0 24px 80px rgba(18, 32, 24, 0.12);
+      }
+      html[data-theme="light"] .vd-boot-bar { background: #0c7a48; }
+      html[data-theme="light"] .vd-boot-kicker { color: #085c36; }
+      html[data-theme="light"] .vd-boot-kicker::before { color: #3c5548; }
+      html[data-theme="light"] .vd-boot-blurb { color: #24382d; }
+      html[data-theme="light"] .vd-boot-row {
+        border-color: #d5e2db;
+        background: #f3f6f4;
+      }
+      html[data-theme="light"] .vd-boot-spin {
+        border-color: #0c7a48;
+        border-right-color: transparent;
+      }
+      html[data-theme="light"] .vd-boot-hint { color: #3c5548; }
+      html[data-theme="light"] .vd-boot-mark {
+        background: transparent;
+        border-color: transparent;
+        box-shadow: none;
+      }
     </style>
-    <script type="module" crossorigin src="/assets/index-CS6xMFDY.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DxfzKt2A.css">
+    <script type="module" crossorigin src="/assets/index-CgaJMn77.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CEr7WDyG.css">
   </head>
   <body>
     <div id="root">
@@ -64,7 +103,7 @@
           <div class="vd-boot-bar"></div>
           <div class="vd-boot-body">
             <div style="display:flex;align-items:center;gap:10px">
-              <img class="vd-boot-mark" src="/yaver-wink.gif" alt="" width="64" height="64" />
+              <img class="vd-boot-mark" src="/yaver-wink.gif?v=2" alt="" width="64" height="64" />
               <div>
                 <div class="vd-boot-kicker">Yaver</div>
                 <div class="vd-boot-title">Ops console</div>
