@@ -28,11 +28,11 @@ const PERIODS: { id: AnalyticsPeriod; label: string }[] = ANALYTICS_PERIODS.map(
 type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
-  { id: 'total', label: 'Total', color: '#3dffb0' },
-  { id: 'completed', label: 'Completed', color: '#5ec8ff' },
-  { id: 'error', label: 'Error', color: '#ff5d73' },
-  { id: 'cancelled', label: 'Cancelled', color: '#8aa0b5' },
-  { id: 'in_flight', label: 'In flight', color: '#ffc857' },
+  { id: 'total', label: 'Total', color: 'var(--chart-total)' },
+  { id: 'completed', label: 'Completed', color: 'var(--chart-completed)' },
+  { id: 'error', label: 'Error', color: 'var(--chart-error)' },
+  { id: 'cancelled', label: 'Cancelled', color: 'var(--chart-cancelled)' },
+  { id: 'in_flight', label: 'In flight', color: 'var(--chart-inflight)' },
 ]
 
 function csv(set: Set<string>) {

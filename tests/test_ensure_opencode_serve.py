@@ -10,7 +10,7 @@ WIN = ROOT / "packaging" / "windows"
 
 def test_ensure_opencode_serve_script_is_safe_sibling():
     ps1 = (WIN / "Ensure-OpencodeServe.ps1").read_text(encoding="utf-8")
-    assert "Test-ServeHealthy" in ps1
+    assert "Import-OpencodeServeAuth" in ps1
     assert "Test-PortListening" in ps1
     assert "VD-OpenCode-Serve" in ps1
     assert "global/health" in ps1

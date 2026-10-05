@@ -12,9 +12,9 @@ cd /d "%SCRIPT_DIR%"
 
 REM Helpers live under packaging\windows when bat is at product root (after install)
 set "PKG_WIN=%SCRIPT_DIR%\packaging\windows"
-if not exist "%PKG_WIN%\Wait-Http.ps1" set "PKG_WIN=%SCRIPT_DIR%"
-if not exist "%PKG_WIN%\Wait-Http.ps1" (
-    if exist "%SCRIPT_DIR%\..\windows\Wait-Http.ps1" set "PKG_WIN=%SCRIPT_DIR%\..\windows"
+if not exist "%PKG_WIN%\Ensure-OpencodeServe.ps1" set "PKG_WIN=%SCRIPT_DIR%"
+if not exist "%PKG_WIN%\Ensure-OpencodeServe.ps1" (
+    if exist "%SCRIPT_DIR%\..\windows\Ensure-OpencodeServe.ps1" set "PKG_WIN=%SCRIPT_DIR%\..\windows"
 )
 
 REM Defaults (override via env or .env OPENCODE_SERVE_URL / OPENCODE_SERVE_PORT)
@@ -76,8 +76,8 @@ if not exist "%OPENCODE_EXE%" (
 )
 :have_oc
 
-if not exist "%PKG_WIN%\Wait-Http.ps1" (
-    echo [ERROR] Wait-Http.ps1 not found under packaging\windows.
+if not exist "%PKG_WIN%\Ensure-OpencodeServe.ps1" (
+    echo [ERROR] Ensure-OpencodeServe.ps1 not found under packaging\windows.
     call :maybe_pause
     exit /b 1
 )
@@ -94,11 +94,8 @@ if exist "%PKG_WIN%\Stop-VdProcesses.ps1" (
 )
 timeout /t 1 /nobreak >nul
 
-echo Starting OpenCode serve in window "VD-OpenCode-Serve"...
-REM Prefer PATH entry under %%USERPROFILE%%\.opencode\bin (same as start-opencode.bat)
-start "VD-OpenCode-Serve" /D "%SCRIPT_DIR%" cmd /c "set OPENCODE_DISABLE_MODELS_FETCH=1&& set GIT_TERMINAL_PROMPT=0&& set GCM_INTERACTIVE=never&& set GCM_MODAL_PROMPT=false&& set GCM_GUI_PROMPT=false&& set PATH=%USERPROFILE%\.opencode\bin;%PATH%&& opencode serve --port %SERVE_PORT% --hostname %SERVE_HOST% --print-logs --log-level INFO & echo. & echo OpenCode serve exited. & pause"
-echo Waiting for http://127.0.0.1:%SERVE_PORT%/global/health ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PKG_WIN%\Wait-Http.ps1" -Url "http://127.0.0.1:%SERVE_PORT%/global/health" -TimeoutSec 60 -OkPattern "healthy"
+echo Ensuring OpenCode serve on http://127.0.0.1:%SERVE_PORT%/ ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PKG_WIN%\Ensure-OpencodeServe.ps1" -ProjectDir "%SCRIPT_DIR%" -ServeHost "%SERVE_HOST%" -ServePort %SERVE_PORT% -TimeoutSec 60
 if errorlevel 1 (
     echo [ERROR] OpenCode serve did not become ready on port %SERVE_PORT%.
     echo Open the "VD-OpenCode-Serve" window and check the log.

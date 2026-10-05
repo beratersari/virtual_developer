@@ -3,6 +3,7 @@ import { ServeHealth } from './ServeHealth'
 import { signOutDashboard } from '../auth/dashboardAuth'
 import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
+import { ThemeSwitch } from '../ui/ThemeSwitch'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
 import { PageTitleRoot, useRecordTitle } from './pageTitleContext'
@@ -110,8 +111,9 @@ export function Shell() {
     <div className="vd-app">
       <aside className="vd-sidebar">
         <div className="vd-brand">
+          <ThemeSwitch />
           <div className="vd-mark" aria-hidden>
-            <img src="/yaver-wink.gif" alt="" width={64} height={64} />
+            <img src="/yaver-wink.gif?v=2" alt="" width={64} height={64} />
           </div>
           <div className="min-w-0">
             <div className="truncate font-mono text-sm font-semibold tracking-tight">Yaver</div>

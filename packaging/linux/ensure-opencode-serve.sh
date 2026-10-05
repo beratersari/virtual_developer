@@ -19,11 +19,17 @@ if [[ -f "$ROOT/.env" ]]; then
   export OPENCODE_SERVE_URL
 fi
 vd_parse_serve_url
+vd_import_opencode_serve_auth "$ROOT/.env"
 
 HEALTH="http://127.0.0.1:${SERVE_PORT}/global/health"
-if vd_wait_http "$HEALTH" 2 "healthy"; then
+vd_serve_http_code=""
+if vd_wait_serve_health "$HEALTH" 2; then
   echo "[OK] OpenCode serve already healthy on port $SERVE_PORT"
   exit 0
+fi
+if [[ "$vd_serve_http_code" == "401" ]]; then
+  echo "[ERROR] OpenCode serve rejected the password (HTTP 401)." >&2
+  exit 1
 fi
 
 if ! OC="$(vd_find_opencode)"; then
@@ -47,8 +53,13 @@ else
   echo $! >"$LOG_DIR/opencode-serve.pid"
 fi
 
-if ! vd_wait_http "$HEALTH" "$TIMEOUT" "healthy"; then
-  echo "[ERROR] OpenCode serve did not become healthy on $HEALTH"
+vd_serve_http_code=""
+if ! vd_wait_serve_health "$HEALTH" "$TIMEOUT"; then
+  if [[ "$vd_serve_http_code" == "401" ]]; then
+    echo "[ERROR] OpenCode serve rejected the password (HTTP 401)." >&2
+  else
+    echo "[ERROR] OpenCode serve did not become healthy on $HEALTH" >&2
+  fi
   exit 1
 fi
 echo "[OK] OpenCode serve healthy on port $SERVE_PORT"

@@ -553,6 +553,35 @@ class Settings(BaseSettings):
         ),
     )
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
+    # LAN release site (Settings → Runtime). Empty host or port 0 leaves it unset.
+    release_host: str = Field(
+        default="",
+        description="Release server IP or hostname. No scheme or path.",
+    )
+    release_port: int = Field(
+        default=0,
+        description="Release server port. 0 means unset.",
+    )
+
+    @field_validator("release_port", mode="before")
+    @classmethod
+    def _empty_release_port(cls, value: Any) -> int:
+        """A blank env value means the update server is not set."""
+        if isinstance(value, bool) or value is None:
+            return 0
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or not text.isdigit():
+                return 0
+            value = int(text)
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if port < 0 or port > 65535:
+            return 0
+        return port
+
     dashboard_enabled: bool = Field(default=True, description="Serve ops dashboard with the daemon")
     dashboard_allow_remote: bool = Field(
         default=True,
@@ -1162,6 +1191,8 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
         "azure_collection_urls",
+        "release_host",
+        "release_port",
     }
 )
 
@@ -1193,6 +1224,8 @@ _RUNTIME_ENV_MIRROR = {
     "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",
     "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
     "azure_collection_pats": "AZURE_COLLECTION_PATS",
+    "release_host": "RELEASE_HOST",
+    "release_port": "RELEASE_PORT",
 }
 
 
@@ -1485,6 +1518,20 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                     f"Ignoring invalid runtime agent_task_timeout_seconds={value!r}"
                 )
                 continue
+        if key == "release_port":
+            try:
+                if isinstance(value, bool):
+                    continue
+                port = int(value)
+            except (TypeError, ValueError):
+                logger.warning(f"Ignoring invalid runtime release_port={value!r}")
+                continue
+            if port < 0 or port > 65535:
+                logger.warning(f"Ignoring invalid runtime release_port={value!r}")
+                continue
+            value = port
+        if key == "release_host":
+            value = str(value or "").strip()
         if key == "jira_email":
             # Cloud API tokens need email+token Basic. An empty runtime
             # override (from an old Settings save) must not wipe .env email.

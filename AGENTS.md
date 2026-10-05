@@ -397,7 +397,7 @@ JIRA_API_TOKEN=your-api-token-here
 | API | FastAPI in the **daemon process** (with poller + jobs) |
 | Live updates | WebSocket `/ws` |
 | Frontend | Vite + React + TypeScript + Tailwind (`web/`) — **display only** |
-| Palette | Phosphor console (`web/src/index.css` tokens): near-black surfaces, hairline borders, one phosphor-green accent, mono labels. Status keeps a tone mark plus a text label. The wink mark stays on navy `#11182c`. Job detail is run-scoped (prompts/logs for selected job only; other runs collapsed). |
+| Palette | Phosphor console (`web/src/index.css` tokens): near-black surfaces, hairline borders, one phosphor-green accent, mono labels. Status keeps a tone mark plus a text label. Dark theme fills the wink mark with navy `#11182c`. Light theme fills that same transparent gif with the light surface. Job detail is run-scoped (prompts/logs for selected job only; other runs collapsed). |
 
 ### Rules
 
@@ -406,7 +406,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Jobs, schedules, session binds, issue state, and the queue live in ``{YAVER_DATA_DIR}/yaver.sqlite`` (indexed columns plus a JSON document, including deliveries). A first start imports leftover ``job_*.json``, ``sched_*.json``, ``osb_*.json``, ``q_*.json``, and issue-state JSON once, then deletes those files. Later starts do not scan them. Do not put plans, session logs, or clones in SQL.
 - Saved projects and repo sets live in ``{YAVER_DATA_DIR}/saved_catalog.json``. That file is the copy the dashboard reads and returns on ``GET /api/settings``, ``PATCH /api/settings``, and ``GET /api/dashboard``. A save of any other setting does not rewrite it. ``runtime_settings.json`` still receives a backup copy of the same two keys. Opening Settings, Scheduled, or the dashboard does not call GitLab or Azure. **Reload from tokens** is the import. Do not hide the stored list until that button. Do not put the catalog in SQLite.
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (LAN release server; empty disables Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -885,10 +885,46 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), `update_helper.py` + `.ps1` + `.sh` (LAN self-update; see §12) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
 | OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |
 
 Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists.
+
+---
+
+## 12. LAN self-update (intentional)
+
+Operators publish Windows and Ubuntu zips on a separate release site
+(its own repository). Yaver stores that site’s address as `RELEASE_HOST`
+and `RELEASE_PORT` (Settings → Runtime). The client calls
+`GET /api/latest?platform=…` and downloads `GET /download/{platform}` on
+`http://{host}:{port}` only. It does not follow redirects.
+
+| Platform id | Machine |
+|-------------|---------|
+| `windows` | Windows |
+| `ubuntu-18.04` | Ubuntu 18.04 |
+| `ubuntu-20.04` | Ubuntu 20.04 |
+| `ubuntu-22.04` | Ubuntu 22.04 |
+| `ubuntu-24.04` | Ubuntu 24.04 |
+
+Update downloads and checks the sha256 while this process is still up.
+A helper copied **outside** the install (`src/update_helper.py`, or the
+`.ps1` / `.sh` when a frozen build has no Python outside that folder)
+waits until this process exits, swaps the files, and starts Yaver again
+with the same command and the same `.env`. The data directory is not
+inside the install, so jobs, settings, and plans stay.
+
+**Do not “fix”** any of these:
+
+- Refusing a folder that contains `.git`. That is a checkout, not an install.
+- Keeping `.env` and `.venv` when applying an install zip. Replacing `.venv` locks the interpreter that is doing the swap.
+- Replacing an executable install only with an executable zip (`yaver` / `yaver.exe` plus `_internal`), and an install zip only with a tree that has `src/daemon.py` and `VERSION`.
+- Detaching the helper before shutdown. `stop()` must not take the helper down with the daemon.
+- `verify=False` on the release-server client (same rule as every other outbound client).
+- Treating a drive root as an install folder.
+
+Proof lives in `tests/test_self_update.py`. The helper is stdlib-only so the copy outside the install still runs after `src/` is replaced.

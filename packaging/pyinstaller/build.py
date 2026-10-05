@@ -8,10 +8,12 @@ at ``web/dist/index.html``.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -137,23 +139,49 @@ def stage_agent_installers(bundled: Path) -> None:
     dest_sh.chmod(dest_sh.stat().st_mode | 0o111)
 
 
+def _members(src_dir: Path) -> list[tuple[Path, str]]:
+    """Files inside ``src_dir``, named from that directory.
+
+    The archive root is ``yaver.exe`` / ``yaver`` and the other payload
+    files. The payload folder name is not a member.
+    """
+    return [
+        (path, path.relative_to(src_dir).as_posix())
+        for path in src_dir.rglob("*")
+        if path.is_file()
+    ]
+
+
+def _write_latest_zip(zip_path: Path, dist_name: str) -> Path:
+    spec = importlib.util.spec_from_file_location("yaver_latest_zip", HERE / "latest_zip.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("packaging/pyinstaller/latest_zip.py is missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.write_latest_copy(zip_path, dist_name)
+
+
 def _archive(src_dir: Path, dest_base: Path) -> list[Path]:
-    """Write zip (and tar.gz on POSIX) of ``src_dir`` next to ``dest_base``."""
+    """Write zip (and tar.gz on POSIX) of the files inside ``src_dir``."""
     written: list[Path] = []
     # dest_base is like yaver-windows-x64-0.2.0 — Path.with_suffix would
     # treat ".0" as the extension and produce a truncated name.
+    members = _members(src_dir)
     zip_path = dest_base.parent / f"{dest_base.name}.zip"
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in src_dir.rglob("*"):
-            if path.is_file():
-                zf.write(path, path.relative_to(src_dir.parent))
+        for path, arcname in members:
+            zf.write(path, arcname)
     written.append(zip_path)
     if os.name != "nt":
-        tar_base = str(dest_base)
-        shutil.make_archive(tar_base, "gztar", root_dir=src_dir.parent, base_dir=src_dir.name)
-        written.append(Path(tar_base + ".tar.gz"))
+        tar_path = dest_base.parent / f"{dest_base.name}.tar.gz"
+        if tar_path.exists():
+            tar_path.unlink()
+        with tarfile.open(tar_path, "w:gz") as tar:
+            for path, arcname in members:
+                tar.add(path, arcname=arcname)
+        written.append(tar_path)
     return written
 
 
@@ -269,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copytree(bundled, payload)
 
     archives = _archive(payload, out_dir / dist_name)
+    versioned_zip = next(path for path in archives if path.suffix == ".zip")
+    archives.append(_write_latest_zip(versioned_zip, dist_name))
     print(f"payload={payload}")
     for path in archives:
         print(f"archive={path}")

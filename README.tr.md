@@ -406,6 +406,12 @@ TUI’yi yalnızca proje klasöründen **`start-opencode.bat`** ile açın.
 
 CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahibine uyan Ubuntu 18.04 / 20.04 / 22.04 / 24.04 paketini indirin. OpenCode / Codex ikilinin içinde değildir. Bkz. [packaging/pyinstaller/](packaging/pyinstaller/README.md).
 
+### Ofis ağında güncelleme
+
+Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. **Settings → Runtime** bölümünde o sunucunun adresini ve kapısını yazın, **Check** deyin, sonra **Update**.
+
+Güncelleme Yaver’i kapatır, bu bilgisayara uyan paketi indirir ve Yaver’i yeniden açar. `.env` dosyası ve veri klasörü durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i.
+
 ---
 
 ## İşlem panosu

@@ -274,12 +274,26 @@ jobs:
           retention-days: 30
           compression-level: 6
 
+      - name: Require latest binary zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t found < <(find dist -maxdepth 1 -type f -name 'yaver-*-latest.zip' | sort)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "expected one yaver-*-latest.zip next to the versioned binary zip"
+            find dist -maxdepth 1 -type f -print
+            exit 1
+          fi
+          echo "latest=${found[0]}"
+
       - name: Upload zip archive
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.dist_name }}-zip
-          path: dist/${{ steps.meta.outputs.dist_name }}.zip
+          path: |
+            dist/${{ steps.meta.outputs.dist_name }}.zip
+            dist/yaver-*-latest.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -320,6 +334,7 @@ jobs:
           files: |
             dist/${{ steps.meta.outputs.dist_name }}.zip
             dist/${{ steps.meta.outputs.dist_name }}.tar.gz
+            dist/yaver-*-latest.zip
             dist/opencoderman-*.zip
           body_path: dist/RELEASE_NOTES.md
           fail_on_unmatched_files: false

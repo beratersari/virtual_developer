@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { fetchMeta } from '../api/client'
 import { Spinner } from '../ui/Spinner'
+import { ThemeSwitch } from '../ui/ThemeSwitch'
 import { applyDocumentTitle } from '../util/pageTitle'
 import {
   isUnauthorized,
@@ -13,7 +14,7 @@ function GateBrand({ blurb }: { blurb?: string }) {
     <div className="space-y-2">
       <div className="flex items-center gap-2.5">
         <div className="vd-mark" aria-hidden>
-          <img src="/yaver-wink.gif" alt="" width={64} height={64} />
+          <img src="/yaver-wink.gif?v=2" alt="" width={64} height={64} />
         </div>
         <div className="vd-kicker">Yaver</div>
       </div>
@@ -25,6 +26,9 @@ function GateBrand({ blurb }: { blurb?: string }) {
 function GateShell({ children }: { children: ReactNode }) {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-10">
+      <div className="absolute left-4 top-4 z-10">
+        <ThemeSwitch />
+      </div>
       {children}
     </div>
   )
@@ -32,7 +36,7 @@ function GateShell({ children }: { children: ReactNode }) {
 
 function GateCard({ children }: { children: ReactNode }) {
   return (
-    <div className="relative w-full max-w-[400px] overflow-hidden border border-border-strong bg-surface shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+    <div className="vd-gate-card relative w-full max-w-[400px] overflow-hidden border border-border-strong bg-surface">
       <div className="h-0.5 w-full bg-accent" />
       <div className="space-y-6 px-8 pb-8 pt-7">{children}</div>
     </div>

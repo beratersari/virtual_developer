@@ -146,6 +146,14 @@ def test_linux_release_env_example_uses_shared_base():
     assert "packaging" in freeze and "env_example.py" in freeze
 
 
+def test_linux_release_archives_list_files_at_the_root():
+    build = (LINUX / "build-dist.sh").read_text(encoding="utf-8")
+    assert 'tar -czf "$OUT_DIR/${DIST_NAME}.tar.gz" "$DIST_NAME"' not in build
+    assert "make_archive" not in build
+    assert "relative_to(root)" in build
+    assert '"$PAYLOAD"' in build
+
+
 def test_linux_dist_ci_and_offline_vendor_hooks():
     wf = ROOT / ".github" / "workflows" / "linux-dist.yml"
     assert wf.is_file()

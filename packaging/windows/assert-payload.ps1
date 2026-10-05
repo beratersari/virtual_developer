@@ -65,6 +65,7 @@ $required = @(
     "packaging\windows\Stop-VdProcesses.ps1",
     "packaging\windows\Wait-Http.ps1",
     "packaging\windows\Ensure-OpencodeServe.ps1",
+    "packaging\windows\ServeAuth.ps1",
     "packaging\windows\serve_frontend.py"
 )
 $optionalExe = @(

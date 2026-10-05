@@ -225,6 +225,28 @@ export type SettingsPayload = {
   base_dir?: string
   data_dir?: string
   temp_dir_base?: string
+  release_host?: string
+  release_port?: number
+}
+
+export type UpdateStatus = {
+  phase: string
+  message: string
+  current_version: string
+  platform: string
+  platform_label: string
+  layout: string
+  release_host: string
+  release_port: number
+  remote_version: string
+  remote_notes: string
+  remote_layout?: string
+  update_available: boolean
+  bytes_done: number
+  bytes_total: number
+  error: string
+  can_apply: boolean
+  block_reason: string
 }
 
 export type GitlabHostCredentialDraft = {
@@ -808,6 +830,8 @@ export type SettingsPatch = Partial<
     | 'azure_bot_mentions'
     | 'gitlab_webhook_enabled'
     | 'azure_webhook_enabled'
+    | 'release_host'
+    | 'release_port'
   >
 > & {
   jira_api_token?: string

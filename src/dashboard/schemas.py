@@ -649,6 +649,9 @@ class SettingsView(BaseModel):
     base_dir: str = ""
     data_dir: str = ""
     temp_dir_base: str = ""
+    # LAN release site. Port 0 means unset.
+    release_host: str = ""
+    release_port: int = 0
 
 
 class RepositorySetItem(BaseModel):
@@ -770,6 +773,13 @@ class JiraConnectionTestRequest(BaseModel):
     max_projects: int = Field(default=25, ge=1, le=50)
 
 
+class UpdateRequest(BaseModel):
+    """Address of the LAN release server. Checked before a download starts."""
+
+    release_host: str = Field(default="", max_length=253)
+    release_port: int = Field(default=0, ge=0, le=65535)
+
+
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only).
 
@@ -886,6 +896,17 @@ class SettingsUpdate(BaseModel):
         default=None,
         max_length=40,
         description="Unattended worker: opencode | codex | claude",
+    )
+    release_host: Optional[str] = Field(
+        default=None,
+        max_length=253,
+        description="LAN release server IP or hostname. Empty clears it.",
+    )
+    release_port: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=65535,
+        description="LAN release server port. 0 clears it.",
     )
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,

@@ -29,7 +29,7 @@ python3 packaging/linux/wsl_integration_probe.py
 
 The probe fails unless at least 30 distinct requests succeed.
 
-Extract the artifact so the install scripts sit next to `vendor/` and `src/`, then:
+Extract the release zip or tar.gz. The install scripts sit next to `vendor/` and `src/`, with no extra folder around them. Then:
 
 ```bash
 ./install-dashboard.sh    # .venv from vendor/python-wheels (no network)
