@@ -89,6 +89,34 @@ def test_entrypoint_uses_cli_and_freeze_support():
     assert "from cli import cli" in text
 
 
+def test_latest_zip_name_covers_each_binary(tmp_path: Path):
+    mod = _load("yaver_latest_zip", PKG / "latest_zip.py")
+    assert mod.latest_zip_name("yaver-windows-x64-0.9.72") == "yaver-windows-latest.zip"
+    assert mod.latest_zip_name("yaver-windows-x64-0.9.72-dev.20261005.1.gabcdef") == (
+        "yaver-windows-latest.zip"
+    )
+    assert mod.latest_zip_name("yaver-linux-x64-ubuntu-18.04-0.9.72") == (
+        "yaver-ubuntu-18.04-latest.zip"
+    )
+    assert mod.latest_zip_name("yaver-linux-x64-ubuntu-20.04-0.9.72") == (
+        "yaver-ubuntu-20.04-latest.zip"
+    )
+    assert mod.latest_zip_name("yaver-linux-x64-ubuntu-22.04-0.9.72") == (
+        "yaver-ubuntu-22.04-latest.zip"
+    )
+    assert mod.latest_zip_name("yaver-linux-x64-ubuntu-24.04-0.9.72") == (
+        "yaver-ubuntu-24.04-latest.zip"
+    )
+    with pytest.raises(ValueError):
+        mod.latest_zip_name("virtual_developer-windows-x64-0.9.72")
+    source = tmp_path / "yaver-windows-x64-0.9.72.zip"
+    source.write_bytes(b"PK\x03\x04same-bytes")
+    copied = mod.write_latest_copy(source, "yaver-windows-x64-0.9.72")
+    assert copied.name == "yaver-windows-latest.zip"
+    assert copied.read_bytes() == source.read_bytes()
+    assert "latest" in copied.name
+
+
 def test_runtime_hook_chdirs_when_frozen():
     text = (PKG / "runtime_hook.py").read_text(encoding="utf-8")
     assert "os.chdir" in text
@@ -133,6 +161,8 @@ def test_workflow_builds_both_platforms():
     assert "windows-dist.yml" in text or "does not replace" in text.lower() or "Additive" in text
     assert "Upload zip archive" in text
     assert "Upload tar.gz archive (Linux)" in text
+    assert "yaver-*-latest.zip" in text
+    assert "Require latest binary zip" in text
 
 
 def test_parse_glibc_versions_flags_per_ubuntu():

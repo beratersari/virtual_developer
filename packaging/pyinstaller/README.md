@@ -35,8 +35,8 @@ Data is `{base}/yaver` and clones are `{base}/t`. Plans are
 
 ## User flow
 
-1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-ubuntu-22.04-*` — pick the Ubuntu that matches the host).
-2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencoderman/` (`agents/` + `skills/` only), and one copy script (`install-agents.bat` on Windows, `install-agents.sh` on Linux).
+1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-ubuntu-22.04-*` — pick the Ubuntu that matches the host). A tagged release also attaches one zip per binary whose name contains `latest`: `yaver-windows-latest.zip`, `yaver-ubuntu-18.04-latest.zip`, `yaver-ubuntu-20.04-latest.zip`, `yaver-ubuntu-22.04-latest.zip`, and `yaver-ubuntu-24.04-latest.zip`. Those are the same executable zips. Upload one to the office release site and leave the version field empty. The site reads the `VERSION` file inside the zip.
+2. Extract. The zip root is `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencoderman/` (`agents/` + `skills/` only), and one copy script (`install-agents.bat` on Windows, `install-agents.sh` on Linux).
 3. Copy `.env.example` to `.env` and set Jira (and GitLab if you need MRs).
 4. If OpenCode is already installed, run that copy script to put `opencoderman/agents` and `opencoderman/skills` into the OpenCode home.
 5. Run `yaver start` (Windows: `yaver.exe start`).
@@ -61,14 +61,14 @@ python -m pip install "pyinstaller==$(python -c "import pathlib; print([l.split(
 python packaging/pyinstaller/build.py --clean
 ```
 
-Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Linux).
+Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Linux). The archive root is those same files.
 
 ## Do / don’t
 
 **Do**
 
 - Keep `PYINSTALLER_MODE=onedir`.
-- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, `opencoderman/agents` + `opencoderman/skills` only, and one copy script (`install-agents.bat` or `.sh`).
+- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, `opencoderman/agents` + `opencoderman/skills` only, one copy script (`install-agents.bat` or `.sh`), and `update_helper.py`, `update_helper.ps1`, and `update_helper.sh`.
 - Resolve `.env` from the folder next to the exe (`install_root`), not `_MEIPASS`.
 - Re-run **Standalone Executables** after changing `yaver.spec` or `versions.env`.
 - Freeze each Linux target **inside** `ubuntu:18.04` / `20.04` / `22.04` /
