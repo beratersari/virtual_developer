@@ -320,15 +320,26 @@ printf '%s\n' "$PRODUCT_VERSION" >"$PAYLOAD/VERSION"
 echo
 echo "Step 6: Zipping payload..."
 mkdir -p "$OUT_DIR"
-(
-  cd "$STAGE"
-  tar -czf "$OUT_DIR/${DIST_NAME}.tar.gz" "$DIST_NAME"
-)
-python3 - "$STAGE" "$DIST_NAME" "$OUT_DIR/${DIST_NAME}.zip" <<'PY'
-import shutil, sys
-stage, name, dest = sys.argv[1], sys.argv[2], sys.argv[3]
-shutil.make_archive(dest[:-4], "zip", stage, name)
-print("wrote", dest)
+# Archive root is install-dashboard.sh, src/, vendor/, and the other files.
+# The payload folder name is not a member.
+python3 - "$PAYLOAD" "$OUT_DIR/${DIST_NAME}.zip" "$OUT_DIR/${DIST_NAME}.tar.gz" <<'PY'
+import sys
+import tarfile
+import zipfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+zip_dest = Path(sys.argv[2])
+tar_dest = Path(sys.argv[3])
+files = sorted(path for path in root.rglob("*") if path.is_file())
+with zipfile.ZipFile(zip_dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for path in files:
+        zf.write(path, path.relative_to(root).as_posix())
+with tarfile.open(tar_dest, "w:gz") as tar:
+    for path in files:
+        tar.add(path, arcname=path.relative_to(root).as_posix())
+print("wrote", zip_dest)
+print("wrote", tar_dest)
 PY
 echo
 echo "[OK] $OUT_DIR/${DIST_NAME}.tar.gz"

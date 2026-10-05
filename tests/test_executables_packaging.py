@@ -198,14 +198,25 @@ def test_assert_payload_reports_missing(tmp_path: Path):
 
 
 def test_archive_name_keeps_patch_version(tmp_path: Path):
+    import zipfile
+
     build = _load("yaver_build_archive", PKG / "build.py")
     src = tmp_path / "yaver-windows-x64-0.2.0"
     src.mkdir()
     (src / "yaver.exe").write_bytes(b"x")
+    (src / "_internal").mkdir()
+    (src / "_internal" / "python.dll").write_bytes(b"dll")
+    (src / ".env.example").write_text("JIRA_HOST=\n", encoding="utf-8")
     written = build._archive(src, tmp_path / "yaver-windows-x64-0.2.0")
     names = {p.name for p in written}
     assert "yaver-windows-x64-0.2.0.zip" in names
     assert "yaver-windows-x64-0.2.zip" not in names
+    with zipfile.ZipFile(tmp_path / "yaver-windows-x64-0.2.0.zip") as archive:
+        assert set(archive.namelist()) == {
+            "yaver.exe",
+            "_internal/python.dll",
+            ".env.example",
+        }
 
 
 def test_build_script_requires_spa_and_onedir():
