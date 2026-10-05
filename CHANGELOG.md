@@ -10,9 +10,15 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Added
 
+- Stop Yaver, then run `yaver update` or `yaver.exe --update`. The command reads `RELEASE_HOST` and `RELEASE_PORT`, or `--host` and `--port`, downloads the package for this computer, replaces the install, and starts Yaver again.
+
 ### Fixed
 
+- The updater keeps the executable bit stored in the zip, so a Linux `yaver` can be started after the swap. If that program cannot be started, the previous executable folder is put back.
+
 ### Changed
+
+- Settings no longer has Check or Update. The release address stays in `.env`. The dashboard does not download or replace Yaver.
 
 ## [0.9.72] — 2026-10-05
 

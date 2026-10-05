@@ -26,6 +26,7 @@ from src.self_update import (
     release_base_url,
     run_apply_job,
     start_apply,
+    update_stopped_install,
     versions_equal,
 )
 from src.update_helper import (
@@ -106,6 +107,27 @@ def test_classify_and_reject_parent_paths(tmp_path: Path):
     with pytest.raises(UpdateError):
         safe_extract(bad, tmp_path / "out")
     assert not (tmp_path / "evil.txt").exists()
+
+
+def test_extract_keeps_the_launcher_executable(tmp_path: Path):
+    archive = tmp_path / "app.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        launcher = zipfile.ZipInfo("yaver")
+        launcher.external_attr = 0o100755 << 16
+        handle.writestr(launcher, b"#!/bin/sh\n")
+        readme = zipfile.ZipInfo("README")
+        readme.external_attr = 0o100644 << 16
+        handle.writestr(readme, b"hi\n")
+        bare = zipfile.ZipInfo("yaver.exe")
+        handle.writestr(bare, b"MZ")
+    root = safe_extract(archive, tmp_path / "out")
+    if sys.platform == "win32":
+        assert (root / "yaver").is_file()
+        assert (root / "yaver.exe").is_file()
+        return
+    assert (root / "yaver").stat().st_mode & 0o111
+    assert not (root / "README").stat().st_mode & 0o111
+    assert (root / "yaver.exe").stat().st_mode & 0o111
 
 
 def test_source_apply_keeps_env_and_venv(tmp_path: Path):
@@ -406,6 +428,31 @@ def test_health_failure_puts_an_inside_data_folder_back(tmp_path: Path):
     assert not (tmp_path / "Yaver.userdata").exists()
 
 
+def test_start_failure_restores_the_previous_executable(tmp_path: Path, monkeypatch):
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver").write_text("old", encoding="utf-8")
+    (install / ".env").write_bytes(b"TOKEN=keep\n")
+    staging = tmp_path / "new"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "yaver").write_text("new", encoding="utf-8")
+    calls = {"n": 0}
+
+    def start(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "Permission denied", str(install / "yaver"))
+        return None
+
+    monkeypatch.setattr("src.update_helper.start_logged", start)
+    plan = _frozen_plan(tmp_path, install, staging)
+    with pytest.raises(UpdateError, match="could not be started"):
+        run_plan(plan)
+    assert (install / "yaver").read_text(encoding="utf-8") == "old"
+    assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
+    assert calls["n"] == 2
+
+
 def test_drive_root_is_refused():
     if sys.platform != "win32":
         root = Path("/")
@@ -620,31 +667,116 @@ def test_settings_save_the_release_server(tmp_path: Path, monkeypatch):
     assert stored["release_port"] == 8090
 
 
-def test_update_routes_report_status_and_refuse_a_checkout(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr("src.self_update._work_dir", lambda: tmp_path)
-    monkeypatch.setattr(
-        "src.self_update.save_release_target",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("saved")),
-    )
+def test_dashboard_update_routes_are_gone():
     app = create_dashboard_app()
     client = TestClient(app)
-    status = client.get("/api/update")
-    assert status.status_code == 200
-    body = status.json()
-    assert body["current_version"]
-    assert "release_host" in body
-    empty = client.post("/api/update/check", json={"release_host": "", "release_port": 0})
-    assert empty.status_code == 400
+    assert client.get("/api/update").status_code == 404
+    for path in ("/api/update/check", "/api/update/apply"):
+        response = client.post(path, json={"release_host": "10.0.0.8", "release_port": 8090})
+        assert response.status_code in {404, 405}
+        assert "can_apply" not in response.text
+        assert "update_available" not in response.text
+
+
+def test_stopped_update_refuses_a_running_dashboard(monkeypatch):
+    monkeypatch.setattr("src.self_update.install_is_running", lambda: True)
+    with pytest.raises(UpdateError, match="Stop it"):
+        update_stopped_install("10.0.0.8", 8090, shutdown=lambda: None)
+
+
+def test_stopped_update_refuses_a_checkout(monkeypatch):
+    monkeypatch.setattr("src.self_update.install_is_running", lambda: False)
     monkeypatch.setattr(
         "src.self_update.checkout_block",
         lambda: "This folder is a git checkout.",
     )
-    blocked = client.post(
-        "/api/update/apply",
-        json={"release_host": "10.0.0.8", "release_port": 8090},
+    with pytest.raises(UpdateError, match="git checkout"):
+        update_stopped_install("10.0.0.8", 8090, shutdown=lambda: None)
+
+
+def test_stopped_update_uses_the_saved_address(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "release_host", "10.4.5.6")
+    monkeypatch.setattr(settings, "release_port", 8090)
+    monkeypatch.setattr("src.self_update.install_is_running", lambda: False)
+    monkeypatch.setattr("src.self_update.checkout_block", lambda: "")
+    saved: dict[str, object] = {}
+    monkeypatch.setattr(
+        "src.self_update.save_release_target",
+        lambda host, port: saved.update(host=host, port=port),
     )
-    assert blocked.status_code == 400
-    assert "git checkout" in blocked.json()["detail"]
+    calls: list[str] = []
+
+    def run(base, shutdown, spawn=None, report=None):
+        del spawn
+        calls.append(base)
+        if report is not None:
+            report("Downloading 0.9.80.")
+        shutdown()
+
+    monkeypatch.setattr("src.self_update.run_apply_job", run)
+    lines: list[str] = []
+    update_stopped_install(
+        None,
+        None,
+        shutdown=lambda: calls.append("down"),
+        report=lines.append,
+    )
+    assert calls == ["http://10.4.5.6:8090", "down"]
+    assert lines == ["Downloading 0.9.80."]
+    assert saved == {"host": "10.4.5.6", "port": 8090}
+
+
+def test_cli_update_stops_when_yaver_is_running(monkeypatch):
+    from click.testing import CliRunner
+
+    from cli import cli
+
+    def refuse(*_args, **_kwargs):
+        raise UpdateError("Yaver is running. Stop it, then run yaver update.")
+
+    monkeypatch.setattr("src.self_update.update_stopped_install", refuse)
+    result = CliRunner().invoke(cli, ["--update"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 1
+    assert "Stop it" in text
+
+
+def test_cli_update_passes_the_address_and_closes(monkeypatch):
+    from click.testing import CliRunner
+
+    from cli import cli
+
+    seen: dict[str, object] = {}
+
+    def run(host, port, *, shutdown, report=None):
+        seen["host"] = host
+        seen["port"] = port
+        if report is not None:
+            report("Downloading 0.9.80.")
+        shutdown()
+
+    monkeypatch.setattr("src.self_update.update_stopped_install", run)
+    result = CliRunner().invoke(cli, ["update", "--host", "10.2.3.4", "--port", "8090"])
+    assert result.exit_code == 0
+    assert seen == {"host": "10.2.3.4", "port": 8090}
+    assert "Downloading 0.9.80." in result.output
+
+
+def test_cli_update_is_quiet_when_the_install_is_current(monkeypatch):
+    from click.testing import CliRunner
+
+    from cli import cli
+
+    def current(*_args, **_kwargs):
+        raise UpdateError("This install is already 0.9.72.")
+
+    monkeypatch.setattr("src.self_update.update_stopped_install", current)
+    result = CliRunner().invoke(cli, ["update"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 0
+    assert "already 0.9.72" in text
 
 
 def test_powershell_helper_replaces_an_executable_and_keeps_env(tmp_path: Path):

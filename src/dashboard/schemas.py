@@ -773,13 +773,6 @@ class JiraConnectionTestRequest(BaseModel):
     max_projects: int = Field(default=25, ge=1, le=50)
 
 
-class UpdateRequest(BaseModel):
-    """Address of the LAN release server. Checked before a download starts."""
-
-    release_host: str = Field(default="", max_length=253)
-    release_port: int = Field(default=0, ge=0, le=65535)
-
-
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only).
 
