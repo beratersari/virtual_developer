@@ -533,6 +533,7 @@ def _write_shell_plan(path: Path, plan: dict[str, Any]) -> None:
         "LOG": str(plan["log"]),
         "RESULT": str(plan["result"]),
         "HEALTH_SECONDS": str(int(plan["health_seconds"])),
+        "PROBE": str(plan.get("probe_host") or "127.0.0.1"),
         "ARGV0": str(argv[0]),
         "ARGV1": str(argv[1]) if len(argv) > 1 else "",
     }

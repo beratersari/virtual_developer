@@ -323,7 +323,9 @@ def _run(plan: dict) -> None:
             raise UpdateError("Yaver is still running.")
     port = int(plan.get("port") or 0)
     probe = str(plan.get("probe_host") or "127.0.0.1")
-    wait_port_closed(port, 30, probe)
+    # An old listener still on this port would look like the new copy opened.
+    if not wait_port_closed(port, 30, probe):
+        raise UpdateError("The dashboard port is still open.")
     _log(plan, f"applying {layout}")
     if layout == "frozen":
         apply_frozen_tree(staging, install)

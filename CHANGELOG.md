@@ -15,6 +15,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Fixed
 
 - The updater keeps the executable bit stored in the zip, so a Linux `yaver` can be started after the swap. If that program cannot be started, the previous executable folder is put back.
+- The Linux shell helper waits until the dashboard port opens, and puts the previous folder back when the new copy does not. It also refuses to replace files while that port is still open. The Windows PowerShell helper checks the dashboard address from the plan, not only 127.0.0.1. A dashboard address that does not answer is treated as closed after a short wait, so one check cannot use the whole health budget.
 
 ### Changed
 
