@@ -1,3 +1,15 @@
+# Yaver 0.9.72
+
+Settings → Runtime can point at a release server on the office network. Check looks up the Windows package or the matching Ubuntu package. Update closes Yaver, downloads that zip, and starts Yaver again. The .env file and the data folder stay, including when that data folder sits inside the executable folder. A git checkout is left alone.
+
+On Windows, Update finishes replacing yaver.exe and starts it again. The helper stays alive while the running copy is stopped, including when Python is a launcher in front of the real interpreter, so the new folder is not left unfinished. PowerShell is not started as a detached process, because that flag makes powershell.exe quit before it reads the update plan. If the new copy does not open its dashboard, that new process is stopped, the previous folder is put back, and that previous copy is started again. This includes the case where the new process was started by the helper and its working directory is the install folder.
+
+A tagged release attaches one zip per standalone binary with latest in the name: yaver-windows-latest.zip and yaver-ubuntu-18.04-latest.zip through yaver-ubuntu-24.04-latest.zip. Each file is that platform’s executable zip. The version is the VERSION file inside it, for upload to the office release site. Standalone executable zips and tar.gz files list yaver.exe or yaver and the other files at the archive root. The Linux offline zip and tar.gz do the same for install-dashboard.sh, src/, and vendor/.
+
+The dashboard can switch the phosphor console to a light workbench. The choice is saved in this browser. The wink mark is transparent, so the dark theme fills it with navy and the light theme uses the page color. A disabled secondary button uses muted text, a transparent background, and the normal border, so a disabled Look up control does not look ready.
+
+Windows and Linux start scripts read OPENCODE_SERVER_PASSWORD from the process environment or .env and send it on the OpenCode health check. A 401 stops the wait instead of treating the server as down. The password stays off the command line. The scripts expand ${NAME} and ${NAME:-default} the same way the daemon does, so a password written that way is the same secret on the next start. Linux import keeps a trailing newline in the password.
+
 # Yaver 0.9.71
 
 Yaver starts OpenCode serve when it is down, and starts that child again if it exits. A serve that is already healthy is left running. Saving, creating, or syncing an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. A running job keeps the current process until it finishes. Settings has Reload OpenCode for a change made outside the editor.
