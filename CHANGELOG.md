@@ -19,6 +19,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Changed
 
 - Settings no longer has Check or Update. The release address stays in `.env`. The dashboard does not download or replace Yaver.
+- Windows and Linux releases attach one zip each for OpenCode, Claude Code, and Codex. Each zip is that CLI, its host config, and its install command. The combined `yaver-clis` zip is no longer built.
 
 ## [0.9.72] — 2026-10-05
 

@@ -33,13 +33,15 @@ def test_each_worker_has_its_own_bat_and_host_config():
 
 def test_build_dist_ships_a_separate_cli_zip_without_agents():
     text = (ROOT / "packaging" / "windows" / "build-dist.ps1").read_text(encoding="utf-8")
-    assert "yaver-clis-" in text
+    assert "yaver-clis-" not in text
+    assert 'New-CliZip -Tool "opencode"' in text
+    assert 'New-CliZip -Tool "claude"' in text
+    assert 'New-CliZip -Tool "codex"' in text
     assert "cli-offline" in text
     assert "CLAUDE_CODE_VERSION" in text
     assert "downloads.claude.ai/claude-code-releases/" in text
     assert 'Filter "agents"' in text
-    assert 'Join-Path $clisStage "VERSIONS.txt"' in text
-    assert 'OPENCODE_VERSION=$OPENCODE_VERSION' in text
+    assert 'Join-Path $toolStage "VERSION"' in text
     versions = (ROOT / "packaging" / "windows" / "versions.env").read_text(encoding="utf-8")
     assert "OPENCODE_VERSION=1.18.10" in versions
     assert "CODEX_VERSION=0.149.0" in versions
@@ -52,7 +54,11 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert 'Codex must be 0.149.0' in linux
     assert "Claude Code must be 2.1.280" in linux
     assert "ClaudeCode=2.1.280" in linux
-    assert "yaver-clis-" in linux
+    assert "yaver-clis-" not in linux
+    assert "write_cli_zip opencode" in linux
+    assert "write_cli_zip claude" in linux
+    assert "write_cli_zip codex" in linux
+    assert '>"$stage/VERSION"' in linux
     assert "linux-x64/claude" in linux
     assert "cli-offline" in linux
     linux_cli = ROOT / "packaging" / "linux" / "cli-offline"
@@ -64,4 +70,10 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert "date +%Y%m%d" in helper
     assert (ROOT / "packaging" / "windows" / "Backup-CliBinary.ps1").is_file()
     workflow = (ROOT / ".github" / "workflows" / "linux-dist.yml").read_text(encoding="utf-8")
-    assert "yaver-clis-linux-x64-" in workflow
+    assert "yaver-clis-" not in workflow
+    for name in ("opencode", "claude", "codex"):
+        assert f"yaver-{name}-linux-x64-" in workflow
+    windows = (ROOT / ".github" / "workflows" / "windows-dist.yml").read_text(encoding="utf-8")
+    assert "yaver-clis-" not in windows
+    for name in ("opencode", "claude", "codex"):
+        assert f"yaver-{name}-windows-x64-" in windows
