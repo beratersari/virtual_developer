@@ -20,6 +20,9 @@ datas: list = [
     (str(ROOT / ".env.example"), "."),
     (str(ROOT / "agent"), "agent"),
     (str(ROOT / "web" / "dist"), "web/dist"),
+    (str(ROOT / "src" / "update_helper.py"), "."),
+    (str(ROOT / "src" / "update_helper.ps1"), "."),
+    (str(ROOT / "src" / "update_helper.sh"), "."),
 ]
 if (ROOT / "sample_project").is_dir():
     datas.append((str(ROOT / "sample_project"), "sample_project"))

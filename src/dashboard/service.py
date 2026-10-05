@@ -389,6 +389,8 @@ def build_settings_view(*, include_projects: bool = True) -> SettingsView:
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
+        release_host=str(getattr(settings, "release_host", "") or "").strip(),
+        release_port=int(getattr(settings, "release_port", 0) or 0),
     )
 
 
@@ -828,6 +830,16 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.agent_backend = name
         runtime_persist["agent_backend"] = name
         _write_env("agent_backend", settings.agent_backend)
+    if "release_host" in data and data["release_host"] is not None:
+        host = str(data["release_host"] or "").replace("\r", "").replace("\n", "").strip()
+        settings.release_host = host
+        runtime_persist["release_host"] = host
+        _write_env("release_host", host)
+    if "release_port" in data and data["release_port"] is not None:
+        port = int(data["release_port"])
+        settings.release_port = port
+        runtime_persist["release_port"] = port
+        _write_env("release_port", port)
     if "project_repositories" in data and data["project_repositories"] is not None:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded

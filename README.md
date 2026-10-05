@@ -408,6 +408,12 @@ Open the TUI only via **`start-opencode.bat`** from the project folder.
 
 CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: download the Ubuntu 18.04 / 20.04 / 22.04 / 24.04 build that matches the host. OpenCode / Codex are **not** inside the binary. See [packaging/pyinstaller/](packaging/pyinstaller/README.md).
 
+### Update on the office network
+
+A separate release site holds the Windows package and one package for each Ubuntu version. In **Settings → Runtime**, set that server’s address and port, choose **Check**, then **Update**.
+
+Update closes Yaver, downloads the package for this computer, and starts Yaver again. The `.env` file and the data folder stay. A git checkout is left alone. The published zip has to be the same kind this copy already is: the executable folder, or the full install zip.
+
 ---
 
 ## Ops dashboard

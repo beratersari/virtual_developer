@@ -144,6 +144,7 @@ class JiraAgentDaemon:
                 processor=self.processor,
                 state_manager=self.state_manager,
             )
+            self._dashboard_app.state.request_shutdown = self.request_update_shutdown
 
         # Set up signal handlers (cross-platform)
         if IS_WINDOWS:
@@ -215,12 +216,28 @@ class JiraAgentDaemon:
         except asyncio.CancelledError:
             pass
 
-    async def stop(self):
+    def request_update_shutdown(self) -> None:
+        """Close this process after a release helper has been started."""
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            logger.error("Update is ready but the daemon loop is not running")
+            return
+
+        def _kick() -> None:
+            if self._stopping:
+                return
+            asyncio.create_task(
+                self.stop(reason="Yaver is updating and will start again")
+            )
+
+        loop.call_soon_threadsafe(_kick)
+
+    async def stop(self, *, reason: str = "Daemon stopped (interrupt or shutdown)"):
         """Stop the daemon gracefully: kill children, finalise in-flight, exit."""
         if self._stopping:
             return
         self._stopping = True
-        logger.info("Stopping daemon...")
+        logger.info(f"Stopping daemon: {reason}")
         self._running = False
 
         if self._poller:
@@ -241,7 +258,7 @@ class JiraAgentDaemon:
 
         # Kill agent subprocesses and write CANCELLED before tearing down asyncio
         try:
-            self.processor.shutdown_processing(reason="Daemon stopped (interrupt or shutdown)")
+            self.processor.shutdown_processing(reason=reason)
         except Exception as e:
             logger.exception(f"Processing shutdown failed: {e}", e)
 

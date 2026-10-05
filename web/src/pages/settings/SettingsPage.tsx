@@ -35,6 +35,7 @@ import {
   settingsSectionPath,
   type SettingsSection,
 } from './settingsSectionUrl'
+import { UpdatePanel } from './UpdatePanel'
 import { ModelField } from '../../ui/ModelField'
 import { SavedRepoSearch } from '../../ui/ProjectSelect'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
@@ -60,6 +61,8 @@ type Draft = {
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
+  release_host: string
+  release_port: number
   default_model: string
   default_review_model: string
   agent_backend: string
@@ -105,6 +108,8 @@ function fromSettings(s: SettingsPayload): Draft {
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
     agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
+    release_host: s.release_host ?? '',
+    release_port: s.release_port ?? 0,
     default_model: s.default_model,
     default_review_model: s.default_review_model || '',
     agent_backend: s.agent_backend || 'opencode',
@@ -159,6 +164,8 @@ function savedShape(d: Draft) {
     agent_task_timeout_seconds: Number(d.agent_task_timeout_seconds),
     agent_task_max_retries: Number(d.agent_task_max_retries),
     agent_task_max_incomplete_retries: Number(d.agent_task_max_incomplete_retries),
+    release_host: d.release_host.trim(),
+    release_port: Number(d.release_port) || 0,
     default_model: d.default_model.trim(),
     default_review_model: d.default_review_model.trim(),
     agent_backend: d.agent_backend,
@@ -944,6 +951,8 @@ export function SettingsPage() {
           draft.agent_task_max_incomplete_retries,
         )
       }
+      if (dirtyKeys.has('release_host')) body.release_host = draft.release_host.trim()
+      if (dirtyKeys.has('release_port')) body.release_port = Number(draft.release_port) || 0
       if (dirtyKeys.has('default_model')) body.default_model = draft.default_model.trim()
       if (dirtyKeys.has('default_review_model')) {
         body.default_review_model = draft.default_review_model.trim()
@@ -1925,6 +1934,27 @@ export function SettingsPage() {
         </span>
       </label>
 
+      </SettingsGroup>
+      <SettingsGroup title="Update">
+        <UpdatePanel
+          host={draft.release_host}
+          port={draft.release_port}
+          onChange={(release_host, release_port) => {
+            touch('release_host')
+            touch('release_port')
+            setDraft((d) => (d ? { ...d, release_host, release_port } : d))
+          }}
+          onPersisted={(release_host, release_port) => {
+            setSettings((cur) => (cur ? { ...cur, release_host, release_port } : cur))
+            setDraft((d) => (d ? { ...d, release_host, release_port } : d))
+            setDirtyKeys((prev) => {
+              const next = new Set(prev)
+              next.delete('release_host')
+              next.delete('release_port')
+              return next
+            })
+          }}
+        />
       </SettingsGroup>
       <SettingsGroup title="Data location">
       <p className="text-xs text-text-muted">

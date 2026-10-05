@@ -124,3 +124,19 @@ def test_bare_collection_name_is_rejected_in_the_page_check():
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "ok" in completed.stdout
+
+
+def test_runtime_section_can_update_from_the_release_server():
+    text = SETTINGS.read_text(encoding="utf-8")
+    assert 'title="Update"' in text
+    assert "UpdatePanel" in text
+    panel = (ROOT / "web" / "src" / "pages" / "settings" / "UpdatePanel.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "Release server address" in panel
+    assert "Release server port" in panel
+    assert "checkedPort" in panel
+    assert "addressMatches" in panel
+    assert "applyUpdate" in panel
+    assert "Check" in panel
+    assert "Update Yaver" in panel

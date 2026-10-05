@@ -28,6 +28,7 @@ import type {
   ProjectRepository,
   SettingsPatch,
   SettingsPayload,
+  UpdateStatus,
   StorageDeletesPayload,
   StorageFolderSessions,
   StoragePayload,
@@ -487,6 +488,26 @@ export function syncOpencodeAgents() {
 
 export function fetchSettings(signal?: AbortSignal, slot?: GetSlot) {
   return request<SettingsPayload>('/api/settings', { signal, slot })
+}
+
+export function fetchUpdateStatus(signal?: AbortSignal) {
+  return request<UpdateStatus>('/api/update', { signal })
+}
+
+export function checkUpdate(body: { release_host: string; release_port: number }) {
+  return request<UpdateStatus>('/api/update/check', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    timeoutMs: 30_000,
+  })
+}
+
+export function applyUpdate(body: { release_host: string; release_port: number }) {
+  return request<UpdateStatus>('/api/update/apply', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    timeoutMs: 30_000,
+  })
 }
 
 export function patchSettings(body: SettingsPatch) {
