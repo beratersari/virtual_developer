@@ -1,3 +1,13 @@
+# Yaver 0.9.73
+
+Stop Yaver, then run yaver update or yaver.exe --update. The command reads RELEASE_HOST and RELEASE_PORT, or --host and --port, downloads the package for this computer, replaces the install, and starts Yaver again. Settings no longer has Check or Update. The release address stays in .env. The dashboard does not download or replace Yaver.
+
+The updater keeps the executable bit stored in the zip, so a Linux yaver can be started after the swap. If that program cannot be started, the previous executable folder is put back. The Linux shell helper waits until the dashboard port opens, and puts the previous folder back when the new copy does not. It also refuses to replace files while that port is still open. The Windows PowerShell helper checks the dashboard address from the plan, not only 127.0.0.1. A dashboard address that does not answer is treated as closed after a short wait, so one check cannot use the whole health budget.
+
+Windows and Linux releases attach one zip each for OpenCode, Claude Code, and Codex. Each zip is that CLI, its host config, and its install command. The combined yaver-clis zip is no longer built.
+
+A job whose merge request or pull request was merged or closed no longer stays live. The row is cancelled with the message that the review closed while the job was still open, and that review is stopped.
+
 # Yaver 0.9.72
 
 Settings → Runtime can point at a release server on the office network. Check looks up the Windows package or the matching Ubuntu package. Update closes Yaver, downloads that zip, and starts Yaver again. The .env file and the data folder stay, including when that data folder sits inside the executable folder. A git checkout is left alone.
