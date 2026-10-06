@@ -4,9 +4,10 @@ The daemon starts serve when ``OPENCODE_SERVE_URL`` is down, as the same
 user, and restarts the child it started if that child exits. A serve that
 is already healthy is left running. Shutdown stops only that child.
 
-OpenCode reads agent files when the process starts. Saving, creating, or
-syncing the catalog copies the files into the OpenCode and Claude homes
-and then reloads the process on the serve port. A job in ``planning`` or
+OpenCode reads agent files when the process starts. Settings Sync copies
+the catalog into the OpenCode and Claude homes and then reloads the
+process on the serve port. Saving or creating an agent file writes the
+catalog and leaves the current process running. A job in ``planning`` or
 ``executing`` keeps the current process; the reload runs after it finishes.
 
 A missed ``/global/health`` does not kill a process that is still

@@ -111,9 +111,14 @@ def test_agent_http_create_and_edit(tmp_path, monkeypatch):
         json={"text": "---\nmode: primary\n---\n\nWrite the guide.\n"},
     )
     assert saved.status_code == 200
+    assert "serve" not in saved.json()
     body = client.get("/api/opencode-agents/derman-docs")
     assert "Write the guide." in body.json()["text"]
     assert (tmp_path / "derman-docs.md").is_file()
+    assert not (tmp_path / "oc" / "derman-docs.md").exists()
+    synced = client.post("/api/opencode-agents/sync")
+    assert synced.status_code == 200, synced.text
+    assert synced.json()["serve"]["status"] == "reloaded"
     assert "Write the guide." in (tmp_path / "oc" / "derman-docs.md").read_text(
         encoding="utf-8"
     )

@@ -18,6 +18,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 - `yaver update` leaves an existing `.env` file as it is. The `.env` from the package is copied only when the install has none.
 - `yaver update` stops the process listening on the dashboard port, then replaces the files. Start Yaver after the helper prints Updated to.
 - `yaver update` prints each step in the terminal.
+- Settings Sync copies agent files into the OpenCode and Claude homes and reloads OpenCode when no job is running. Saving or creating an agent writes the catalog and leaves OpenCode running.
 
 ## [0.9.74] — 2026-10-06
 

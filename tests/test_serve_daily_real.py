@@ -177,7 +177,7 @@ def test_unreadable_issue_state_does_not_reload_a_live_serve(
     """A planning job is only on disk during clone, before a session exists.
 
     Closing the state connection makes the real manager return an empty list.
-    That must not look like "no job", or an agent save reloads serve under it.
+    That must not look like "no job", or Sync reloads serve under it.
     """
     if not resolve_opencode_binary():
         pytest.skip("opencode is not installed")

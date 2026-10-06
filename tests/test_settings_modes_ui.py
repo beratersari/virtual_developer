@@ -33,10 +33,12 @@ def test_edit_agents_sits_beside_create_agent():
         "</div>", 1
     )[0]
     assert toolbar.index("Create agent") < toolbar.index("Edit agents")
-    assert toolbar.index("Sync") < toolbar.index("Reload OpenCode")
+    assert toolbar.index("Edit agents") < toolbar.index("Sync")
+    assert "Reload OpenCode" not in text
+    assert "Sync copies the files and reloads" in text
     assert "onClick={openEdit}" in toolbar
     assert "onClick={openCreate}" in toolbar
-    assert "onClick={() => syncAgents()}" in toolbar
+    assert text.count("onClick={() => syncAgents()}") == 1
 
 
 def test_settings_save_error_opens_a_popup():
