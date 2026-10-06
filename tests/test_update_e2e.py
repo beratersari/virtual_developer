@@ -909,15 +909,16 @@ def _windows_helper() -> None:
         pytest.skip("Windows PowerShell is not installed")
 
 
-def _lock_internal(install: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
-    locked = install / "_internal" / "locked.bin"
-    locked.write_bytes(b"locked")
-    script = tmp_path / "yaver_e2e_lock_internal.py"
+def _lock_path(target: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.is_file():
+        target.write_bytes(b"locked")
+    script = tmp_path / "yaver_e2e_lock_file.py"
     script.write_text(_LOCKER, encoding="utf-8")
     release = tmp_path / "release-lock"
     ready = tmp_path / "lock-ready"
     proc = subprocess.Popen(
-        [sys.executable, str(script), str(locked), str(release), str(ready)],
+        [sys.executable, str(script), str(target), str(release), str(ready)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -930,8 +931,12 @@ def _lock_internal(install: Path, tmp_path: Path) -> tuple[subprocess.Popen[str]
         time.sleep(0.05)
     if not ready.is_file():
         proc.kill()
-        raise AssertionError("locker did not open _internal")
+        raise AssertionError("locker did not open the file")
     return proc, release
+
+
+def _lock_internal(install: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+    return _lock_path(install / "_internal" / "locked.bin", tmp_path)
 
 
 def _release_locker(proc: subprocess.Popen[str], release: Path) -> None:
@@ -1307,11 +1312,29 @@ def test_shell_helper_leaves_the_tree_alone_while_the_port_is_open(tmp_path: Pat
         },
     )
     started = time.monotonic()
+    moved: list[str] = []
+    stop = threading.Event()
+    userdata = tmp_path / "Yaver.userdata"
+    keep = install / "office-data" / "yaver" / "keep.txt"
+
+    def watch() -> None:
+        while not stop.is_set():
+            if userdata.exists():
+                moved.append("userdata")
+            if not keep.is_file():
+                moved.append("missing-keep")
+            stop.wait(0.05)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
     try:
         completed = _run_shell(bash, plan, env, timeout=45)
     finally:
+        stop.set()
+        watcher.join(timeout=2)
         sock.close()
     log = _text(tmp_path / "update.log")
+    assert moved == []
     assert time.monotonic() - started >= 25
     assert completed.returncode != 0, completed.stdout + completed.stderr + log
     assert (install / "yaver").read_bytes() == b"old-exe"
@@ -1322,3 +1345,42 @@ def test_shell_helper_leaves_the_tree_alone_while_the_port_is_open(tmp_path: Pat
     result = _read_json(tmp_path / "result.json")
     assert result["ok"] is False
     assert "still open" in result["error"]
+
+
+def test_shell_helper_puts_data_back_when_previous_cannot_be_removed(tmp_path: Path) -> None:
+    """rm of the old tree must not leave the parked data folder beside Yaver."""
+    if sys.platform != "win32":
+        pytest.skip("an open file stops rm on Windows")
+    bash = _bash()
+    install, staging, env_bytes = _frozen_dirs(tmp_path, b"old-exe", b"new-exe")
+    previous = tmp_path / "Yaver.previous"
+    locker, release = _lock_path(previous / "locked.bin", tmp_path)
+    env, _shimmed = _shell_env(bash, tmp_path / "bin")
+    plan = tmp_path / "plan.env"
+    _shell_plan(
+        plan,
+        {
+            "PID": "0",
+            "PORT": "0",
+            "LAYOUT": "frozen",
+            "STAGING": _portable(staging),
+            "INSTALL": _portable(install),
+            "VERSION": "9.9.9",
+            "LOG": _portable(tmp_path / "update.log"),
+            "RESULT": _portable(tmp_path / "result.json"),
+            "HEALTH_SECONDS": "4",
+            "PROBE": "127.0.0.1",
+            "ARGV0": _portable(Path(sys.executable)),
+            "ARGV1": "",
+        },
+    )
+    try:
+        completed = _run_shell(bash, plan, env, timeout=30)
+    finally:
+        _release_locker(locker, release)
+    log = _text(tmp_path / "update.log")
+    assert completed.returncode != 0, completed.stdout + completed.stderr + log
+    assert (install / "yaver").read_bytes() == b"old-exe"
+    assert (install / ".env").read_bytes() == env_bytes
+    assert (install / "office-data" / "yaver" / "keep.txt").read_text(encoding="utf-8") == "kept"
+    assert not (tmp_path / "Yaver.userdata").exists()

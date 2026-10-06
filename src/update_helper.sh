@@ -106,44 +106,10 @@ port_open() {
 parent=$(dirname "$INSTALL")
 leaf=$(basename "$INSTALL")
 previous="$parent/$leaf.previous"
-
-# A data folder inside the executable folder would leave with the old tree.
-# An existing .env stays where it is, so this read does not write the file.
+# Park only after the port check. An earlier move pulls a live data
+# folder out from under a Yaver that is still running.
 userdata_rel=""
 userdata_stash="$parent/$leaf.userdata"
-if [ -f "$INSTALL/.env" ]; then
-  say "env file present"
-  base_dir=$(grep -E '^YAVER_BASE_DIR=' "$INSTALL/.env" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
-  base_dir=${base_dir#"${base_dir%%[![:space:]]*}"}
-  base_dir=${base_dir%"${base_dir##*[![:space:]]}"}
-  case "$base_dir" in
-    \"*\") base_dir=${base_dir#\"}; base_dir=${base_dir%\"} ;;
-    \'*\') base_dir=${base_dir#\'}; base_dir=${base_dir%\'} ;;
-  esac
-  if [ -n "$base_dir" ]; then
-    case "$base_dir" in
-      /*) data_path=$base_dir ;;
-      *) data_path="$INSTALL/$base_dir" ;;
-    esac
-    if [ -d "$data_path" ] && [ ! -L "$data_path" ]; then
-      install_real=$(cd "$INSTALL" && pwd -P)
-      data_real=$(cd "$data_path" && pwd -P)
-      case "$data_real" in
-        "$install_real"/_internal|"$install_real"/_internal/*) ;;
-        "$install_real"/*)
-          userdata_rel=${data_real#"$install_real"/}
-          if [ -e "$userdata_stash" ]; then
-            fail "A previous update left the data folder beside Yaver. Move that folder back before updating again."
-          fi
-          mv "$data_real" "$userdata_stash"
-          say "parked data folder $userdata_rel"
-          ;;
-      esac
-    fi
-  fi
-else
-  say "env file absent"
-fi
 
 unpark_userdata() {
   if [ -z "${userdata_rel:-}" ] || [ ! -d "${userdata_stash:-}" ]; then
@@ -235,6 +201,45 @@ copy_staging() {
   done
 }
 
+# An existing .env stays where it is, so this read does not write the file.
+park_userdata() {
+  if [ ! -f "$INSTALL/.env" ]; then
+    say "env file absent"
+    return 0
+  fi
+  say "env file present"
+  base_dir=$(grep -E '^YAVER_BASE_DIR=' "$INSTALL/.env" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+  base_dir=${base_dir#"${base_dir%%[![:space:]]*}"}
+  base_dir=${base_dir%"${base_dir##*[![:space:]]}"}
+  case "$base_dir" in
+    \"*\") base_dir=${base_dir#\"}; base_dir=${base_dir%\"} ;;
+    \'*\') base_dir=${base_dir#\'}; base_dir=${base_dir%\'} ;;
+  esac
+  if [ -z "$base_dir" ]; then
+    return 0
+  fi
+  case "$base_dir" in
+    /*) data_path=$base_dir ;;
+    *) data_path="$INSTALL/$base_dir" ;;
+  esac
+  if [ ! -d "$data_path" ] || [ -L "$data_path" ]; then
+    return 0
+  fi
+  install_real=$(cd "$INSTALL" && pwd -P)
+  data_real=$(cd "$data_path" && pwd -P)
+  case "$data_real" in
+    "$install_real"/_internal|"$install_real"/_internal/*) return 0 ;;
+    "$install_real"/*) ;;
+    *) return 0 ;;
+  esac
+  userdata_rel=${data_real#"$install_real"/}
+  if [ -e "$userdata_stash" ]; then
+    fail "A previous update left the data folder beside Yaver. Move that folder back before updating again."
+  fi
+  mv "$data_real" "$userdata_stash"
+  say "parked data folder $userdata_rel"
+}
+
 port_value=${PORT:-0}
 if [ "$port_value" -gt 0 ]; then
   waited=0
@@ -247,14 +252,16 @@ if [ "$port_value" -gt 0 ]; then
   done
   # An old listener still on this port would look like the new copy opened.
   if port_open "$PROBE" "$port_value"; then
-    unpark_userdata || true
     fail "The dashboard port is still open."
   fi
 fi
 say "dashboard port ${port_value} is closed"
+park_userdata
+# Covers rm/mkdir below. mv and cp failures unpark themselves too.
+trap 'unpark_userdata || true' EXIT
 
-rm -rf "$previous"
-mkdir -p "$previous"
+rm -rf "$previous" || fail "Could not remove the previous copy."
+mkdir -p "$previous" || fail "Could not prepare the previous copy."
 say "previous=$previous"
 for child in "$INSTALL"/* "$INSTALL"/.[!.]* "$INSTALL"/..?*; do
   if [ ! -e "$child" ] && [ ! -L "$child" ]; then
@@ -283,6 +290,7 @@ if [ -n "$userdata_rel" ] && [ -d "$userdata_stash" ]; then
   unpark_userdata
   say "restored data folder $userdata_rel"
 fi
+trap - EXIT
 
 log_line "updated ${VERSION:-}"
 write_result "{\"ok\": true, \"version\": \"${VERSION:-}\", \"error\": \"\"}"
