@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import stat
+import subprocess
 import sys
+import textwrap
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +28,7 @@ from src.self_update import (
     _interpreter,
     download_release,
     fetch_latest,
+    listener_pids_from_netstat,
     platform_from_os,
     release_base_url,
     run_apply_job,
@@ -35,9 +42,21 @@ from src.update_helper import (
     apply_source_tree,
     assert_install_dir,
     classify_members,
+    pid_alive,
+    port_open,
     run_plan,
     safe_extract,
 )
+
+# Ports the operator's stack uses on this machine. Tests must not bind or stop them.
+_LIVE_PORTS = {8080, 5173, 4096, 8090}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_update_work_dir(tmp_path, monkeypatch):
+    """Keep yaver update logs out of the operator's data folder."""
+    work = tmp_path / "update-work"
+    monkeypatch.setattr("src.self_update._work_dir", lambda: work)
 
 
 @pytest.fixture(autouse=True)
@@ -135,7 +154,9 @@ def test_source_apply_keeps_env_and_venv(tmp_path: Path):
     (install / "src").mkdir(parents=True)
     (install / "src" / "old.py").write_text("old", encoding="utf-8")
     (install / "src" / "keep.py").write_text("old-keep", encoding="utf-8")
-    (install / ".env").write_bytes(b"JIRA_HOST=https://jira\n")
+    env_path = install / ".env"
+    env_path.write_bytes(b"JIRA_HOST=https://jira\n")
+    env_path.chmod(stat.S_IREAD)
     (install / ".venv").mkdir()
     (install / ".venv" / "pyvenv.cfg").write_text("home = here\n", encoding="utf-8")
     (install / "notes.txt").write_text("leave me", encoding="utf-8")
@@ -144,8 +165,12 @@ def test_source_apply_keeps_env_and_venv(tmp_path: Path):
     (staging / "src" / "keep.py").write_text("new-keep", encoding="utf-8")
     (staging / "VERSION").write_text("0.9.72\n", encoding="utf-8")
     (staging / ".env").write_text("JIRA_HOST=replaced\n", encoding="utf-8")
-    apply_source_tree(staging, install)
-    assert (install / ".env").read_bytes() == b"JIRA_HOST=https://jira\n"
+    try:
+        apply_source_tree(staging, install)
+        assert (install / ".env").read_bytes() == b"JIRA_HOST=https://jira\n"
+        assert env_path.stat().st_mode & stat.S_IWRITE == 0
+    finally:
+        env_path.chmod(stat.S_IWRITE)
     assert (install / ".venv" / "pyvenv.cfg").is_file()
     assert not (install / "src" / "old.py").exists()
     assert (install / "src" / "keep.py").read_text(encoding="utf-8") == "new-keep"
@@ -162,10 +187,80 @@ def test_frozen_apply_keeps_env_and_moves_the_old_tree(tmp_path: Path):
     (staging / "_internal").mkdir(parents=True)
     (staging / "_internal" / "marker").write_text("1", encoding="utf-8")
     (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / ".env").write_bytes(b"TOKEN=from-package\n")
     apply_frozen_tree(staging, install)
     assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
     assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
     assert (tmp_path / "Yaver.previous" / "yaver.exe").read_text(encoding="utf-8") == "old"
+
+
+def test_frozen_apply_leaves_an_existing_env_file(tmp_path: Path):
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver.exe").write_text("old", encoding="utf-8")
+    env_path = install / ".env"
+    env_path.write_bytes(b"TOKEN=keep\n")
+    before = env_path.stat()
+    env_path.chmod(stat.S_IREAD)
+    staging = tmp_path / "new"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / ".env").write_bytes(b"TOKEN=from-package\n")
+    try:
+        apply_frozen_tree(staging, install)
+        assert env_path.read_bytes() == b"TOKEN=keep\n"
+        assert env_path.stat().st_ino == before.st_ino
+        assert env_path.stat().st_mode & stat.S_IWRITE == 0
+        assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
+    finally:
+        env_path.chmod(stat.S_IWRITE)
+
+
+def test_frozen_apply_copies_env_when_the_install_has_none(tmp_path: Path):
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver.exe").write_text("old", encoding="utf-8")
+    staging = tmp_path / "new"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / ".env").write_bytes(b"TOKEN=from-package\n")
+    apply_frozen_tree(staging, install)
+    assert (install / ".env").read_bytes() == b"TOKEN=from-package\n"
+
+
+def test_frozen_apply_works_while_a_console_is_in_the_folder(tmp_path: Path):
+    """A prompt whose current directory is the install cannot be renamed away."""
+    import subprocess
+
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver.exe").write_text("old", encoding="utf-8")
+    (install / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / ".env").write_bytes(b"TOKEN=keep\n")
+    staging = tmp_path / "new"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "_internal" / "marker.txt").write_text("bundle", encoding="utf-8")
+    (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=str(install),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        apply_frozen_tree(staging, install)
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
+    assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
+    assert (install / "VERSION").read_text(encoding="utf-8").startswith("0.2.0")
+    assert (install / "_internal" / "marker.txt").read_text(encoding="utf-8") == "bundle"
+    assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
+    assert (tmp_path / "Yaver.previous" / "yaver.exe").read_text(encoding="utf-8") == "old"
+    assert (tmp_path / "Yaver.previous" / "VERSION").read_text(encoding="utf-8").startswith("0.1.0")
+    assert holder.poll() is not None
 
 
 def test_helper_refuses_a_git_checkout(tmp_path: Path):
@@ -205,7 +300,7 @@ def test_helper_refuses_a_git_checkout(tmp_path: Path):
     assert "y" not in (install / "src" / "daemon.py").read_text(encoding="utf-8")
 
 
-def test_helper_starts_the_new_tree_and_keeps_env(tmp_path: Path):
+def test_helper_replaces_files_and_does_not_start(tmp_path: Path):
     install = tmp_path / "app"
     (install / "src").mkdir(parents=True)
     (install / "src" / "daemon.py").write_text("old", encoding="utf-8")
@@ -245,19 +340,16 @@ def test_helper_starts_the_new_tree_and_keeps_env(tmp_path: Path):
     assert (install / ".env").read_bytes() == b"BOARD=2\n"
     assert (install / ".venv").is_dir()
     assert (install / "src" / "daemon.py").read_text(encoding="utf-8") == "new"
-    for _ in range(50):
-        if started.is_file():
-            break
-        import time
-
-        time.sleep(0.1)
-    assert started.read_text(encoding="utf-8") == "yes"
+    assert not started.exists()
+    log = (tmp_path / "update.log").read_text(encoding="utf-8")
+    assert "updated 0.2.0" in log
+    assert "started " not in log
     result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
     assert result["ok"] is True
     assert result["version"] == "0.2.0"
 
 
-def test_failed_executable_start_restores_the_previous_tree(tmp_path: Path):
+def test_helper_keeps_the_new_files_without_opening_a_port(tmp_path: Path):
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_text("old", encoding="utf-8")
@@ -286,16 +378,14 @@ def test_failed_executable_start_restores_the_previous_tree(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    with pytest.raises(UpdateError):
-        run_plan(plan)
-    assert (install / "yaver.exe").read_text(encoding="utf-8") == "old"
+    run_plan(plan)
+    assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
     assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
     result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
-    assert result["ok"] is False
+    assert result["ok"] is True
 
 
-def test_health_failure_stops_the_process_that_locks_the_install(tmp_path: Path):
-    """The new process starts in the install folder. Rollback has to stop it."""
+def test_helper_does_not_launch_the_plan_command(tmp_path: Path):
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_text("old", encoding="utf-8")
@@ -303,6 +393,7 @@ def test_health_failure_stops_the_process_that_locks_the_install(tmp_path: Path)
     staging = tmp_path / "new"
     (staging / "_internal").mkdir(parents=True)
     (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    marker = tmp_path / "launched.txt"
     plan = tmp_path / "plan.json"
     plan.write_text(
         json.dumps(
@@ -314,7 +405,11 @@ def test_health_failure_stops_the_process_that_locks_the_install(tmp_path: Path)
                 "layout": "frozen",
                 "staging": str(staging),
                 "install_root": str(install),
-                "argv": [sys.executable, "-c", "import time; time.sleep(120)"],
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).write_text('yes')",
+                ],
                 "cwd": str(install),
                 "version": "0.2.0",
                 "log": str(tmp_path / "update.log"),
@@ -324,10 +419,10 @@ def test_health_failure_stops_the_process_that_locks_the_install(tmp_path: Path)
         ),
         encoding="utf-8",
     )
-    with pytest.raises(UpdateError, match="did not open"):
-        run_plan(plan)
-    assert (install / "yaver.exe").read_text(encoding="utf-8") == "old"
+    run_plan(plan)
+    assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
     assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
+    assert not marker.exists()
 
 
 def _frozen_plan(tmp_path: Path, install: Path, staging: Path, **extra: object) -> Path:
@@ -401,7 +496,7 @@ def test_frozen_swap_replaces_the_bundle_when_data_dir_is_internal(tmp_path: Pat
     assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
 
 
-def test_health_failure_puts_an_inside_data_folder_back(tmp_path: Path):
+def test_swap_keeps_an_inside_data_folder_without_starting(tmp_path: Path):
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_text("old", encoding="utf-8")
@@ -421,36 +516,10 @@ def test_health_failure_puts_an_inside_data_folder_back(tmp_path: Path):
         argv=[sys.executable, "-c", "import time; time.sleep(120)"],
         health_seconds=1,
     )
-    with pytest.raises(UpdateError, match="did not open"):
-        run_plan(plan)
-    assert (install / "yaver.exe").read_text(encoding="utf-8") == "old"
+    run_plan(plan)
+    assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
     assert (install / "office-data" / "yaver" / "keep.txt").read_text(encoding="utf-8") == "kept"
     assert not (tmp_path / "Yaver.userdata").exists()
-
-
-def test_start_failure_restores_the_previous_executable(tmp_path: Path, monkeypatch):
-    install = tmp_path / "Yaver"
-    (install / "_internal").mkdir(parents=True)
-    (install / "yaver").write_text("old", encoding="utf-8")
-    (install / ".env").write_bytes(b"TOKEN=keep\n")
-    staging = tmp_path / "new"
-    (staging / "_internal").mkdir(parents=True)
-    (staging / "yaver").write_text("new", encoding="utf-8")
-    calls = {"n": 0}
-
-    def start(*_args, **_kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise PermissionError(13, "Permission denied", str(install / "yaver"))
-        return None
-
-    monkeypatch.setattr("src.update_helper.start_logged", start)
-    plan = _frozen_plan(tmp_path, install, staging)
-    with pytest.raises(UpdateError, match="could not be started"):
-        run_plan(plan)
-    assert (install / "yaver").read_text(encoding="utf-8") == "old"
-    assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
-    assert calls["n"] == 2
 
 
 def test_drive_root_is_refused():
@@ -584,6 +653,134 @@ def test_apply_job_spawns_a_helper_and_then_stops(tmp_path: Path, monkeypatch):
     assert (tmp_path / "work" / "staging").exists()
 
 
+def test_apply_job_waits_for_the_helper_and_does_not_start(tmp_path: Path, monkeypatch):
+    import hashlib
+    import os
+
+    payload = _zip({"src/daemon.py": b"x", "VERSION": b"0.9.72\n"})
+    digest = hashlib.sha256(payload).hexdigest()
+    _ReleaseHandler.body = payload
+    _ReleaseHandler.redirect = ""
+    _ReleaseHandler.meta = {
+        "version": "0.9.72",
+        "sha256": digest,
+        "size": len(payload),
+        "layout": "source",
+        "notes": "",
+    }
+    server, port = _serve()
+    stopped: list[str] = []
+    install = tmp_path / "install"
+    install.mkdir()
+    marker = tmp_path / "dashboard-started.txt"
+    launcher = tmp_path / "should_not_run.py"
+    launcher.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('yes')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.self_update.local_platform", lambda: "windows")
+    monkeypatch.setattr("src.self_update.local_layout", lambda: "source")
+    monkeypatch.setattr("src.self_update.install_root", lambda: install)
+    monkeypatch.setattr("src.self_update._work_dir", lambda: tmp_path / "work")
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 0))
+    monkeypatch.setattr(
+        "src.self_update._restart_argv",
+        lambda: [sys.executable, str(launcher)],
+    )
+    monkeypatch.setattr("src.__version__", "0.9.71")
+
+    def fail_exec(*_args, **_kwargs):
+        raise AssertionError("the update command must wait, not replace this process")
+
+    monkeypatch.setattr("src.self_update.os.execv", fail_exec)
+    previous = Path.cwd()
+    try:
+        run_apply_job(f"http://127.0.0.1:{port}", lambda: stopped.append("down"))
+    finally:
+        os.chdir(previous)
+        server.shutdown()
+        server.server_close()
+    assert stopped == ["down"]
+    assert (install / "src" / "daemon.py").read_bytes() == b"x"
+    assert (install / "VERSION").read_bytes().startswith(b"0.9.72")
+    assert not marker.exists()
+    plan = json.loads((tmp_path / "work" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["pid"] == 0
+    assert plan["version"] == "0.9.72"
+    log = (tmp_path / "work" / "update.log").read_text(encoding="utf-8")
+    assert "updated 0.9.72" in log
+    assert "started " not in log
+
+
+def test_windows_executable_exits_before_the_helper_moves_internal(
+    tmp_path: Path, monkeypatch
+):
+    """A frozen Windows update must not swap while yaver.exe is still open."""
+    import hashlib
+    import os
+
+    payload = _zip({"yaver.exe": b"new", "_internal/marker.txt": b"bundle"})
+    digest = hashlib.sha256(payload).hexdigest()
+    _ReleaseHandler.body = payload
+    _ReleaseHandler.redirect = ""
+    _ReleaseHandler.meta = {
+        "version": "0.9.75",
+        "sha256": digest,
+        "size": len(payload),
+        "layout": "frozen",
+        "notes": "",
+    }
+    server, port = _serve()
+    started: list[list[str]] = []
+    stopped: list[str] = []
+    lines: list[str] = []
+    install = tmp_path / "Yaver"
+    install.mkdir()
+    monkeypatch.setattr("src.self_update.local_platform", lambda: "windows")
+    monkeypatch.setattr("src.self_update.local_layout", lambda: "frozen")
+    monkeypatch.setattr("src.self_update.install_root", lambda: install)
+    monkeypatch.setattr("src.self_update._work_dir", lambda: tmp_path / "work")
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 0))
+    monkeypatch.setattr(
+        "src.self_update._windows_frozen_handoff",
+        lambda layout: layout == "frozen",
+    )
+    monkeypatch.setattr("src.__version__", "0.9.74")
+
+    def refuse_foreground(*_args, **_kwargs):
+        raise AssertionError("yaver.exe must exit before the helper moves _internal")
+
+    monkeypatch.setattr("src.self_update._run_helper_foreground", refuse_foreground)
+    monkeypatch.setattr(
+        "src.self_update._spawn_console",
+        lambda args, cwd: started.append(list(args)),
+    )
+    previous = Path.cwd()
+    try:
+        run_apply_job(
+            f"http://127.0.0.1:{port}",
+            lambda: stopped.append("down"),
+            report=lines.append,
+        )
+    finally:
+        os.chdir(previous)
+        server.shutdown()
+        server.server_close()
+    assert stopped == ["down"]
+    assert started
+    plan = json.loads((tmp_path / "work" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["pid"] == os.getpid()
+    assert plan["layout"] == "frozen"
+    text = "\n".join(lines)
+    assert "Closing Yaver so Windows can replace the files." in text
+    assert "Wait for the line that begins with Updated to." in text
+    assert "helper continues after this process exits" in text
+    assert "Replacing the files." not in text
+    assert not (install / "yaver.exe").exists()
+    assert not (install / "_internal").exists()
+
+
 def test_a_second_apply_is_rejected_while_the_first_is_starting(monkeypatch):
     """The busy flag is taken before the slow settings write."""
     import time
@@ -678,14 +875,381 @@ def test_dashboard_update_routes_are_gone():
         assert "update_available" not in response.text
 
 
-def test_stopped_update_refuses_a_running_dashboard(monkeypatch):
-    monkeypatch.setattr("src.self_update.install_is_running", lambda: True)
-    with pytest.raises(UpdateError, match="Stop it"):
-        update_stopped_install("10.0.0.8", 8090, shutdown=lambda: None)
+def _stop_test_pid(pid: int) -> None:
+    """Stop a process this test started. Never the test runner."""
+    if pid <= 0 or pid == os.getpid():
+        return
+    if sys.platform == "win32":
+        from src.update_helper import _terminate_one
+
+        _terminate_one(pid)
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
+def _ports_still_open(ports: list[int]) -> None:
+    closed = [port for port in ports if not port_open(port, "127.0.0.1")]
+    assert closed == []
+
+
+def test_netstat_listener_pids_match_the_exact_port():
+    text = "\n".join(
+        [
+            "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       16960",
+            "  TCP    127.0.0.1:18080        0.0.0.0:0              LISTENING       22222",
+            "  TCP    [::]:8080              [::]:0                 LISTENING       16960",
+            "  TCP    [fe80::1%12]:8080      [::]:0                 LISTENING       16960",
+            "  TCP    127.0.0.1:8080         127.0.0.1:54321        ESTABLISHED     16960",
+            "  TCP    127.0.0.1:8080         127.0.0.1:1            TIME_WAIT       0",
+            "  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       5",
+            "  TCP    127.0.0.1:50000        10.0.0.1:8080          LISTENING       99",
+        ]
+    )
+    assert listener_pids_from_netstat(text, 8080) == [16960]
+    assert listener_pids_from_netstat(text, 18080) == [22222]
+    assert listener_pids_from_netstat(text, 80) == [5]
+    assert listener_pids_from_netstat("", 8080) == []
+
+
+def test_windows_listener_lookup_uses_the_exact_port(monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("netstat lookup")
+    sample = (
+        "TCP 0.0.0.0:8080 0.0.0.0:0 LISTENING 16960\n"
+        "TCP 127.0.0.1:18080 0.0.0.0:0 LISTENING 22222\n"
+    )
+
+    def fake_run(argv, **_kwargs):
+        assert argv == ["netstat", "-ano"]
+
+        class Result:
+            stdout = sample
+
+        return Result()
+
+    monkeypatch.setattr("src.self_update.subprocess.run", fake_run)
+    from src.self_update import _dashboard_listener_pids
+
+    assert _dashboard_listener_pids(8080) == [16960]
+    assert _dashboard_listener_pids(18080) == [22222]
+
+
+def test_linux_listener_lookup_reads_ss(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        seen.append(list(argv))
+
+        class Result:
+            stdout = 'users:(("python",pid=4242,fd=3))'
+
+        return Result()
+
+    monkeypatch.setattr("src.self_update.subprocess.run", fake_run)
+    from src.self_update import _dashboard_listener_pids
+
+    assert _dashboard_listener_pids(23456) == [4242]
+    assert seen == [["ss", "-ltnp", "sport = :23456"]]
+
+
+def test_linux_stop_signals_that_pid_only(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    # Windows Python has no SIGKILL. The Linux branch still has to name it.
+    monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((int(pid), int(sig))))
+    outcomes = {"dead": True}
+    monkeypatch.setattr(
+        "src.update_helper.wait_dead",
+        lambda pid, seconds: outcomes["dead"],
+    )
+    from src.self_update import _stop_listener
+
+    _stop_listener(0)
+    _stop_listener(-3)
+    _stop_listener(os.getpid())
+    _stop_listener(424242)
+    assert sent == [(424242, int(signal.SIGTERM))]
+    sent.clear()
+    outcomes["dead"] = False
+    _stop_listener(424242)
+    assert sent == [
+        (424242, int(signal.SIGTERM)),
+        (424242, int(signal.SIGKILL)),
+    ]
+
+
+def test_linux_stop_leaves_a_missing_process(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def missing(_pid, _sig):
+        raise OSError("missing")
+
+    monkeypatch.setattr(os, "kill", missing)
+    waited: list[int] = []
+    monkeypatch.setattr(
+        "src.update_helper.wait_dead",
+        lambda pid, seconds: waited.append(pid) or False,
+    )
+    from src.self_update import _stop_listener
+
+    _stop_listener(424242)
+    assert waited == []
+
+
+@pytest.mark.parametrize("kind", ["empty", "self", "zero"])
+def test_update_does_not_download_when_the_listener_is_unknown(tmp_path: Path, monkeypatch, kind):
+    if kind == "self":
+        pids = [os.getpid()]
+    elif kind == "zero":
+        pids = [0, os.getpid()]
+    else:
+        pids = []
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 9))
+    monkeypatch.setattr(
+        "src.update_helper.port_open",
+        lambda port, host="127.0.0.1": True,
+    )
+    monkeypatch.setattr("src.self_update._dashboard_listener_pids", lambda port: list(pids))
+    stopped: list[int] = []
+    monkeypatch.setattr("src.self_update._stop_listener", lambda pid: stopped.append(pid))
+
+    def download(*_args, **_kwargs):
+        raise AssertionError("download started without a listener pid")
+
+    monkeypatch.setattr("src.self_update.run_apply_job", download)
+    lines: list[str] = []
+    with pytest.raises(UpdateError, match="could not be found"):
+        update_stopped_install(
+            "10.0.0.8",
+            8090,
+            shutdown=lambda: None,
+            report=lines.append,
+        )
+    assert stopped == []
+    text = "\n".join(lines)
+    assert "no listener pid was found" in text
+    assert "stopping listener" not in text
+    assert "Update log:" not in text
+    assert not (tmp_path / "update-work" / "update.log").exists()
+
+
+def test_update_does_not_download_when_the_port_stays_open(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 9))
+    monkeypatch.setattr(
+        "src.update_helper.port_open",
+        lambda port, host="127.0.0.1": True,
+    )
+    monkeypatch.setattr(
+        "src.update_helper.wait_port_closed",
+        lambda port, seconds, host="127.0.0.1": False,
+    )
+    monkeypatch.setattr("src.self_update._dashboard_listener_pids", lambda port: [424242])
+    stopped: list[int] = []
+    monkeypatch.setattr("src.self_update._stop_listener", lambda pid: stopped.append(pid))
+
+    def download(*_args, **_kwargs):
+        raise AssertionError("download started while the port was open")
+
+    monkeypatch.setattr("src.self_update.run_apply_job", download)
+    lines: list[str] = []
+    with pytest.raises(UpdateError, match="Yaver is still running"):
+        update_stopped_install(
+            "10.0.0.8",
+            8090,
+            shutdown=lambda: None,
+            report=lines.append,
+        )
+    assert stopped == [424242]
+    text = "\n".join(lines)
+    assert "Update log:" not in text
+    assert "Stopping Yaver." in lines
+    assert "stopping listener pid=424242" in text
+    assert "dashboard port 9 still open" in text
+    assert not (tmp_path / "update-work" / "update.log").exists()
+
+
+def test_update_skips_stop_when_the_dashboard_port_is_closed(tmp_path: Path, monkeypatch):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    if port in _LIVE_PORTS:
+        pytest.skip("ephemeral port collided with a live service")
+    monkeypatch.setattr(
+        "src.self_update._dashboard_probe",
+        lambda bound=port: ("127.0.0.1", bound),
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr("src.self_update._stop_listener", lambda pid: stopped.append(pid))
+    monkeypatch.setattr(
+        "src.self_update.checkout_block",
+        lambda: "This folder is a git checkout.",
+    )
+    lines: list[str] = []
+    with pytest.raises(UpdateError, match="git checkout"):
+        update_stopped_install(
+            "10.0.0.8",
+            1,
+            shutdown=lambda: None,
+            report=lines.append,
+        )
+    text = "\n".join(lines)
+    assert "Update log:" not in text
+    assert "Stopping Yaver." not in text
+    assert "dashboard port" in text and "is closed" in text
+    assert stopped == []
+    assert not (tmp_path / "update-work" / "update.log").exists()
+
+
+def test_update_stops_the_dashboard_listener_then_continues(tmp_path: Path, monkeypatch):
+    """Stop only the process on the dashboard port, then start the download."""
+    watched = [port for port in sorted(_LIVE_PORTS) if port_open(port, "127.0.0.1")]
+    note = tmp_path / "listener.txt"
+    script = tmp_path / "yaver_update_listener.py"
+    script.write_text(
+        textwrap.dedent(
+            """\
+            import os
+            import socket
+            import subprocess
+            import sys
+            import time
+
+            note = sys.argv[1]
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            port = int(sock.getsockname()[1])
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(120)",
+                    "yaver-update-listener-child",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            with open(note, "w", encoding="ascii") as handle:
+                handle.write(str(os.getpid()) + " " + str(port) + " " + str(child.pid) + chr(10))
+            while True:
+                time.sleep(30)
+            """
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(note), "yaver-update-listener"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    listener_pid = 0
+    child_pid = 0
+    bound = 0
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not note.is_file():
+            if proc.poll() is not None:
+                pytest.fail(f"listener exited {proc.returncode}")
+            time.sleep(0.05)
+        assert note.is_file()
+        listener_pid, bound, child_pid = (
+            int(part) for part in note.read_text(encoding="ascii").split()
+        )
+        assert bound not in _LIVE_PORTS
+        assert listener_pid > 0 and listener_pid != os.getpid()
+        assert child_pid > 0 and child_pid not in {listener_pid, os.getpid(), proc.pid}
+        assert pid_alive(child_pid)
+        from src.self_update import _dashboard_listener_pids
+
+        seen: list[int] = []
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            seen = _dashboard_listener_pids(bound)
+            if listener_pid in seen:
+                break
+            time.sleep(0.1)
+        assert seen == [listener_pid]
+        monkeypatch.setattr(
+            "src.self_update._dashboard_probe",
+            lambda chosen=bound: ("127.0.0.1", chosen),
+        )
+        monkeypatch.setattr("src.self_update.checkout_block", lambda: "")
+        monkeypatch.setattr("src.self_update.save_release_target", lambda host, port: None)
+        calls: list[str] = []
+
+        def run(base, shutdown, spawn=None, report=None):
+            del shutdown, spawn, report
+            assert not port_open(bound, "127.0.0.1")
+            assert not pid_alive(listener_pid)
+            assert pid_alive(child_pid)
+            calls.append(base)
+
+        monkeypatch.setattr("src.self_update.run_apply_job", run)
+        lines: list[str] = []
+        update_stopped_install(
+            "10.0.0.8",
+            8090,
+            shutdown=lambda: None,
+            report=lines.append,
+        )
+        assert calls == ["http://10.0.0.8:8090"]
+        text = "\n".join(lines)
+        assert "Update log:" not in text
+        assert "Stopping Yaver." in lines
+        import re
+
+        stopped_pids = [
+            int(match) for match in re.findall(r"stopping listener pid=(\d+)", text)
+        ]
+        assert stopped_pids == [listener_pid]
+        assert f"dashboard port {bound} is closed" in text
+        assert not (tmp_path / "update-work" / "update.log").exists()
+        assert proc.wait(timeout=5) is not None
+        _ports_still_open(watched)
+    finally:
+        _stop_test_pid(listener_pid)
+        _stop_test_pid(child_pid)
+        if proc.poll() is None:
+            _stop_test_pid(proc.pid)
+            proc.wait(timeout=5)
+
+
+def test_frozen_swap_log_omits_the_env_file(tmp_path: Path, capsys) -> None:
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver.exe").write_text("old", encoding="utf-8")
+    (install / ".env").write_text("TOKEN=super-secret-value\n", encoding="utf-8")
+    staging = tmp_path / "staged"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / ".env").write_text("TOKEN=from-package\n", encoding="utf-8")
+    notes: list[str] = []
+    apply_frozen_tree(staging, install, note=notes.append)
+    text = "\n".join(notes)
+    shown = capsys.readouterr().out
+    assert "super-secret-value" not in text
+    assert "from-package" not in text
+    assert "super-secret-value" not in shown
+    assert "from-package" not in shown
+    assert "env file present" in text
+    assert "env file present" in shown
+    assert "env file left in place" in text
+    assert "package env file skipped" in text
+    assert (install / ".env").read_text(encoding="utf-8") == "TOKEN=super-secret-value\n"
 
 
 def test_stopped_update_refuses_a_checkout(monkeypatch):
-    monkeypatch.setattr("src.self_update.install_is_running", lambda: False)
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 0))
     monkeypatch.setattr(
         "src.self_update.checkout_block",
         lambda: "This folder is a git checkout.",
@@ -699,7 +1263,7 @@ def test_stopped_update_uses_the_saved_address(monkeypatch):
 
     monkeypatch.setattr(settings, "release_host", "10.4.5.6")
     monkeypatch.setattr(settings, "release_port", 8090)
-    monkeypatch.setattr("src.self_update.install_is_running", lambda: False)
+    monkeypatch.setattr("src.self_update._dashboard_probe", lambda: ("127.0.0.1", 0))
     monkeypatch.setattr("src.self_update.checkout_block", lambda: "")
     saved: dict[str, object] = {}
     monkeypatch.setattr(
@@ -724,23 +1288,25 @@ def test_stopped_update_uses_the_saved_address(monkeypatch):
         report=lines.append,
     )
     assert calls == ["http://10.4.5.6:8090", "down"]
-    assert lines == ["Downloading 0.9.80."]
+    assert "Update log:" not in "\n".join(lines)
+    assert "release 10.4.5.6:8090" in lines
+    assert lines[-1] == "Downloading 0.9.80."
     assert saved == {"host": "10.4.5.6", "port": 8090}
 
 
-def test_cli_update_stops_when_yaver_is_running(monkeypatch):
+def test_cli_update_prints_a_stop_error(monkeypatch):
     from click.testing import CliRunner
 
     from cli import cli
 
     def refuse(*_args, **_kwargs):
-        raise UpdateError("Yaver is running. Stop it, then run yaver update.")
+        raise UpdateError("Yaver is still running.")
 
     monkeypatch.setattr("src.self_update.update_stopped_install", refuse)
     result = CliRunner().invoke(cli, ["--update"])
     text = result.output + (result.stderr or "")
     assert result.exit_code == 1
-    assert "Stop it" in text
+    assert "Yaver is still running." in text
 
 
 def test_cli_update_passes_the_address_and_closes(monkeypatch):
@@ -788,10 +1354,14 @@ def test_powershell_helper_replaces_an_executable_and_keeps_env(tmp_path: Path):
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_text("old", encoding="utf-8")
-    (install / ".env").write_bytes(b"TOKEN=keep\n")
+    env_path = install / ".env"
+    env_path.write_bytes(b"TOKEN=keep\n")
+    before = env_path.stat()
+    env_path.chmod(stat.S_IREAD)
     staging = tmp_path / "staged"
     (staging / "_internal").mkdir(parents=True)
     (staging / "yaver.exe").write_text("new", encoding="utf-8")
+    (staging / ".env").write_bytes(b"TOKEN=from-package\n")
     started = tmp_path / "started.txt"
     plan = {
         "created": 10**10,
@@ -817,35 +1387,35 @@ def test_powershell_helper_replaces_an_executable_and_keeps_env(tmp_path: Path):
     script = Path(__file__).resolve().parents[1] / "src" / "update_helper.ps1"
     import subprocess
 
-    completed = subprocess.run(
-        [
-            str(powershell),
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-            "-PlanPath",
-            str(plan_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
-    assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
+    try:
+        completed = subprocess.run(
+            [
+                str(powershell),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-PlanPath",
+                str(plan_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
+        assert env_path.read_bytes() == b"TOKEN=keep\n"
+        assert env_path.stat().st_ino == before.st_ino
+        assert env_path.stat().st_mode & stat.S_IWRITE == 0
+    finally:
+        env_path.chmod(stat.S_IWRITE)
     assert (tmp_path / "Yaver.previous" / "yaver.exe").read_text(encoding="utf-8") == "old"
-    for _ in range(50):
-        if started.is_file():
-            break
-        import time
-
-        time.sleep(0.1)
-    assert started.read_text(encoding="utf-8").strip() == "ok"
+    assert not started.exists()
+    assert "updated 0.9.72" in (tmp_path / "update.log").read_text(encoding="utf-8-sig")
 
 
-def test_powershell_helper_restores_when_the_new_process_locks_the_folder(tmp_path: Path):
+def test_powershell_helper_does_not_launch_the_plan_command(tmp_path: Path):
     if sys.platform != "win32":
         pytest.skip("Windows helper")
     powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
@@ -898,12 +1468,12 @@ def test_powershell_helper_restores_when_the_new_process_locks_the_folder(tmp_pa
             check=False,
             timeout=30,
         )
-        assert completed.returncode != 0, completed.stdout + completed.stderr
-        assert (install / "yaver.exe").read_text(encoding="utf-8") == "old"
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert (install / "yaver.exe").read_text(encoding="utf-8") == "new"
         assert (install / ".env").read_bytes() == b"TOKEN=keep\n"
         log = (tmp_path / "update.log").read_text(encoding="utf-8-sig")
-        assert "restored" in log.lower()
-        assert "starting restored " in log
+        assert "updated 0.9.72" in log
+        assert "starting restored " not in log
     finally:
         subprocess.run(
             [

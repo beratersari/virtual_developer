@@ -227,7 +227,7 @@ class JiraAgentDaemon:
             if self._stopping:
                 return
             asyncio.create_task(
-                self.stop(reason="Yaver is updating and will start again")
+                self.stop(reason="Yaver is updating")
             )
 
         loop.call_soon_threadsafe(_kick)

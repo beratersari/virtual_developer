@@ -408,7 +408,7 @@ CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahib
 
 ### Ofis ağında güncelleme
 
-Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Yaver’i durdurun, sonra `yaver update` çalıştırın (Windows: `yaver.exe update` veya `yaver.exe --update`).
+Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. `yaver update` çalıştırın (Windows: `yaver.exe update` veya `yaver.exe --update`). Pano zaten açıksa komut önce o süreci durdurur.
 
 Sunucu adresi `.env` içindeki `RELEASE_HOST` ve `RELEASE_PORT` değerleridir. İlk çalıştırmada şöyle verilebilir:
 
@@ -416,7 +416,7 @@ Sunucu adresi `.env` içindeki `RELEASE_HOST` ve `RELEASE_PORT` değerleridir. �
 yaver update --host 192.168.1.20 --port 8090
 ```
 
-Komut bu bilgisayara uyan paketi indirir, kurulumu değiştirir ve Yaver’i yeniden başlatır. `.env` dosyası ve veri klasörü durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i. Yaver zaten çalışıyorsa komut indirmeden durur.
+Komut bu bilgisayara uyan paketi indirir ve kurulumu değiştirir. Kaynak kurulum kopya bitene kadar açık kalır. Windows’ta `yaver.exe` kendi süreç numarasını yazar ve yardımcı `_internal` klasörünü taşımadan önce kapanır. Yardımcı o süreç kapanana kadar bekler ve aynı pencerede yazmaya devam eder. Komut istemi kopya bitmeden geri gelebilir. Updated to ile başlayan satırı bekleyin, sonra Yaver’i başlatın. Kurulumda zaten bir `.env` dosyası varsa o dosya olduğu gibi kalır, veri klasörü de durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i. Pano portu açıksa komut orada dinleyen süreci durdurur, sonra indirir. Her adım terminalde görünür.
 
 ---
 

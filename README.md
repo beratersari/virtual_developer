@@ -410,7 +410,7 @@ CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: dow
 
 ### Update on the office network
 
-A separate release site holds the Windows package and one package for each Ubuntu version. Stop Yaver, then run `yaver update` (Windows: `yaver.exe update` or `yaver.exe --update`).
+A separate release site holds the Windows package and one package for each Ubuntu version. Run `yaver update` (Windows: `yaver.exe update` or `yaver.exe --update`). If the dashboard is already open, the command stops that process first.
 
 The server address is `RELEASE_HOST` and `RELEASE_PORT` in `.env`. The first run can set them:
 
@@ -418,7 +418,7 @@ The server address is `RELEASE_HOST` and `RELEASE_PORT` in `.env`. The first run
 yaver update --host 192.168.1.20 --port 8090
 ```
 
-The command downloads the package for this computer, replaces this install, and starts Yaver again. The `.env` file and the data folder stay. A git checkout is left alone. The published zip has to be the same kind this copy already is: the executable folder, or the full install zip. If Yaver is already running, the command stops before the download.
+The command downloads the package for this computer and replaces this install. A source install waits until the copy finishes. On Windows, `yaver.exe` records its own process id and exits before the helper moves `_internal`. The helper waits until that process has closed and keeps printing in the same window. The command prompt can return before the copy finishes. Wait for the line that begins with Updated to, then start Yaver. An existing `.env` file is left as it is, and the data folder stays. A git checkout is left alone. The published zip has to be the same kind this copy already is: the executable folder, or the full install zip. If the dashboard port is open, the command stops the process listening there and then downloads. Each step is printed in the terminal.
 
 ---
 

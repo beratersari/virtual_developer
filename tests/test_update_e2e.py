@@ -5,11 +5,15 @@ zip, checks the checksum, and starts the helper the same way the product
 does. The helper then replaces a temporary install. Nothing here binds
 the live dashboard, and the install is never this git checkout.
 
-On Windows the Linux helper runs under Git bash. This machine has no
-``setsid``, so that command is a one-line stand-in which execs the new
-process in place. The test still checks the swap, the saved ``.env``,
-the data folder, the port, and rollback. It does not prove that ``setsid``
-kept the new process alive after the script exited.
+On Windows the Linux helper runs under Git bash. The test checks the
+swap, the saved ``.env``, and the data folder. The helper does not start
+Yaver, including when the plan names a command to run afterwards.
+
+On Windows, tests hold a file inside ``_internal`` open. Plan pid 0
+makes the PowerShell helper and the Python helper try the move while
+that handle is open, and Windows denies it for about ten seconds. The
+same helper with that process's pid waits, then moves the folder after
+the handle is closed.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import socket
 import subprocess
 import sys
@@ -38,6 +43,7 @@ _BUSY_PORTS = {8080, 5173, 4096, 8090}
 _ROOT = Path(__file__).resolve().parents[1]
 _HELPER_SH = _ROOT / "src" / "update_helper.sh"
 _HELPER_PS1 = _ROOT / "src" / "update_helper.ps1"
+_HELPER_PY = _ROOT / "src" / "update_helper.py"
 _POWERSHELL = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
 _GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
 
@@ -444,15 +450,7 @@ def test_shell_plan_records_the_dashboard_address(tmp_path: Path) -> None:
         _write_shell_plan(dest, plan)
 
 
-def test_helper_checks_the_address_in_the_plan(tmp_path: Path) -> None:
-    """A listener on 127.0.0.1 must not satisfy a plan that names 127.0.0.2.
-
-    Python on this Windows host cannot complete a connection to 127.0.0.2.
-    The new process still binds 127.0.0.1. If the helper ignored the plan
-    and probed loopback, it would treat that listener as the new dashboard.
-    """
-    if not _can_bind("127.0.0.2"):
-        pytest.skip("127.0.0.2 is not available")
+def test_helper_does_not_launch_the_plan_command(tmp_path: Path) -> None:
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_bytes(b"old-exe")
@@ -470,7 +468,7 @@ def test_helper_checks_the_address_in_the_plan(tmp_path: Path) -> None:
                 "created": time.time(),
                 "pid": 0,
                 "port": port,
-                "probe_host": "127.0.0.2",
+                "probe_host": "127.0.0.1",
                 "layout": "frozen",
                 "staging": str(staging),
                 "install_root": str(install),
@@ -492,11 +490,12 @@ def test_helper_checks_the_address_in_the_plan(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     try:
-        with pytest.raises(UpdateError, match="did not open"):
-            run_plan(plan)
-        assert (install / "yaver.exe").read_bytes() == b"old-exe"
+        run_plan(plan)
+        assert (install / "yaver.exe").read_bytes() == b"new-exe"
         assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
-        assert (tmp_path / "listening.txt").read_text(encoding="utf-8") == "py-marker"
+        assert not (tmp_path / "listening.txt").exists()
+        result = _read_json(tmp_path / "result.json")
+        assert result["ok"] is True
     finally:
         _stop_marked("yaver_e2e_py_probe.py")
 
@@ -553,8 +552,7 @@ def test_release_download_replaces_a_source_install_and_opens_the_port(tmp_path:
         assert (install / ".env").read_bytes() == env_bytes
         assert (outside / "yaver" / "keep.txt").read_text(encoding="utf-8") == "outside"
         assert (tmp_path / "canary.txt").read_text(encoding="utf-8") == "canary"
-        assert (work / "listening.txt").read_text(encoding="utf-8") == "yaver-e2e-marker"
-        _accepts(probe, port)
+        assert not (work / "listening.txt").exists()
     finally:
         _close_server(server)
         _stop_marked("yaver_e2e_source_listen.py")
@@ -605,8 +603,7 @@ def test_release_download_replaces_a_frozen_install_and_keeps_inside_data(tmp_pa
         assert (previous / "yaver.exe").read_bytes() == b"old-exe"
         assert not (previous / "office-data").exists()
         assert (tmp_path / "canary.txt").read_text(encoding="utf-8") == "canary"
-        assert (work / "listening.txt").read_text(encoding="utf-8") == "yaver-e2e-marker"
-        _accepts(probe, port)
+        assert not (work / "listening.txt").exists()
     finally:
         _close_server(server)
         _stop_marked("yaver_e2e_frozen_listen.py")
@@ -718,11 +715,21 @@ def test_powershell_health_uses_the_plan_address(tmp_path: Path) -> None:
         assert (install / "yaver.exe").read_bytes() == b"new-exe"
         assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
         assert (tmp_path / "Yaver.previous" / "yaver.exe").read_bytes() == b"old-exe"
-        assert marker.read_text(encoding="utf-8") == "ps-marker"
-        assert "starting restored" not in _text(tmp_path / "update.log")
+        assert not marker.exists()
+        shown = completed.stdout
+        log = _text(tmp_path / "update.log")
+        assert "env file present" in shown
+        assert "env file left in place" in shown
+        assert "frozen swap finished" in shown
+        assert "env file present" not in log
+        assert "updated 9.9.9" in log
+        assert "TOKEN=keep-me" not in shown
+        assert "TOKEN=keep-me" not in log
+        assert "starting restored" not in log
+        assert "started " not in shown
+        assert "started " not in log
         result = _read_json(tmp_path / "result.json")
         assert result["ok"] is True
-        _accepts(probe, port)
     finally:
         _stop_marked("yaver_e2e_ps_probe.py")
 
@@ -732,8 +739,6 @@ def test_powershell_does_not_treat_another_address_as_the_dashboard(tmp_path: Pa
         pytest.skip("Windows helper")
     if not _POWERSHELL.is_file():
         pytest.skip("Windows PowerShell is not installed")
-    if not _can_bind("127.0.0.2"):
-        pytest.skip("127.0.0.2 is not available")
     install = tmp_path / "Yaver"
     (install / "_internal").mkdir(parents=True)
     (install / "yaver.exe").write_bytes(b"old-exe")
@@ -791,10 +796,10 @@ def test_powershell_does_not_treat_another_address_as_the_dashboard(tmp_path: Pa
             timeout=20,
             check=False,
         )
-        assert completed.returncode != 0, completed.stdout + completed.stderr + _text(tmp_path / "update.log")
-        assert (install / "yaver.exe").read_bytes() == b"old-exe"
-        assert (tmp_path / "listening.txt").read_text(encoding="utf-8") == "ps-other"
-        assert "starting restored" in _text(tmp_path / "update.log")
+        assert completed.returncode == 0, completed.stdout + completed.stderr + _text(tmp_path / "update.log")
+        assert (install / "yaver.exe").read_bytes() == b"new-exe"
+        assert not (tmp_path / "listening.txt").exists()
+        assert "starting restored" not in _text(tmp_path / "update.log")
     finally:
         _stop_marked("yaver_e2e_ps_other.py")
 
@@ -865,6 +870,275 @@ def test_powershell_helper_leaves_the_tree_alone_while_the_port_is_open(tmp_path
     assert "still open" in result["error"]
 
 
+_LOCKER = """\
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+from pathlib import Path
+
+target, release, ready = sys.argv[1:4]
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel.CreateFileW.restype = wintypes.HANDLE
+kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel.CloseHandle.restype = wintypes.BOOL
+handle = kernel.CreateFileW(str(Path(target)), 0x80000000, 0x00000001, None, 3, 0, None)
+invalid = int(ctypes.c_void_p(-1).value or 0)
+if not handle or int(handle) in {0, invalid}:
+    raise SystemExit(ctypes.get_last_error() or 2)
+Path(ready).write_text("open", encoding="utf-8")
+while not Path(release).exists():
+    time.sleep(0.05)
+kernel.CloseHandle(handle)
+"""
+
+
+def _windows_helper() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows helper")
+    if not _POWERSHELL.is_file():
+        pytest.skip("Windows PowerShell is not installed")
+
+
+def _lock_internal(install: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+    locked = install / "_internal" / "locked.bin"
+    locked.write_bytes(b"locked")
+    script = tmp_path / "yaver_e2e_lock_internal.py"
+    script.write_text(_LOCKER, encoding="utf-8")
+    release = tmp_path / "release-lock"
+    ready = tmp_path / "lock-ready"
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(locked), str(release), str(ready)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.time() + 10
+    while time.time() < deadline and not ready.is_file():
+        if proc.poll() is not None:
+            err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            raise AssertionError(f"locker exited {proc.returncode}: {err}")
+        time.sleep(0.05)
+    if not ready.is_file():
+        proc.kill()
+        raise AssertionError("locker did not open _internal")
+    return proc, release
+
+
+def _release_locker(proc: subprocess.Popen[str], release: Path) -> None:
+    release.write_text("go", encoding="utf-8")
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _ps_argv(plan: Path) -> list[str]:
+    return [
+        str(_POWERSHELL),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(_HELPER_PS1),
+        "-PlanPath",
+        str(plan),
+    ]
+
+
+def _locked_plan(tmp_path: Path, install: Path, staging: Path, pid: int) -> Path:
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "created": time.time(),
+                "pid": pid,
+                "port": 0,
+                "probe_host": "127.0.0.1",
+                "layout": "frozen",
+                "staging": str(staging),
+                "install_root": str(install),
+                "argv": [sys.executable, "-c", "raise SystemExit(0)"],
+                "cwd": str(tmp_path),
+                "version": "9.9.9",
+                "log": str(tmp_path / "update.log"),
+                "result": str(tmp_path / "result.json"),
+                "health_seconds": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan
+
+
+def _locked_install(tmp_path: Path) -> tuple[Path, Path]:
+    install = tmp_path / "Yaver"
+    (install / "_internal").mkdir(parents=True)
+    (install / "yaver.exe").write_bytes(b"old-exe")
+    (install / ".env").write_bytes(b"TOKEN=keep-me\n")
+    staging = tmp_path / "stage"
+    (staging / "_internal").mkdir(parents=True)
+    (staging / "yaver.exe").write_bytes(b"new-exe")
+    (staging / "_internal" / "marker.txt").write_bytes(b"bundle")
+    return install, staging
+
+
+def test_powershell_refuses_to_move_internal_while_pid_zero_holds_it(tmp_path: Path) -> None:
+    """The reported failure: pid 0 moves _internal while a process has it open."""
+    _windows_helper()
+    install, staging = _locked_install(tmp_path)
+    locker, release = _lock_internal(install, tmp_path)
+    plan = _locked_plan(tmp_path, install, staging, 0)
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            _ps_argv(plan),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=25,
+            check=False,
+        )
+    finally:
+        _release_locker(locker, release)
+    elapsed = time.monotonic() - started
+    assert elapsed >= 8, completed.stdout + completed.stderr
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert (install / "yaver.exe").read_bytes() == b"old-exe"
+    assert (install / "_internal" / "locked.bin").is_file()
+    assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
+    result = _read_json(tmp_path / "result.json")
+    assert result["ok"] is False
+
+
+def test_powershell_moves_internal_after_the_locking_process_exits(tmp_path: Path) -> None:
+    """Hold _internal longer than the 10 second retry, then let the pid exit."""
+    _windows_helper()
+    install, staging = _locked_install(tmp_path)
+    locker, release = _lock_internal(install, tmp_path)
+    plan = _locked_plan(tmp_path, install, staging, locker.pid)
+    out = tmp_path / "helper-out.txt"
+    handle = out.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        _ps_argv(plan),
+        stdin=subprocess.DEVNULL,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        time.sleep(12)
+        assert proc.poll() is None, _text(out)
+        assert (install / "yaver.exe").read_bytes() == b"old-exe"
+        assert (install / "_internal" / "locked.bin").is_file()
+        _release_locker(locker, release)
+        code = proc.wait(timeout=20)
+    finally:
+        if not release.exists():
+            release.write_text("go", encoding="utf-8")
+        if locker.poll() is None:
+            locker.kill()
+            locker.wait(timeout=5)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        handle.close()
+    shown = _text(out)
+    assert code == 0, shown
+    assert f"plan_pid={locker.pid}" in shown
+    assert (install / "yaver.exe").read_bytes() == b"new-exe"
+    assert (install / "_internal" / "marker.txt").read_bytes() == b"bundle"
+    assert not (install / "_internal" / "locked.bin").exists()
+    assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
+    assert "started " not in shown
+
+
+def _py_argv(plan: Path) -> list[str]:
+    return [sys.executable, str(_HELPER_PY), "--apply", str(plan)]
+
+
+def test_python_helper_refuses_to_move_internal_while_pid_zero_holds_it(tmp_path: Path) -> None:
+    """A frozen build with Python on PATH uses this helper. Pid 0 still denies the move."""
+    if sys.platform != "win32":
+        pytest.skip("Windows helper")
+    install, staging = _locked_install(tmp_path)
+    locker, release = _lock_internal(install, tmp_path)
+    plan = _locked_plan(tmp_path, install, staging, 0)
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            _py_argv(plan),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=25,
+            check=False,
+        )
+    finally:
+        _release_locker(locker, release)
+    elapsed = time.monotonic() - started
+    assert elapsed >= 8, completed.stdout + completed.stderr
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert (install / "yaver.exe").read_bytes() == b"old-exe"
+    assert (install / "_internal" / "locked.bin").is_file()
+    assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
+    result = _read_json(tmp_path / "result.json")
+    assert result["ok"] is False
+
+
+def test_python_helper_moves_internal_after_the_locking_process_exits(tmp_path: Path) -> None:
+    """The Python helper waits out a lock that lasts longer than its move retries."""
+    if sys.platform != "win32":
+        pytest.skip("Windows helper")
+    install, staging = _locked_install(tmp_path)
+    locker, release = _lock_internal(install, tmp_path)
+    plan = _locked_plan(tmp_path, install, staging, locker.pid)
+    out = tmp_path / "helper-out.txt"
+    handle = out.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        _py_argv(plan),
+        stdin=subprocess.DEVNULL,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        time.sleep(12)
+        assert proc.poll() is None, _text(out)
+        assert (install / "yaver.exe").read_bytes() == b"old-exe"
+        assert (install / "_internal" / "locked.bin").is_file()
+        _release_locker(locker, release)
+        code = proc.wait(timeout=20)
+    finally:
+        if not release.exists():
+            release.write_text("go", encoding="utf-8")
+        if locker.poll() is None:
+            locker.kill()
+            locker.wait(timeout=5)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        handle.close()
+    shown = _text(out)
+    assert code == 0, shown
+    assert f"plan_pid={locker.pid}" in shown
+    assert (install / "yaver.exe").read_bytes() == b"new-exe"
+    assert (install / "_internal" / "marker.txt").read_bytes() == b"bundle"
+    assert not (install / "_internal" / "locked.bin").exists()
+    assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
+    assert "started " not in shown
+
+
 def _frozen_dirs(tmp_path: Path, old: bytes, new: bytes) -> tuple[Path, Path, bytes]:
     # Linux publishes ``yaver``, not ``yaver.exe``. Git bash treats those two
     # names as one file, so the fixture keeps only the Linux name.
@@ -885,15 +1159,13 @@ def _frozen_dirs(tmp_path: Path, old: bytes, new: bytes) -> tuple[Path, Path, by
 
 
 def test_shell_helper_replaces_a_frozen_install_and_opens_the_port(tmp_path: Path) -> None:
-    if not _can_bind("127.0.0.2"):
-        pytest.skip("127.0.0.2 is not available")
     bash = _bash()
     install, staging, env_bytes = _frozen_dirs(tmp_path, b"old-exe", b"new-exe")
-    probe = "127.0.0.2"
+    probe = "127.0.0.1"
     port = _free_port(probe)
     listener = tmp_path / "yaver_e2e_sh_listen.py"
     marker = tmp_path / "listening.txt"
-    env, shimmed = _shell_env(bash, tmp_path / "bin")
+    env, _shimmed = _shell_env(bash, tmp_path / "bin")
     plan = tmp_path / "plan.env"
     _shell_plan(
         plan,
@@ -926,6 +1198,10 @@ def test_shell_helper_replaces_a_frozen_install_and_opens_the_port(tmp_path: Pat
         "time.sleep(30)\n",
         encoding="utf-8",
     )
+    (staging / ".env").write_bytes(b"TOKEN=from-package\n")
+    env_path = install / ".env"
+    before = env_path.stat()
+    env_path.chmod(stat.S_IREAD)
     try:
         completed = _run_shell(bash, plan, env, timeout=40)
         log = _text(tmp_path / "update.log")
@@ -936,16 +1212,31 @@ def test_shell_helper_replaces_a_frozen_install_and_opens_the_port(tmp_path: Pat
         assert (install / "_internal" / "marker.txt").read_bytes() == b"bundle"
         assert not (install / "_internal" / "old.txt").exists()
         assert (install / ".env").read_bytes() == env_bytes
+        assert env_path.stat().st_ino == before.st_ino
+        assert env_path.stat().st_mode & stat.S_IWRITE == 0
         assert (install / "office-data" / "yaver" / "keep.txt").read_text(encoding="utf-8") == "kept"
         assert not (tmp_path / "Yaver.userdata").exists()
         previous = tmp_path / "Yaver.previous"
         assert (previous / "yaver").read_bytes() == b"old-exe"
         assert not (previous / "office-data").exists()
-        assert marker.read_text(encoding="utf-8") == "sh-marker"
+        assert not marker.exists()
+        shown = completed.stdout
+        assert "env file present" in shown
+        assert "env file left in place" in shown
+        assert "package env file skipped" in shown
+        assert "frozen swap finished" in shown
+        assert "parked data folder office-data" in shown
+        assert "env file present" not in log
+        assert "updated 9.9.9" in log
+        assert "TOKEN=keep-me" not in shown
+        assert "TOKEN=keep-me" not in log
+        assert "from-package" not in shown
+        assert "from-package" not in log
         assert "starting restored" not in log
-        if not shimmed:
-            _accepts(probe, port)
+        assert "started " not in shown
+        assert "started " not in log
     finally:
+        env_path.chmod(stat.S_IWRITE)
         _stop_marked("yaver_e2e_sh_listen.py")
 
 
@@ -977,17 +1268,17 @@ def test_shell_helper_restores_the_previous_install_when_the_port_stays_closed(t
     try:
         completed = _run_shell(bash, plan, env, timeout=30)
         log = _text(tmp_path / "update.log")
-        assert completed.returncode != 0, completed.stdout + completed.stderr + log
+        assert completed.returncode == 0, completed.stdout + completed.stderr + log
         result = _read_json(tmp_path / "result.json")
-        assert result["ok"] is False
-        assert "restored" in result["error"]
-        assert (install / "yaver").read_bytes() == b"old-exe"
-        assert (install / "_internal" / "old.txt").read_text(encoding="utf-8") == "old-bundle"
+        assert result["ok"] is True
+        assert (install / "yaver").read_bytes() == b"new-exe"
+        assert (install / "_internal" / "marker.txt").read_bytes() == b"bundle"
         assert (install / ".env").read_bytes() == env_bytes
         assert (install / "office-data" / "yaver" / "keep.txt").read_text(encoding="utf-8") == "kept"
         assert not (tmp_path / "Yaver.userdata").exists()
-        assert not (tmp_path / "Yaver.previous").exists()
-        assert "starting restored" in log
+        assert (tmp_path / "Yaver.previous" / "yaver").read_bytes() == b"old-exe"
+        assert "updated 9.9.9" in log
+        assert "starting restored" not in log
     finally:
         _stop_marked("yaver_e2e_sh_sleep.py")
 

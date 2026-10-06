@@ -901,8 +901,15 @@ Operators publish Windows and Ubuntu zips on a separate release site
 (its own repository). Yaver stores that site’s address as `RELEASE_HOST`
 and `RELEASE_PORT`. The operator sets them in `.env` or with
 `yaver update --host … --port …`. The dashboard has no Update control.
-Stop Yaver, then run `yaver update` or `yaver --update` (`yaver.exe` on
-Windows). If the dashboard port is open, the command refuses. The client
+Run `yaver update` or `yaver --update` (`yaver.exe` on Windows). If the
+dashboard port is open, the command stops the process listening on that
+port and waits until the port closes. The helper still does not replace
+files while that port is open. On Windows the executable records its own
+pid and exits before the helper moves `_internal`. Windows keeps that
+folder locked for the whole life of `yaver.exe`. A plan pid of 0 makes
+the helper move the folder while this process is still open, and the
+move is denied. A source install can keep this process open and use pid
+0, because the running interpreter is not inside `_internal`. The client
 calls `GET /api/latest?platform=…` and downloads `GET /download/{platform}`
 on `http://{host}:{port}` only. It does not follow redirects.
 
@@ -915,24 +922,35 @@ on `http://{host}:{port}` only. It does not follow redirects.
 | `ubuntu-24.04` | Ubuntu 24.04 |
 
 `yaver update` downloads and checks the sha256 while that command is
-still the running process, then exits. A helper copied **outside** the
-install (`src/update_helper.py`, or the `.ps1` / `.sh` when a frozen
-build has no Python outside that folder) waits until this process exits,
-swaps the files, and starts Yaver again with `yaver start` and the same
-`.env`. The data directory is not inside the install, so jobs, settings,
-and plans stay. The extractor keeps Unix permission bits from the zip.
-A `yaver` or `yaver.exe` member with no mode is marked executable. If
-the new program cannot be started, the previous executable folder is
-restored and started.
+still the running process. A source install then waits while a helper
+copied **outside** the install (`src/update_helper.py`, or the `.ps1` /
+`.sh` when a frozen build has no Python outside that folder) swaps the
+files. On Windows the executable exits after that helper is running, and
+the helper swaps `_internal` only after that pid is gone. The helper
+keeps printing in the same window. ``cmd.exe`` waits for ``yaver.exe``
+only, so the prompt can return before the copy finishes. The operator
+waits for the line that begins with ``Updated to``, then starts Yaver.
+The helper does **not** start Yaver.
+On a source install the window stays open until the copy finishes. The
+operator starts ``yaver.exe`` or ``yaver`` after the helper prints that the
+files are in place. The install folder stays where it is, so a
+command prompt sitting in that folder does not block the copy. Old files
+move beside it. An existing `.env` is left as it is. A frozen package `.env` is copied only when the install has none. The data directory is not inside the install, so jobs, settings, and plans stay. The extractor keeps Unix
+permission bits from the zip. A `yaver` or `yaver.exe` member with no
+mode is marked executable. A failed copy puts the previous files back
+and does not start Yaver.
 
 **Do not “fix”** any of these:
 
-- Putting Check or Update back on the dashboard. Apply is `yaver update` while Yaver is stopped.
+- Putting Check or Update back on the dashboard. Apply is `yaver update`. The command stops a dashboard that is already listening, and the helper does not start Yaver.
+- Having the helper start Yaver or open the dashboard. The operator starts it after the files are in place.
 - Refusing a folder that contains `.git`. That is a checkout, not an install.
-- Keeping `.env` and `.venv` when applying an install zip. Replacing `.venv` locks the interpreter that is doing the swap.
+- Keeping `.env` and `.venv` when applying an install zip. Replacing `.venv` locks the interpreter that is doing the swap. Rewriting an existing `.env`, including with the same bytes, replaces the operator's file.
 - Replacing an executable install only with an executable zip (`yaver` / `yaver.exe` plus `_internal`), and an install zip only with a tree that has `src/daemon.py` and `VERSION`.
 - Detaching the helper before shutdown. `stop()` must not take the helper down with the daemon.
+- Setting plan pid to 0 for a Windows executable update. That tells the helper to move `_internal` while `yaver.exe` still has it mapped.
+- Running the Windows frozen helper inside `yaver.exe` and waiting for it. The executable has to exit before the move.
 - `verify=False` on the release-server client (same rule as every other outbound client).
 - Treating a drive root as an install folder.
 
-Proof lives in `tests/test_self_update.py`. The helper is stdlib-only so the copy outside the install still runs after `src/` is replaced.
+Proof lives in `tests/test_self_update.py` and `tests/test_update_e2e.py`. The helper is stdlib-only so the copy outside the install still runs after `src/` is replaced.

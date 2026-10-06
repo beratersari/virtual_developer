@@ -8,6 +8,17 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, `yaver.exe update` exits before the helper moves `_internal`. The helper waits until that process has closed, then replaces the files. The command prompt can return before the copy finishes. Wait for the line that begins with Updated to. The steps keep printing in the same window.
+
+### Changed
+
+- `yaver update` replaces the program files and does not start the dashboard. A source install waits until the copy finishes. On Windows, `yaver.exe` exits before the helper moves `_internal`, and the helper keeps printing in the same window. Start Yaver after the copy finishes.
+- `yaver update` leaves an existing `.env` file as it is. The `.env` from the package is copied only when the install has none.
+- `yaver update` stops the process listening on the dashboard port, then replaces the files. Start Yaver after the helper prints Updated to.
+- `yaver update` prints each step in the terminal.
+
 ## [0.9.74] — 2026-10-06
 
 A finished review is no longer retried when the only leftover is a todo stuck in progress. The sidebar names each OpenCode state.

@@ -38,7 +38,7 @@ def validate_config():
     "--update",
     "run_update",
     is_flag=True,
-    help="Install the published package and start Yaver. Yaver must be stopped.",
+    help="Install the published package. A running dashboard is stopped first.",
 )
 @click.version_option(version=__version__)
 @click.pass_context
@@ -60,9 +60,12 @@ def cli(ctx: click.Context, run_update: bool):
 @click.option("--host", default=None, help="Release server address. Saved for the next run.")
 @click.option("--port", default=None, type=int, help="Release server port. Saved for the next run.")
 def update_cmd(host: Optional[str], port: Optional[int]):
-    """Install the published package and start Yaver.
+    """Install the published package. Start Yaver after the helper finishes.
 
-    Stop Yaver first. The address is RELEASE_HOST and RELEASE_PORT in .env,
+    If the dashboard port is open, that process is stopped before the
+    download. On Windows, yaver.exe exits before the files are replaced.
+    The command prompt can return first. Wait for the line that begins
+    with Updated to. The address is RELEASE_HOST and RELEASE_PORT in .env,
     or --host and --port on this command.
     """
     from src.self_update import UpdateError, update_stopped_install

@@ -1,4 +1,4 @@
-# Replace a Yaver executable folder after the running process has exited.
+# Replace a Yaver executable folder. Does not start Yaver.
 # ASCII only. Called as: powershell -File update_helper.ps1 -PlanPath PLAN.json
 param(
     [Parameter(Mandatory = $true)]
@@ -11,6 +11,10 @@ function Write-Log([string]$LogPath, [string]$Message) {
     if (-not $LogPath) { return }
     $line = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss") + " " + $Message
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+}
+
+function Write-Step([string]$Message) {
+    Write-Output $Message
 }
 
 function Test-Alive([int]$ProcId) {
@@ -187,11 +191,11 @@ function Restore-Userdata([string]$Install, [string]$Rel) {
     Move-Directory $stash $dest
 }
 
-function Move-WithRetry([string]$From, [string]$NewName) {
-    $last = "Could not move the install folder."
+function Move-PathRetry([string]$From, [string]$To) {
+    $last = "Could not move $(Split-Path -Leaf $From)."
     for ($try = 0; $try -lt 40; $try++) {
         try {
-            Rename-Item -LiteralPath $From -NewName $NewName -ErrorAction Stop
+            Move-Item -LiteralPath $From -Destination $To -Force -ErrorAction Stop
             return
         } catch {
             $last = $_.Exception.Message
@@ -199,6 +203,32 @@ function Move-WithRetry([string]$From, [string]$NewName) {
         }
     }
     throw $last
+}
+
+function Restore-MovedChildren([string]$Install, [string]$Previous, [string]$Parent, [string]$Leaf) {
+    # The install directory stays. A console may be using it as its current directory.
+    $broken = Join-Path $Parent ($Leaf + ".broken")
+    if (Test-Path -LiteralPath $broken) {
+        Remove-Item -LiteralPath $broken -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $broken -Force | Out-Null
+    if (Test-Path -LiteralPath $Install) {
+        Get-ChildItem -LiteralPath $Install -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -eq ".env") { return }
+            try {
+                Move-Item -LiteralPath $_.FullName -Destination (Join-Path $broken $_.Name) -Force -ErrorAction Stop
+            } catch { }
+        }
+    }
+    if (Test-Path -LiteralPath $Previous) {
+        Get-ChildItem -LiteralPath $Previous -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $dest = Join-Path $Install $_.Name
+            if (Test-Path -LiteralPath $dest) { return }
+            try {
+                Move-Item -LiteralPath $_.FullName -Destination $dest -Force -ErrorAction Stop
+            } catch { }
+        }
+    }
 }
 
 function Test-PortOpen([int]$Port, [string]$ProbeHost) {
@@ -268,6 +298,7 @@ try {
     try { $port = [int]$plan.port } catch { $port = 0 }
     $probe = "127.0.0.1"
     if ($plan.probe_host) { $probe = [string]$plan.probe_host }
+    Write-Step ("helper install=" + $install + " staging=" + $staging + " layout=" + [string]$plan.layout + " port=" + $port + " probe=" + $probe + " plan_pid=" + $procId)
     if ($port -gt 0) {
         $deadline = (Get-Date).AddSeconds(30)
         while ((Get-Date) -lt $deadline -and (Test-PortOpen $port $probe)) {
@@ -278,38 +309,69 @@ try {
             throw "The dashboard port is still open."
         }
     }
+    Write-Step ("dashboard port " + $port + " is closed")
     $envFile = Join-Path $install ".env"
     $envBytes = $null
-    if (Test-Path -LiteralPath $envFile) {
+    $envExists = $false
+    if (Test-Path -LiteralPath $envFile -PathType Leaf) {
+        $envExists = $true
         $envBytes = [System.IO.File]::ReadAllBytes($envFile)
+        Write-Step "env file present"
+    } else {
+        Write-Step "env file absent"
     }
     $parent = Split-Path -Parent $install
     $leaf = Split-Path -Leaf $install
     $parkedRel = Park-Userdata $install $envBytes
+    if ($parkedRel) {
+        Write-Step ("parked data folder " + $parkedRel)
+    }
     $previous = Join-Path $parent ($leaf + ".previous")
+    Write-Step ("previous=" + $previous)
     if (Test-Path -LiteralPath $previous) {
         Remove-Item -LiteralPath $previous -Recurse -Force
     }
-    Move-WithRetry $install ($leaf + ".previous")
+    New-Item -ItemType Directory -Path $previous | Out-Null
+    # The folder stays. A command prompt sitting in it cannot be renamed away.
+    $movedNames = New-Object System.Collections.Generic.List[string]
+    $copyStarted = $false
     try {
-        Copy-Item -LiteralPath $staging -Destination $install -Recurse -Force
-        if ($null -ne $envBytes) {
-            [System.IO.File]::WriteAllBytes((Join-Path $install ".env"), $envBytes)
+        foreach ($child in @(Get-ChildItem -LiteralPath $install -Force)) {
+            if ($child.Name -eq ".env") {
+                Write-Step "env file left in place"
+                continue
+            }
+            Move-PathRetry $child.FullName (Join-Path $previous $child.Name)
+            $movedNames.Add($child.Name)
+            Write-Step ("moved " + $child.Name)
+        }
+        $copyStarted = $true
+        foreach ($child in @(Get-ChildItem -LiteralPath $staging -Force)) {
+            if ($child.Name -eq ".env" -and $envExists) {
+                Write-Step "package env file skipped"
+                continue
+            }
+            Copy-Item -LiteralPath $child.FullName -Destination $install -Recurse -Force
+            Write-Step ("copied " + $child.Name)
         }
         if ($parkedRel) {
             Restore-Userdata $install $parkedRel
+            Write-Step ("restored data folder " + $parkedRel)
             $parkedRel = ""
         }
+        Write-Step "frozen swap finished"
     } catch {
-        $broken = Join-Path $parent ($leaf + ".broken")
-        if (Test-Path -LiteralPath $broken) {
-            Remove-Item -LiteralPath $broken -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $install) {
-            Rename-Item -LiteralPath $install -NewName ($leaf + ".broken") -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $previous) {
-            Rename-Item -LiteralPath $previous -NewName $leaf -ErrorAction SilentlyContinue
+        Write-Step "restoring previous files"
+        if ($copyStarted) {
+            Restore-MovedChildren $install $previous $parent $leaf
+        } else {
+            foreach ($name in $movedNames) {
+                $src = Join-Path $previous $name
+                $dest = Join-Path $install $name
+                if ((Test-Path -LiteralPath $src) -and -not (Test-Path -LiteralPath $dest)) {
+                    try { Move-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop } catch { }
+                }
+            }
         }
         if ($parkedRel) {
             Restore-Userdata $install $parkedRel
@@ -317,79 +379,16 @@ try {
         }
         throw
     }
-    $argv = @($plan.argv)
-    $exe = [string]$argv[0]
-    $rest = @()
-    if ($argv.Count -gt 1) {
-        $rest = @($argv[1..($argv.Count - 1)])
-    }
-    $cwd = [string]$plan.cwd
-    if (-not $cwd) { $cwd = $install }
-    $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
-    Write-Log $logPath ("starting " + $exe)
-    if ($rest.Count -gt 0) {
-        $started = Start-Process -FilePath $exe -ArgumentList $rest -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
-    } else {
-        $started = Start-Process -FilePath $exe -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
-    }
-    $health = 45
-    if ($null -ne $plan.health_seconds) {
-        try { $health = [int]$plan.health_seconds } catch { $health = 45 }
-    }
-    if ($port -gt 0 -and $health -gt 0) {
-        $opened = $false
-        $deadline = (Get-Date).AddSeconds($health)
-        while ((Get-Date) -lt $deadline) {
-            if (Test-PortOpen $port $probe) { $opened = $true; break }
-            Start-Sleep -Milliseconds 400
-        }
-        if (-not $opened) {
-            if ($started -and -not $started.HasExited) {
-                Stop-ForeignTree $started.Id
-                $stopBy = (Get-Date).AddSeconds(10)
-                while ((Get-Date) -lt $stopBy -and (Test-Alive $started.Id)) {
-                    Start-Sleep -Milliseconds 200
-                }
-            }
-            $liveEnv = $null
-            $liveFile = Join-Path $install ".env"
-            if (Test-Path -LiteralPath $liveFile) {
-                $liveEnv = [System.IO.File]::ReadAllBytes($liveFile)
-            }
-            $parkedRel = Park-Userdata $install $liveEnv
-            $broken = Join-Path $parent ($leaf + ".broken")
-            if (Test-Path -LiteralPath $broken) {
-                Remove-Item -LiteralPath $broken -Recurse -Force
-            }
-            if (Test-Path -LiteralPath $install) {
-                Rename-Item -LiteralPath $install -NewName ($leaf + ".broken")
-            }
-            if (Test-Path -LiteralPath $previous) {
-                Rename-Item -LiteralPath $previous -NewName $leaf
-            }
-            if ($parkedRel) {
-                Restore-Userdata $install $parkedRel
-                $parkedRel = ""
-            }
-            # The previous folder is back. Start it again so the dashboard
-            # returns. The Python helper does this too.
-            Write-Log $logPath ("starting restored " + $exe)
-            if ($rest.Count -gt 0) {
-                Start-Process -FilePath $exe -ArgumentList $rest -WorkingDirectory $cwd -WindowStyle Hidden | Out-Null
-            } else {
-                Start-Process -FilePath $exe -WorkingDirectory $cwd -WindowStyle Hidden | Out-Null
-            }
-            throw "The new Yaver did not open. The previous copy was restored."
-        }
-    }
+    Write-Output ("Updated to " + [string]$plan.version + ". Start Yaver when you want.")
     Write-Result $plan $true ""
-    Write-Log $logPath ("started " + [string]$plan.version)
+    Write-Log $logPath ("updated " + [string]$plan.version)
     exit 0
 } catch {
     $message = $_.Exception.Message
     if ($parkedRel -and $install) {
         try { Restore-Userdata $install $parkedRel } catch { }
     }
+    Write-Step $message
     Write-Log $logPath $message
     try { Write-Result $plan $false $message } catch { }
     exit 1
