@@ -37,6 +37,7 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert 'New-CliZip -Tool "opencode"' in text
     assert 'New-CliZip -Tool "claude"' in text
     assert 'New-CliZip -Tool "codex"' in text
+    assert '$zipBase = "yaver-$Tool-$OsToken-$Version"' in text
     assert "cli-offline" in text
     assert "CLAUDE_CODE_VERSION" in text
     assert "downloads.claude.ai/claude-code-releases/" in text
@@ -58,6 +59,7 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert "write_cli_zip opencode" in linux
     assert "write_cli_zip claude" in linux
     assert "write_cli_zip codex" in linux
+    assert 'base="yaver-${tool}-linux-x64-${version}"' in linux
     assert '>"$stage/VERSION"' in linux
     assert "linux-x64/claude" in linux
     assert "cli-offline" in linux

@@ -14,6 +14,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Changed
 
+- OpenCode, Claude Code, and Codex release zips are named with that tool's version. A Windows OpenCode 1.18.10 package is `yaver-opencode-windows-x64-1.18.10.zip`. Claude Code and Codex use the same pattern, and the Linux names do too.
 - `yaver update` replaces the program files and does not start the dashboard. A source install waits until the copy finishes. On Windows, `yaver.exe` exits before the helper moves `_internal`, and the helper keeps printing in the same window. Start Yaver after the copy finishes.
 - `yaver update` leaves an existing `.env` file as it is. The `.env` from the package is copied only when the install has none.
 - `yaver update` stops the process listening on the dashboard port, then replaces the files. Start Yaver after the helper prints Updated to.

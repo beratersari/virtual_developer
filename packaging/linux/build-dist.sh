@@ -352,10 +352,15 @@ WIN_CLI="$ROOT/packaging/windows/cli-offline"
 
 write_cli_zip() {
   local tool="$1" version="$2" exe_src="$3" exe_name="$4" cfg_src="$5" cfg_name="$6"
-  local base="${DIST_NAME/virtual_developer-/yaver-${tool}-}"
-  if [[ "$base" == "$DIST_NAME" ]]; then
-    base="yaver-${tool}-linux-x64"
-  fi
+  # Filename suffix is the tool version written to VERSION, for example
+  # yaver-opencode-linux-x64-1.18.10.zip.
+  case "$version" in
+    ""|*[!0-9A-Za-z._+-]*)
+      echo "CLI version is not safe for a zip filename: $version" >&2
+      exit 1
+      ;;
+  esac
+  local base="yaver-${tool}-linux-x64-${version}"
   local stage="$OUT_DIR/stage-clis/$base"
   rm -rf "$stage"
   mkdir -p "$stage/$tool"

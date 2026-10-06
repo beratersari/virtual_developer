@@ -52,8 +52,13 @@ function New-CliZip(
     [string]$ConfigName,
     [string]$OsToken
 ) {
-    $zipBase = $DistName -replace '^virtual_developer-', "yaver-$Tool-"
-    if ($zipBase -eq $DistName) { $zipBase = "yaver-$Tool-$OsToken" }
+    # The zip name carries the tool version written into VERSION, for example
+    # yaver-opencode-windows-x64-1.18.10.zip. The Yaver product version stays
+    # on the product archive only.
+    if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._+-]*$') {
+        throw "CLI version is not safe for a zip filename: $Version"
+    }
+    $zipBase = "yaver-$Tool-$OsToken-$Version"
     $toolStage = Join-Path $stage $zipBase
     if (Test-Path -LiteralPath $toolStage) {
         Remove-Item -LiteralPath $toolStage -Recurse -Force
