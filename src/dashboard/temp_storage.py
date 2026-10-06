@@ -685,7 +685,7 @@ def _job_belongs_to_merged_review(
 
 
 def _close_open_jobs_after_review_merge(
-    job_store: Any, *, want: str, key: str
+    job_store: Any, *, want: str, key: str, processor: Any = None
 ) -> None:
     """Stop counting a merged review as in flight. The row stays for Analytics."""
     if job_store is None or not (want or key):
@@ -721,6 +721,12 @@ def _close_open_jobs_after_review_merge(
         if updated is None:
             continue
         issue = str(job.get("issue_key") or "").strip() or "-"
+        forget = getattr(processor, "forget_closed_job", None) if processor else None
+        if callable(forget):
+            try:
+                forget(str(job.get("issue_key") or ""), jid)
+            except Exception as e:
+                logger.debug(f"MR-merge could not drop live job {jid}: {e}")
         logger.info(f"MR-merge closed open job {jid} issue={issue}")
 
 
@@ -729,6 +735,7 @@ def _purge_merged_review_artifacts(
     mr_url: str = "",
     clone: Optional[Path] = None,
     issue_key: str = "",
+    processor: Any = None,
 ) -> None:
     """Remove clone logs, plan, issue state, and OpenCode rows for this review.
 
@@ -775,7 +782,9 @@ def _purge_merged_review_artifacts(
                 logger.debug(f"MR-merge could not delete session logs for {jid}: {e}")
     # After the log pass: a live status above kept its session log.
     if job_store is not None:
-        _close_open_jobs_after_review_merge(job_store, want=want, key=key)
+        _close_open_jobs_after_review_merge(
+            job_store, want=want, key=key, processor=processor
+        )
     if key:
         try:
             from src.paths import plans_dir
@@ -1866,6 +1875,7 @@ def delete_clones_for_merge_request(
     issue_key: str = "",
     source_branch: str = "",
     repository_url: str = "",
+    processor: Any = None,
 ) -> List[str]:
     """Queue force-delete of temp clones for a merged or closed MR.
 
@@ -1909,7 +1919,9 @@ def delete_clones_for_merge_request(
             continue
         resolved_names.append((name, resolved))
     if not any_live and not waiting_on_review:
-        _purge_merged_review_artifacts(mr_url=mr_url, issue_key=issue_key)
+        _purge_merged_review_artifacts(
+            mr_url=mr_url, issue_key=issue_key, processor=processor
+        )
     for name, resolved in resolved_names:
         _forget_binds_for_clone(resolved)
         try:
@@ -1920,7 +1932,7 @@ def delete_clones_for_merge_request(
     return deleted
 
 
-def sweep_merged_storage_clones() -> List[str]:
+def sweep_merged_storage_clones(processor: Any = None) -> List[str]:
     """Delete temp clones whose GitLab MR or Azure PR is done.
 
     Walks folders that exist on disk (not stale job-store names). GitLab.com
@@ -1978,6 +1990,7 @@ def sweep_merged_storage_clones() -> List[str]:
             mr_url=url,
             clone=resolved,
             issue_key=str(fields.get("issue_key") or ""),
+            processor=processor,
         )
         try:
             queue_delete_temp_folder(child.name, area="temp")

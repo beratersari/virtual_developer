@@ -1307,8 +1307,14 @@ def job_dict_to_item(
             if recovered:
                 j = {**j, "description": recovered}
         description = j.get("description") or ""
-    live = jid in active_job_ids or (
-        ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
+    status_now = str(j.get("status") or "").strip().lower()
+    # A cancelled row can still sit in ``_active_jobs`` until merge cleanup
+    # drops that pointer. The badge follows the row status.
+    live = (
+        jid in active_job_ids
+        and status_now in {"running", "planning", "executing", "pending"}
+    ) or (
+        ik in live_keys and status_now in {"running", "planning", "executing"}
     )
     status = _visible_job_status(j, store=js, latest_job_ids=latest_job_ids)
     session_paths = _job_session_log_paths(j)
