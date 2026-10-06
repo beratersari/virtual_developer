@@ -620,7 +620,10 @@ try {
     Pop-Location
 }
 
-$codexExe = Get-ChildItem -Path $codexExtract -Filter "codex*.exe" -Recurse -File |
+# The package also contains codex-code-mode-host.exe. A codex*.exe
+# wildcard selects that helper first and would ship it as the CLI.
+$codexExe = Get-ChildItem -Path $codexExtract -Filter "codex.exe" -Recurse -File |
+    Where-Object { $_.Name -eq "codex.exe" } |
     Select-Object -First 1
 if (-not $codexExe) {
     throw "codex.exe not found inside $codexPkg"

@@ -47,6 +47,8 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert "OPENCODE_VERSION=1.18.10" in versions
     assert "CODEX_VERSION=0.149.0" in versions
     assert "CLAUDE_CODE_VERSION=2.1.280" in versions
+    assert 'Filter "codex.exe"' in text
+    assert 'Filter "codex*.exe"' not in text
     assert 'OpenCode must be 1.18.10' in text
     assert 'Codex must be 0.149.0' in text
     assert 'Claude Code must be 2.1.280' in text
