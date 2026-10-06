@@ -64,6 +64,39 @@ if [ "$pid_value" -gt 0 ]; then
   fi
 fi
 
+case "${PROBE:-127.0.0.1}" in
+  *[!A-Za-z0-9.:-]*) fail "The update plan has a bad dashboard address." ;;
+esac
+PROBE=${PROBE:-127.0.0.1}
+
+port_open() {
+  probe_host=$1
+  port_num=$2
+  # /dev/tcp has no connect timeout. An address that does not answer would
+  # sit here until the kernel gives up and the health budget would be a lie.
+  if command -v bash >/dev/null 2>&1; then
+    PROBE_HOST=$probe_host PORT_NUM=$port_num bash -c 'exec 3<>"/dev/tcp/$PROBE_HOST/$PORT_NUM"' >/dev/null 2>&1 &
+    probe_pid=$!
+    ticks=0
+    while [ "$ticks" -lt 30 ]; do
+      if ! kill -0 "$probe_pid" 2>/dev/null; then
+        wait "$probe_pid" || return $?
+        return 0
+      fi
+      sleep 0.1
+      ticks=$((ticks + 1))
+    done
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    return 1
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 1 "$probe_host" "$port_num" >/dev/null 2>&1 || return $?
+    return 0
+  fi
+  return 1
+}
+
 parent=$(dirname "$INSTALL")
 leaf=$(basename "$INSTALL")
 previous="$parent/$leaf.previous"
@@ -106,26 +139,122 @@ if [ -n "$env_copy" ] && [ -f "$env_copy" ]; then
   fi
 fi
 
-rm -rf "$previous"
-mv "$INSTALL" "$previous"
-cp -a "$STAGING" "$INSTALL"
-if [ -n "$env_copy" ] && [ -f "$env_copy" ]; then
-  cp -p "$env_copy" "$INSTALL/.env"
-  rm -f "$env_copy"
-fi
-if [ -n "$userdata_rel" ] && [ -d "$userdata_stash" ]; then
+unpark_userdata() {
+  if [ -z "${userdata_rel:-}" ] || [ ! -d "${userdata_stash:-}" ]; then
+    return 0
+  fi
   dest="$INSTALL/$userdata_rel"
   mkdir -p "$(dirname "$dest")"
   rm -rf "$dest"
   mv "$userdata_stash" "$dest"
+}
+
+repark_userdata() {
+  if [ -z "${userdata_rel:-}" ] || [ -d "${userdata_stash:-}" ]; then
+    return 0
+  fi
+  src="$INSTALL/$userdata_rel"
+  if [ -d "$src" ] && [ ! -L "$src" ]; then
+    mv "$src" "$userdata_stash"
+  fi
+}
+
+restore_previous() {
+  if [ -n "${new_pid:-}" ]; then
+    kill "$new_pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$new_pid" 2>/dev/null || true
+    new_pid=""
+  fi
+  repark_userdata || true
+  broken="$parent/$leaf.broken"
+  rm -rf "$broken"
+  if [ -d "$INSTALL" ]; then
+    mv "$INSTALL" "$broken" || true
+  fi
+  if [ -d "$previous" ] && [ ! -d "$INSTALL" ]; then
+    mv "$previous" "$INSTALL" || true
+  fi
+  unpark_userdata || true
+}
+
+port_value=${PORT:-0}
+if [ "$port_value" -gt 0 ]; then
+  waited=0
+  while [ "$waited" -lt 30 ]; do
+    if ! port_open "$PROBE" "$port_value"; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # An old listener still on this port would look like the new copy opened.
+  if port_open "$PROBE" "$port_value"; then
+    unpark_userdata || true
+    fail "The dashboard port is still open."
+  fi
 fi
 
-# This script is the session leader. A child left in that session gets
-# SIGHUP when the script exits, and the new Yaver dies with it.
-if [ -n "${ARGV1:-}" ]; then
-  setsid "$ARGV0" "$ARGV1" >/dev/null 2>&1 </dev/null &
-else
-  setsid "$ARGV0" >/dev/null 2>&1 </dev/null &
+start_argv() {
+  # This script is the session leader. A child left in that session gets
+  # SIGHUP when the script exits, and the new Yaver dies with it.
+  if [ -n "${LOG:-}" ]; then
+    if [ -n "${ARGV1:-}" ]; then
+      setsid "$ARGV0" "$ARGV1" >>"$LOG" 2>&1 </dev/null &
+    else
+      setsid "$ARGV0" >>"$LOG" 2>&1 </dev/null &
+    fi
+  else
+    if [ -n "${ARGV1:-}" ]; then
+      setsid "$ARGV0" "$ARGV1" >/dev/null 2>&1 </dev/null &
+    else
+      setsid "$ARGV0" >/dev/null 2>&1 </dev/null &
+    fi
+  fi
+  new_pid=$!
+}
+
+rm -rf "$previous"
+if ! mv "$INSTALL" "$previous"; then
+  unpark_userdata || true
+  fail "Could not move the install folder."
+fi
+if ! cp -a "$STAGING" "$INSTALL"; then
+  restore_previous
+  fail "Could not copy the new files."
+fi
+if [ -n "$env_copy" ] && [ -f "$env_copy" ]; then
+  cp -p "$env_copy" "$INSTALL/.env"
+  rm -f "$env_copy"
+  env_copy=""
+fi
+if [ -n "$userdata_rel" ] && [ -d "$userdata_stash" ]; then
+  unpark_userdata
+fi
+
+if [ -z "${ARGV0:-}" ]; then
+  restore_previous
+  fail "The update plan has no start command."
+fi
+start_argv
+health=${HEALTH_SECONDS:-45}
+if [ "$port_value" -gt 0 ] && [ "$health" -gt 0 ]; then
+  waited=0
+  opened=0
+  while [ "$waited" -lt "$health" ]; do
+    if port_open "$PROBE" "$port_value"; then
+      opened=1
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$opened" -ne 1 ]; then
+    restore_previous
+    log_line "starting restored ${ARGV0}"
+    start_argv
+    fail "The new Yaver did not open. The previous copy was restored."
+  fi
 fi
 log_line "started ${VERSION:-}"
 write_result "{\"ok\": true, \"version\": \"${VERSION:-}\", \"error\": \"\"}"

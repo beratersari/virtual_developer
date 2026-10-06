@@ -58,6 +58,39 @@ def _executing_review(proc):
     return job
 
 
+def test_merge_cleanup_clears_the_live_badge_on_the_closed_job(
+    fake_jira, reporter
+):
+    """The error is stored on the row. The jobs list must not keep it live."""
+    proc = _processor(fake_jira, reporter)
+    job = _executing_review(proc)
+    runner = MagicMock()
+    runner.cancel_all_tasks.return_value = 1
+    proc._contexts[_KEY] = {"git": None, "runner": runner}
+    proc._active_jobs[_KEY] = job["job_id"]
+
+    from src.dashboard.service import job_dict_to_item
+    from src.dashboard.temp_storage import _purge_merged_review_artifacts
+
+    _purge_merged_review_artifacts(mr_url=_MR, issue_key=_KEY, processor=proc)
+
+    kept = proc.job_store.get_job(job["job_id"])
+    assert kept is not None
+    assert kept["status"] not in _OPEN
+    assert "merged or closed" in str(kept.get("error_message") or "")
+    assert job["job_id"] not in set(proc._active_jobs.values())
+    assert _KEY not in proc._contexts
+    assert runner.cancel_all_tasks.called
+    item = job_dict_to_item(
+        kept,
+        live_keys=set(proc.list_live_processing_keys()),
+        active_job_ids={job["job_id"]},
+        store=proc.job_store,
+        include_description=False,
+    )
+    assert item.live is False
+
+
 def test_merge_cleanup_must_not_keep_a_gitlab_review_executing(
     fake_jira, reporter
 ):

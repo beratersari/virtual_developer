@@ -38,7 +38,6 @@ from src.dashboard.schemas import (
     SchedulePrRequest,
     SettingsUpdate,
     TempFolderDeleteRequest,
-    UpdateRequest,
 )
 from src.dashboard.service import (
     apply_settings_update,
@@ -1495,43 +1494,6 @@ def create_dashboard_app(
     def get_settings() -> dict:
         """Dashboard settings, including the stored project list and repo sets."""
         return settings_response()
-
-    @app.get("/api/update")
-    def update_status() -> dict:
-        """Current install and the in-progress LAN update, if one is running."""
-        from src.self_update import snapshot
-
-        return snapshot()
-
-    @app.post("/api/update/check")
-    def update_check(body: UpdateRequest) -> dict:
-        """Ask the release server what it has published for this computer."""
-        from src.self_update import UpdateError, check_for_update
-
-        try:
-            return check_for_update(body.release_host, int(body.release_port))
-        except UpdateError as exc:
-            raise HTTPException(
-                status_code=getattr(exc, "status_code", 400),
-                detail=str(exc),
-            ) from exc
-
-    @app.post("/api/update/apply")
-    def update_apply(body: UpdateRequest) -> dict:
-        """Download the published package, then close Yaver so the helper can replace it."""
-        from src.self_update import UpdateError, start_apply
-
-        try:
-            return start_apply(
-                body.release_host,
-                int(body.release_port),
-                shutdown=getattr(app.state, "request_shutdown", None),
-            )
-        except UpdateError as exc:
-            raise HTTPException(
-                status_code=getattr(exc, "status_code", 400),
-                detail=str(exc),
-            ) from exc
 
     @app.get("/api/opencode-serve")
     def opencode_serve_health() -> dict:

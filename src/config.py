@@ -553,7 +553,7 @@ class Settings(BaseSettings):
         ),
     )
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
-    # LAN release site (Settings → Runtime). Empty host or port 0 leaves it unset.
+    # LAN release site for `yaver update`. Empty host or port 0 leaves it unset.
     release_host: str = Field(
         default="",
         description="Release server IP or hostname. No scheme or path.",

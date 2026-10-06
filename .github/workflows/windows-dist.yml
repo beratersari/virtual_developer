@@ -166,12 +166,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload CLI offline zip
+      - name: Upload CLI zips
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.build.outputs.clis_name }}
-          path: ${{ steps.build.outputs.clis_zip }}
+          name: yaver-cli-windows-x64
+          path: |
+            dist/yaver-opencode-windows-x64-*.zip
+            dist/yaver-claude-windows-x64-*.zip
+            dist/yaver-codex-windows-x64-*.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -209,7 +212,9 @@ jobs:
           files: |
             dist/${{ steps.meta.outputs.dist_name }}.zip
             dist/opencoderman-*.zip
-            dist/yaver-clis-windows-x64-*.zip
+            dist/yaver-opencode-windows-x64-*.zip
+            dist/yaver-claude-windows-x64-*.zip
+            dist/yaver-codex-windows-x64-*.zip
           body_path: dist/RELEASE_NOTES.md
           fail_on_unmatched_files: true
         env:

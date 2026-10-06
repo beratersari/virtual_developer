@@ -201,16 +201,23 @@ function Move-WithRetry([string]$From, [string]$NewName) {
     throw $last
 }
 
-function Test-PortOpen([int]$Port) {
+function Test-PortOpen([int]$Port, [string]$ProbeHost) {
     if ($Port -le 0) { return $false }
+    if (-not $ProbeHost) { $ProbeHost = "127.0.0.1" }
+    # Connect() waits for the system TCP timeout, about 20 seconds, when the
+    # address does not answer. One check would then use the whole health budget.
     $client = New-Object System.Net.Sockets.TcpClient
     try {
-        $client.Connect("127.0.0.1", $Port)
+        $wait = $client.BeginConnect($ProbeHost, $Port, $null, $null)
+        if (-not $wait.AsyncWaitHandle.WaitOne(1000, $false)) {
+            return $false
+        }
+        $client.EndConnect($wait)
         return $true
     } catch {
         return $false
     } finally {
-        $client.Dispose()
+        try { $client.Close() } catch { }
     }
 }
 
@@ -259,10 +266,16 @@ try {
     }
     $port = 0
     try { $port = [int]$plan.port } catch { $port = 0 }
+    $probe = "127.0.0.1"
+    if ($plan.probe_host) { $probe = [string]$plan.probe_host }
     if ($port -gt 0) {
         $deadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $deadline -and (Test-PortOpen $port)) {
+        while ((Get-Date) -lt $deadline -and (Test-PortOpen $port $probe)) {
             Start-Sleep -Milliseconds 400
+        }
+        # An old listener still on this port would look like the new copy opened.
+        if (Test-PortOpen $port $probe) {
+            throw "The dashboard port is still open."
         }
     }
     $envFile = Join-Path $install ".env"
@@ -327,7 +340,7 @@ try {
         $opened = $false
         $deadline = (Get-Date).AddSeconds($health)
         while ((Get-Date) -lt $deadline) {
-            if (Test-PortOpen $port) { $opened = $true; break }
+            if (Test-PortOpen $port $probe) { $opened = $true; break }
             Start-Sleep -Milliseconds 400
         }
         if (-not $opened) {

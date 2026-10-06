@@ -99,7 +99,25 @@ def safe_extract(zip_path: Path, dest: Path) -> Path:
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, target.open("wb") as handle:
                 shutil.copyfileobj(source, handle)
+            _apply_zip_mode(info, target)
     return payload_root(dest_root)
+
+
+def _apply_zip_mode(info: zipfile.ZipInfo, target: Path) -> None:
+    """Keep the Unix permission bits stored on a zip member.
+
+    ``open`` creates a normal file and drops the executable bit. A Linux
+    ``yaver`` with no mode in the zip is still marked executable.
+    """
+    mode = (int(info.external_attr) >> 16) & 0o7777
+    if not mode and target.name.lower() in {"yaver", "yaver.exe"}:
+        mode = 0o755
+    if not mode:
+        return
+    try:
+        os.chmod(target, mode)
+    except OSError:
+        return
 
 
 def payload_root(dest: Path) -> Path:
@@ -305,7 +323,9 @@ def _run(plan: dict) -> None:
             raise UpdateError("Yaver is still running.")
     port = int(plan.get("port") or 0)
     probe = str(plan.get("probe_host") or "127.0.0.1")
-    wait_port_closed(port, 30, probe)
+    # An old listener still on this port would look like the new copy opened.
+    if not wait_port_closed(port, 30, probe):
+        raise UpdateError("The dashboard port is still open.")
     _log(plan, f"applying {layout}")
     if layout == "frozen":
         apply_frozen_tree(staging, install)
@@ -314,30 +334,44 @@ def _run(plan: dict) -> None:
     argv = _argv(plan)
     cwd = str(plan.get("cwd") or install)
     log_path = str(plan.get("log") or "")
-    proc = start_logged(argv, cwd, log_path)
+    try:
+        proc = start_logged(argv, cwd, log_path)
+    except OSError as exc:
+        if layout == "frozen" and _restart_previous_frozen(install, argv, cwd, log_path):
+            raise UpdateError(
+                "The new Yaver could not be started. The previous copy was restored."
+            ) from exc
+        raise UpdateError("The new Yaver could not be started.") from exc
     health_seconds = float(plan.get("health_seconds") if plan.get("health_seconds") is not None else 45)
     if port > 0 and health_seconds > 0 and not wait_port_open(port, health_seconds, probe):
         if proc.poll() is None:
             terminate_pid(proc.pid)
             wait_dead(proc.pid, 10)
         if layout == "frozen":
-            previous = install.parent / f"{install.name}.previous"
-            if previous.is_dir():
-                env_path = install / ".env"
-                env_bytes = env_path.read_bytes() if env_path.is_file() else None
-                rel = _park_userdata(install, env_bytes)
-                try:
-                    _restore_frozen(install, previous)
-                finally:
-                    if rel is not None:
-                        _unpark_userdata(install, rel)
-                start_logged(argv, cwd, log_path)
+            _restart_previous_frozen(install, argv, cwd, log_path)
             raise UpdateError(
                 "The new Yaver did not open. The previous copy was restored."
             )
         raise UpdateError(
             "The new files are in place, but Yaver did not open the dashboard port."
         )
+
+
+def _restart_previous_frozen(install: Path, argv: list[str], cwd: str, log_path: str) -> bool:
+    """Put the previous executable folder back and start it."""
+    previous = install.parent / f"{install.name}.previous"
+    if not previous.is_dir():
+        return False
+    env_path = install / ".env"
+    env_bytes = env_path.read_bytes() if env_path.is_file() else None
+    rel = _park_userdata(install, env_bytes)
+    try:
+        _restore_frozen(install, previous)
+    finally:
+        if rel is not None:
+            _unpark_userdata(install, rel)
+    start_logged(argv, cwd, log_path)
+    return True
 
 
 def _argv(plan: dict) -> list[str]:

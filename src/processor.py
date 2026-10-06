@@ -2840,6 +2840,52 @@ class JobProcessor:
         )
         return job_id
 
+    def forget_closed_job(self, issue_key: str, job_id: str) -> None:
+        """Drop the live pointer after merge cleanup closed this job.
+
+        The jobs list treats ``_active_jobs`` as the live badge. Closing the
+        row to cancelled left that pointer, so the badge stayed on next to
+        the merge error. Stop the runner for this job only.
+        """
+        jid = (job_id or "").strip()
+        key = (issue_key or "").strip()
+        if not jid:
+            return
+        matched = [
+            held
+            for held, current in list(self._active_jobs.items())
+            if str(current or "") == jid
+        ]
+        for held in matched:
+            self._active_jobs.pop(held, None)
+        stop_keys = list(matched)
+        if (
+            key
+            and key not in stop_keys
+            and not str(self._active_jobs.get(key) or "")
+            and key in self._contexts
+        ):
+            stop_keys.append(key)
+        for held in stop_keys:
+            self._stop_merged_review(held)
+
+    def _stop_merged_review(self, issue_key: str) -> None:
+        """Kill the open review without deleting its clone."""
+        try:
+            ctx = self._contexts.get(issue_key)
+            runner = ctx.get("runner") if isinstance(ctx, dict) else None
+            if runner is not None and hasattr(runner, "cancel_all_tasks"):
+                runner.cancel_all_tasks()
+            self._kill_children_for_issue(issue_key)
+        except Exception as exc:
+            logger.warning(f"{issue_key}: could not stop the open review: {exc}")
+        finally:
+            self._contexts.pop(issue_key, None)
+            try:
+                self._freeze_session_binds.discard(issue_key)
+            except Exception:
+                pass
+
     def _open_job_id(self, issue_key: str) -> Optional[str]:
         """Newest job row for this issue that is still in flight."""
         open_status = {"running", "planning", "executing", "pending"}
@@ -6452,6 +6498,7 @@ class JobProcessor:
             issue_key=event.issue_key,
             source_branch=event.source_branch,
             repository_url=getattr(event, "repository_url", "") or "",
+            processor=self,
         )
         logger.info(
             f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
@@ -7328,6 +7375,7 @@ class JobProcessor:
             issue_key=event.issue_key,
             source_branch=event.source_branch,
             repository_url=getattr(event, "repository_url", "") or "",
+            processor=self,
         )
         azure_info(
             f"lifecycle clones issue={event.issue_key} "

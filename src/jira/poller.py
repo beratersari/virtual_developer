@@ -815,7 +815,7 @@ class JiraPoller:
                 try:
                     from src.dashboard.temp_storage import sweep_merged_storage_clones
 
-                    sweep_merged_storage_clones()
+                    sweep_merged_storage_clones(getattr(self, "_processor", None))
                 except Exception as e:
                     logger.debug(f"Merged-MR clone sweep skipped: {e}")
 

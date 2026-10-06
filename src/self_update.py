@@ -1,8 +1,8 @@
 """Ask a LAN release server for the latest package and install it.
 
-The download finishes while Yaver is still running. A helper copied outside
-the install waits until this process exits, swaps the files, and starts
-Yaver again. ``.env`` and the data folder are kept. A git checkout is refused.
+``yaver update`` runs while Yaver is stopped. A helper copied outside the
+install waits until this process exits, swaps the files, and starts Yaver
+again. ``.env`` and the data folder are kept. A git checkout is refused.
 """
 
 from __future__ import annotations
@@ -323,7 +323,77 @@ def download_release(
                 pass
 
 
-def run_apply_job(base: str, shutdown: Callable[[], None], *, spawn: Callable[[Path, str], None] | None = None) -> None:
+def install_is_running() -> bool:
+    """True when this install's dashboard port is already accepting connections."""
+    from src.update_helper import port_open
+
+    probe, port = _dashboard_probe()
+    if port < 1:
+        return False
+    return port_open(port, probe)
+
+
+def _dashboard_probe() -> tuple[str, int]:
+    from src.config import settings
+
+    raw_host = str(getattr(settings, "dashboard_host", "0.0.0.0") or "0.0.0.0").strip()
+    probe = "127.0.0.1" if raw_host in {"0.0.0.0", "::", ""} else raw_host
+    try:
+        port = int(getattr(settings, "dashboard_port", 8080) or 8080)
+    except (TypeError, ValueError):
+        port = 8080
+    return probe, port
+
+
+def _chosen_release(host: str | None, port: int | None) -> tuple[str, int]:
+    from src.config import settings
+
+    chosen_host = host if host is not None else str(getattr(settings, "release_host", "") or "")
+    chosen_host = chosen_host.strip()
+    if port is None:
+        try:
+            chosen_port = int(getattr(settings, "release_port", 0) or 0)
+        except (TypeError, ValueError):
+            chosen_port = 0
+    else:
+        chosen_port = int(port)
+    return chosen_host, chosen_port
+
+
+def update_stopped_install(
+    host: str | None,
+    port: int | None,
+    *,
+    shutdown: Callable[[], None],
+    report: Callable[[str], None] | None = None,
+) -> None:
+    """Download the published package and hand the swap to the helper.
+
+    Call this only when Yaver is stopped. ``shutdown`` must exit this
+    process. The helper waits for that exit, then starts Yaver again.
+    """
+    if install_is_running():
+        raise UpdateError("Yaver is running. Stop it, then run yaver update.")
+    chosen_host, chosen_port = _chosen_release(host, port)
+    base = release_base_url(chosen_host, chosen_port)
+    blocked = checkout_block()
+    if blocked:
+        raise UpdateError(blocked)
+    save_release_target(chosen_host, chosen_port)
+    run_apply_job(base, shutdown, report=report)
+
+
+def run_apply_job(
+    base: str,
+    shutdown: Callable[[], None],
+    *,
+    spawn: Callable[[Path, str], None] | None = None,
+    report: Callable[[str], None] | None = None,
+) -> None:
+    def say(text: str) -> None:
+        if report is not None:
+            report(text)
+
     platform = local_platform()
     layout = local_layout()
     remote = fetch_latest(base, platform)
@@ -340,6 +410,7 @@ def run_apply_job(base: str, shutdown: Callable[[], None], *, spawn: Callable[[P
     archive = work / f"yaver-{version}.zip"
     size = int(remote.get("size") or 0)
     _set(phase="downloading", bytes_done=0, bytes_total=size, error="")
+    say(f"Downloading {version}.")
     download_release(
         base,
         platform,
@@ -348,6 +419,7 @@ def run_apply_job(base: str, shutdown: Callable[[], None], *, spawn: Callable[[P
         expected_size=size,
     )
     _set(phase="verifying")
+    say("Checking the package.")
     staging_parent = work / "staging"
     if staging_parent.exists():
         shutil.rmtree(staging_parent, ignore_errors=True)
@@ -367,6 +439,7 @@ def run_apply_job(base: str, shutdown: Callable[[], None], *, spawn: Callable[[P
     launcher(plan_path, applier)
     _set(phase="restarting", error="")
     logger.info(f"Update staged {version}; restarting")
+    say("The package is ready. Yaver will close and start again.")
     shutdown()
 
 
@@ -423,14 +496,11 @@ def _apply_thread(base: str, shutdown: Callable[[], None]) -> None:
 
 def _plan(staging: Path, version: str, layout: str) -> dict[str, Any]:
     root = install_root().resolve()
-    from src.config import settings
-
-    raw_host = str(getattr(settings, "dashboard_host", "0.0.0.0") or "0.0.0.0").strip()
-    probe = "127.0.0.1" if raw_host in {"0.0.0.0", "::", ""} else raw_host
+    probe, port = _dashboard_probe()
     return {
         "created": time.time(),
         "pid": os.getpid(),
-        "port": int(getattr(settings, "dashboard_port", 8080) or 8080),
+        "port": port,
         "probe_host": probe,
         "layout": layout,
         "staging": str(staging),
@@ -463,6 +533,7 @@ def _write_shell_plan(path: Path, plan: dict[str, Any]) -> None:
         "LOG": str(plan["log"]),
         "RESULT": str(plan["result"]),
         "HEALTH_SECONDS": str(int(plan["health_seconds"])),
+        "PROBE": str(plan.get("probe_host") or "127.0.0.1"),
         "ARGV0": str(argv[0]),
         "ARGV1": str(argv[1]) if len(argv) > 1 else "",
     }

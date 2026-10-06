@@ -8,11 +8,26 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.73] — 2026-10-06
+
+Stop Yaver and run `yaver update`. Each command-line tool has its own zip. A merged review no longer leaves its job live.
+
 ### Added
+
+- Stop Yaver, then run `yaver update` or `yaver.exe --update`. The command reads `RELEASE_HOST` and `RELEASE_PORT`, or `--host` and `--port`, downloads the package for this computer, replaces the install, and starts Yaver again.
 
 ### Fixed
 
+- The updater keeps the executable bit stored in the zip, so a Linux `yaver` can be started after the swap. If that program cannot be started, the previous executable folder is put back.
+- The Linux shell helper waits until the dashboard port opens, and puts the previous folder back when the new copy does not. It also refuses to replace files while that port is still open. The Windows PowerShell helper checks the dashboard address from the plan, not only 127.0.0.1. A dashboard address that does not answer is treated as closed after a short wait, so one check cannot use the whole health budget.
+- A job whose merge request or pull request was merged or closed no longer stays live. The row is cancelled with the merge error, and that review is stopped.
+
 ### Changed
+
+- Settings no longer has Check or Update. The release address stays in `.env`. The dashboard does not download or replace Yaver.
+- Windows and Linux releases attach one zip each for OpenCode, Claude Code, and Codex. Each zip is that CLI, its host config, and its install command. The combined `yaver-clis` zip is no longer built.
+
+[0.9.73]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.73
 
 ## [0.9.72] — 2026-10-05
 

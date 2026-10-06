@@ -408,9 +408,15 @@ CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahib
 
 ### Ofis ağında güncelleme
 
-Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. **Settings → Runtime** bölümünde o sunucunun adresini ve kapısını yazın, **Check** deyin, sonra **Update**.
+Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Yaver’i durdurun, sonra `yaver update` çalıştırın (Windows: `yaver.exe update` veya `yaver.exe --update`).
 
-Güncelleme Yaver’i kapatır, bu bilgisayara uyan paketi indirir ve Yaver’i yeniden açar. `.env` dosyası ve veri klasörü durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i.
+Sunucu adresi `.env` içindeki `RELEASE_HOST` ve `RELEASE_PORT` değerleridir. İlk çalıştırmada şöyle verilebilir:
+
+```text
+yaver update --host 192.168.1.20 --port 8090
+```
+
+Komut bu bilgisayara uyan paketi indirir, kurulumu değiştirir ve Yaver’i yeniden başlatır. `.env` dosyası ve veri klasörü durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i. Yaver zaten çalışıyorsa komut indirmeden durur.
 
 ---
 

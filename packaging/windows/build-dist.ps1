@@ -43,6 +43,57 @@ function Ensure-Dir([string]$Path) {
     }
 }
 
+function New-CliZip(
+    [string]$Tool,
+    [string]$Version,
+    [string]$ExeSource,
+    [string]$ExeName,
+    [string]$ConfigSource,
+    [string]$ConfigName,
+    [string]$OsToken
+) {
+    $zipBase = $DistName -replace '^virtual_developer-', "yaver-$Tool-"
+    if ($zipBase -eq $DistName) { $zipBase = "yaver-$Tool-$OsToken" }
+    $toolStage = Join-Path $stage $zipBase
+    if (Test-Path -LiteralPath $toolStage) {
+        Remove-Item -LiteralPath $toolStage -Recurse -Force
+    }
+    $toolDir = Join-Path $toolStage $Tool
+    Ensure-Dir $toolDir
+    $cliSrc = Join-Path $root "packaging\windows\cli-offline"
+    Copy-Item -LiteralPath (Join-Path $root "packaging\windows\Backup-CliBinary.ps1") -Destination (Join-Path $toolStage "Backup-CliBinary.ps1") -Force
+    Copy-Item -LiteralPath (Join-Path $cliSrc "install-$Tool.bat") -Destination (Join-Path $toolStage "install-$Tool.bat") -Force
+    Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $toolDir $ExeName) -Force
+    Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $toolDir $ConfigName) -Force
+    Set-Content -Path (Join-Path $toolStage "VERSION") -Value $Version -Encoding ASCII
+    $agentLeak = Get-ChildItem -Path $toolStage -Recurse -Directory -Filter "agents" -ErrorAction SilentlyContinue
+    if ($agentLeak) { throw "CLI zip must not contain an agents directory" }
+    $zipPath = Join-Path $OutDir "$zipBase.zip"
+    if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
+    }
+    $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
+    if ($tarCmd) {
+        Push-Location $toolStage
+        try {
+            & tar -a -cf $zipPath * > $null
+            if ($LASTEXITCODE -ne 0) { throw "tar failed creating $Tool zip" }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $toolStage,
+            $zipPath,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false
+        )
+    }
+    Write-Host ("CLI zip : {0} ({1:N1} MB)" -f $zipPath, ((Get-Item -LiteralPath $zipPath).Length / 1MB))
+    return $zipPath
+}
+
 function Download-File([string]$Url, [string]$OutFile) {
     Write-Host "  Downloading $Url"
     Write-Host "           -> $OutFile"
@@ -878,36 +929,6 @@ OpenCoderman pin: opencoderman.pin (exact submodule commit for this build)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 
-# CLI-only offline zip: three bats, three binaries, three host configs. No agents.
-$clisSrc = Join-Path $root "packaging\windows\cli-offline"
-$clisName = $DistName -replace '^virtual_developer-', 'yaver-clis-'
-if ($clisName -eq $DistName) { $clisName = "yaver-clis-windows-x64" }
-$clisStage = Join-Path $stage $clisName
-if (Test-Path -LiteralPath $clisStage) {
-    Remove-Item -LiteralPath $clisStage -Recurse -Force
-}
-Ensure-Dir (Join-Path $clisStage "opencode")
-Ensure-Dir (Join-Path $clisStage "codex")
-Ensure-Dir (Join-Path $clisStage "claude")
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\Backup-CliBinary.ps1") -Destination (Join-Path $clisStage "Backup-CliBinary.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "install-opencode.bat") -Destination (Join-Path $clisStage "install-opencode.bat") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "install-codex.bat") -Destination (Join-Path $clisStage "install-codex.bat") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "install-claude.bat") -Destination (Join-Path $clisStage "install-claude.bat") -Force
-Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $clisStage "opencode\opencode.exe") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "opencode.json") -Destination (Join-Path $clisStage "opencode\opencode.json") -Force
-Copy-Item -LiteralPath $codexExe.FullName -Destination (Join-Path $clisStage "codex\codex.exe") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "config.toml") -Destination (Join-Path $clisStage "codex\config.toml") -Force
-Copy-Item -LiteralPath $claudeExe -Destination (Join-Path $clisStage "claude\claude.exe") -Force
-Copy-Item -LiteralPath (Join-Path $clisSrc "settings.json") -Destination (Join-Path $clisStage "claude\settings.json") -Force
-@(
-    "OPENCODE_VERSION=$OPENCODE_VERSION"
-    "CODEX_VERSION=$CODEX_VERSION"
-    "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
-) | Set-Content -Path (Join-Path $clisStage "VERSIONS.txt") -Encoding ASCII
-$agentLeak = Get-ChildItem -Path $clisStage -Recurse -Directory -Filter "agents" -ErrorAction SilentlyContinue
-if ($agentLeak) { throw "CLI zip must not contain an agents directory" }
-Write-Host "  CLI offline stage: $clisStage"
-
 if (Test-Path -LiteralPath $dl) {
     Remove-Item -LiteralPath $dl -Recurse -Force
 }
@@ -944,28 +965,10 @@ if ($tar) {
     )
 }
 
-$clisZip = Join-Path $OutDir "$clisName.zip"
-if (Test-Path -LiteralPath $clisZip) {
-    Remove-Item -LiteralPath $clisZip -Force
-}
-if ($tar) {
-    Push-Location $clisStage
-    try {
-        & tar -a -cf $clisZip *
-        if ($LASTEXITCODE -ne 0) { throw "tar failed creating CLI zip" }
-    } finally {
-        Pop-Location
-    }
-} else {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $clisStage,
-        $clisZip,
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $false
-    )
-}
-Write-Host ("CLI zip : {0} ({1:N1} MB)" -f $clisZip, ((Get-Item -LiteralPath $clisZip).Length / 1MB))
+$cliSrc = Join-Path $root "packaging\windows\cli-offline"
+$opencodeZip = New-CliZip -Tool "opencode" -Version $OPENCODE_VERSION -ExeSource $opencodeExe.FullName -ExeName "opencode.exe" -ConfigSource (Join-Path $cliSrc "opencode.json") -ConfigName "opencode.json" -OsToken "windows-x64"
+$claudeZip = New-CliZip -Tool "claude" -Version $CLAUDE_CODE_VERSION -ExeSource $claudeExe -ExeName "claude.exe" -ConfigSource (Join-Path $cliSrc "settings.json") -ConfigName "settings.json" -OsToken "windows-x64"
+$codexZip = New-CliZip -Tool "codex" -Version $CODEX_VERSION -ExeSource $codexExe.FullName -ExeName "codex.exe" -ConfigSource (Join-Path $cliSrc "config.toml") -ConfigName "config.toml" -OsToken "windows-x64"
 
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
 $payloadSize = (Get-ChildItem -Path $payload -Recurse -File -ErrorAction SilentlyContinue |
@@ -984,8 +987,9 @@ Write-Host "Supported Python: $($supportedPy -join ', ')"
 
 if ($env:GITHUB_OUTPUT) {
     "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-    "clis_zip=$clisZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-    "clis_name=$clisName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "opencode_zip=$opencodeZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "claude_zip=$claudeZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "codex_zip=$codexZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "dist_name=$DistName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "payload_path=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "supported_python=$($supportedPy -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8

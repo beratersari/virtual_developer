@@ -346,35 +346,30 @@ echo "[OK] $OUT_DIR/${DIST_NAME}.tar.gz"
 echo "[OK] $OUT_DIR/${DIST_NAME}.zip"
 
 echo
-echo "Step 7: CLI-only offline zip..."
-CLIS_NAME="${DIST_NAME/virtual_developer-/yaver-clis-}"
-if [[ "$CLIS_NAME" == "$DIST_NAME" ]]; then
-  CLIS_NAME="yaver-clis-linux-x64"
-fi
-CLIS_STAGE="$OUT_DIR/stage-clis/$CLIS_NAME"
-rm -rf "$CLIS_STAGE"
-mkdir -p "$CLIS_STAGE/opencode" "$CLIS_STAGE/codex" "$CLIS_STAGE/claude"
+echo "Step 7: One offline zip per CLI..."
 CLI_SRC="$HERE/cli-offline"
 WIN_CLI="$ROOT/packaging/windows/cli-offline"
-cp -f "$CLI_SRC/install-opencode.sh" "$CLI_SRC/install-codex.sh" "$CLI_SRC/install-claude.sh" "$CLI_SRC/lib.sh" "$CLIS_STAGE/"
-chmod +x "$CLIS_STAGE"/*.sh
-cp -f "$VENDOR/bin/opencode" "$CLIS_STAGE/opencode/opencode"
-cp -f "$WIN_CLI/opencode.json" "$CLIS_STAGE/opencode/opencode.json"
-cp -f "$VENDOR/bin/codex" "$CLIS_STAGE/codex/codex"
-cp -f "$WIN_CLI/config.toml" "$CLIS_STAGE/codex/config.toml"
-cp -f "$CLAUDE_BIN" "$CLIS_STAGE/claude/claude"
-cp -f "$WIN_CLI/settings.json" "$CLIS_STAGE/claude/settings.json"
-chmod +x "$CLIS_STAGE/opencode/opencode" "$CLIS_STAGE/codex/codex" "$CLIS_STAGE/claude/claude"
-cat >"$CLIS_STAGE/VERSIONS.txt" <<EOF
-OPENCODE_VERSION=$OPENCODE_VERSION
-CODEX_VERSION=$CODEX_VERSION
-CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION
-EOF
-if find "$CLIS_STAGE" -type d -name agents | grep -q .; then
-  echo "CLI zip must not contain an agents directory" >&2
-  exit 1
-fi
-python3 - "$CLIS_STAGE" "$OUT_DIR/${CLIS_NAME}.zip" <<'PY'
+
+write_cli_zip() {
+  local tool="$1" version="$2" exe_src="$3" exe_name="$4" cfg_src="$5" cfg_name="$6"
+  local base="${DIST_NAME/virtual_developer-/yaver-${tool}-}"
+  if [[ "$base" == "$DIST_NAME" ]]; then
+    base="yaver-${tool}-linux-x64"
+  fi
+  local stage="$OUT_DIR/stage-clis/$base"
+  rm -rf "$stage"
+  mkdir -p "$stage/$tool"
+  cp -f "$CLI_SRC/install-${tool}.sh" "$CLI_SRC/lib.sh" "$stage/"
+  chmod +x "$stage/install-${tool}.sh" "$stage/lib.sh"
+  cp -f "$exe_src" "$stage/$tool/$exe_name"
+  cp -f "$cfg_src" "$stage/$tool/$cfg_name"
+  chmod +x "$stage/$tool/$exe_name"
+  printf '%s\n' "$version" >"$stage/VERSION"
+  if find "$stage" -type d -name agents | grep -q .; then
+    echo "CLI zip must not contain an agents directory" >&2
+    exit 1
+  fi
+  python3 - "$stage" "$OUT_DIR/${base}.zip" <<'PY'
 import sys, zipfile
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -385,5 +380,10 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(path, path.relative_to(root).as_posix())
 print("wrote", dest)
 PY
-echo "[OK] $OUT_DIR/${CLIS_NAME}.zip"
+  echo "[OK] $OUT_DIR/${base}.zip"
+}
+
+write_cli_zip opencode "$OPENCODE_VERSION" "$VENDOR/bin/opencode" opencode "$WIN_CLI/opencode.json" opencode.json
+write_cli_zip claude "$CLAUDE_CODE_VERSION" "$CLAUDE_BIN" claude "$WIN_CLI/settings.json" settings.json
+write_cli_zip codex "$CODEX_VERSION" "$VENDOR/bin/codex" codex "$WIN_CLI/config.toml" config.toml
 echo "Payload: $PAYLOAD"
