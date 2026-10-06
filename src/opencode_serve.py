@@ -2798,6 +2798,41 @@ class ServeOrchestrator:
                     )
                 reasons = list(assessment.get("reasons") or reasons)
 
+            # A clean finish=stop with nothing left pending is a finished
+            # answer. One todo stuck in_progress is the model forgetting to
+            # close it (todo API lag), not unfinished work. Review retries
+            # resend the original instruction and reprint the same review.
+            # Pending todos stay incomplete so a build can still resume.
+            finish_now = str(assessment.get("last_finish") or "").strip().lower()
+            if not finish_now:
+                finish_now = str(finish or "").strip().lower()
+            pending_left = int(assessment.get("pending_todos") or 0)
+            if (
+                finish_now == "stop"
+                and pending_left == 0
+                and not assessment.get("last_is_summary")
+                and not asked_question
+                and reasons_are_open_todos_only(reasons)
+            ):
+                _emit(
+                    "stdout",
+                    "[serve] finish=stop with no pending todos — "
+                    "accepting complete despite in-progress todo lag "
+                    f"(reasons={reasons})",
+                )
+                return ServeTurnResult(
+                    session_id=sid,
+                    returncode=0,
+                    stdout="\n".join(lines),
+                    stderr="",
+                    incomplete=False,
+                    compact_events=compact_total,
+                    continue_count=continue_count,
+                    turns=turns,
+                    session_completeness=assessment,
+                    progress=100,
+                )
+
             # Still incomplete (non-compact, non-question). Do not inject Continue.
             note = (
                 f"[INCOMPLETE] session still incomplete: "

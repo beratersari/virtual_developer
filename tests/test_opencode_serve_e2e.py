@@ -1162,6 +1162,138 @@ async def test_continue_after_idle_compact_stale_todos_is_success():
 
 
 @pytest.mark.asyncio
+async def test_finish_stop_with_only_in_progress_todo_is_complete():
+    """finish=stop and a written review must not retry on one in_progress todo.
+
+    The model printed the verdict and the findings fence, then stopped.
+    list_todos still showed 0 pending and 1 in_progress. That used to
+    return INCOMPLETE, and a review retry replayed the same review.
+    """
+
+    class FinishedReviewStaleTodo(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_review_stale_todo"
+            self.todos = [
+                {"content": "Write the review", "status": "in_progress"},
+            ]
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            reply = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "agent": "derman-reviewer",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {"type": "step-start"},
+                    {
+                        "type": "text",
+                        "text": (
+                            "Hata tespit edilmedi. Birleştirilebilir.\n\n"
+                            "```opencoderman-findings\n"
+                            '{ "findings": [] }\n'
+                            "```"
+                        ),
+                    },
+                    {"type": "step-finish", "reason": "stop"},
+                ],
+            }
+            self.messages.append(reply)
+            return reply
+
+    backend = FinishedReviewStaleTodo()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="Review the merge request.",
+        title="GL-4",
+        agent="derman-reviewer",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 1
+    assert "[INCOMPLETE]" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
+async def test_finish_stop_with_pending_todos_stays_incomplete():
+    """Pending todos after finish=stop are still unfinished work."""
+
+    class StoppedWithPending(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_pending_todos"
+            self.todos = [
+                {"content": "Write the review", "status": "in_progress"},
+                {"content": "Check the tests", "status": "pending"},
+            ]
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            reply = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {"type": "step-start"},
+                    {"type": "text", "text": "Still checking the tests."},
+                    {"type": "step-finish", "reason": "stop"},
+                ],
+            }
+            self.messages.append(reply)
+            return reply
+
+    backend = StoppedWithPending()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="Review the merge request.",
+        title="GL-5",
+        agent="derman-reviewer",
+    )
+    assert result.incomplete is True
+    assert result.returncode == 2
+    assert "open todos" in (result.stderr or "").lower()
+
+
+@pytest.mark.asyncio
 async def test_resume_with_old_compact_markers_does_not_enter_compact_wait():
     """Reused session history must not start a 6h auto-compact busy poll.
 
