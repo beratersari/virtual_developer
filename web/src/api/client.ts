@@ -440,6 +440,7 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
 export type OpencodeServeState = {
   status?: string
   message?: string
+  healthy?: boolean
 }
 
 export function fetchOpencodeServe(signal?: AbortSignal) {

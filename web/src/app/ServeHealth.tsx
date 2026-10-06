@@ -13,18 +13,28 @@ const VIEWS: Record<string, ServeHealthView> = {
   ready: { label: 'OpenCode healthy', tone: 'healthy', pulse: true },
   started: { label: 'OpenCode healthy', tone: 'healthy', pulse: true },
   reloaded: { label: 'OpenCode healthy', tone: 'healthy', pulse: true },
-  reloading: { label: 'OpenCode restarting', tone: 'waiting', pulse: true },
+  reloading: { label: 'OpenCode reloading', tone: 'waiting', pulse: true },
   deferred: { label: 'OpenCode reload waiting', tone: 'waiting', pulse: false },
-  running: { label: 'OpenCode not answering', tone: 'down', pulse: false },
-  down: { label: 'OpenCode down', tone: 'down', pulse: false },
+  running: { label: 'OpenCode is up, not answering', tone: 'down', pulse: false },
+  down: { label: 'OpenCode is not running', tone: 'down', pulse: false },
   failed: { label: 'OpenCode failed', tone: 'down', pulse: false },
 }
 
-export function serveHealthView(status: string | null | undefined): ServeHealthView {
+export function serveHealthView(
+  status: string | null | undefined,
+  healthy?: boolean | null,
+): ServeHealthView {
   const key = (status || '').trim().toLowerCase()
+  if (key === 'deferred' && healthy) {
+    return {
+      label: 'OpenCode healthy, reload waiting',
+      tone: 'waiting',
+      pulse: false,
+    }
+  }
   return (
     VIEWS[key] ?? {
-      label: 'OpenCode unavailable',
+      label: 'OpenCode status unavailable',
       tone: 'down',
       pulse: false,
     }
@@ -50,22 +60,24 @@ type Phase = 'loading' | 'ready' | 'unreachable'
 export function ServeHealthMark({
   status,
   message,
+  healthy,
   phase = 'ready',
 }: {
   status?: string
   message?: string
+  healthy?: boolean | null
   phase?: Phase
 }) {
   const view =
     phase === 'loading'
-      ? { label: 'OpenCode checking', tone: 'unknown' as const, pulse: false }
+      ? { label: 'Checking OpenCode', tone: 'unknown' as const, pulse: false }
       : phase === 'unreachable'
         ? {
-            label: 'OpenCode unavailable',
+            label: 'OpenCode status unavailable',
             tone: 'down' as const,
             pulse: false,
           }
-        : serveHealthView(status)
+        : serveHealthView(status, healthy)
   const detail = (
     message ||
     (phase === 'unreachable' ? 'OpenCode serve status could not be read.' : '')
@@ -134,6 +146,7 @@ export function ServeHealth() {
   return createElement(ServeHealthMark, {
     phase,
     status: state?.status,
+    healthy: state?.healthy,
     message:
       phase === 'unreachable'
         ? 'OpenCode serve status could not be read.'

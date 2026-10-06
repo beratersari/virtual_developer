@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.74] — 2026-10-06
+
+A finished review is no longer retried when the only leftover is a todo stuck in progress. The sidebar names each OpenCode state.
+
+### Fixed
+
+- A review, plan, or build that stops with finish=stop is complete when no todo is still pending. One todo left in progress is treated as a checkbox the model forgot to close. Todos that are still pending stay incomplete, and a build retries to finish them.
+
+### Changed
+
+- The sidebar OpenCode line says "OpenCode healthy, reload waiting" when the process is healthy and a reload is waiting for the current job. A reload in progress reads "OpenCode reloading". The other lines say whether OpenCode is healthy, up but not answering, not running, failed, or the status could not be read.
+
+[0.9.74]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.74
+
 ## [0.9.73] — 2026-10-06
 
 Stop Yaver and run `yaver update`. Each command-line tool has its own zip. A merged review no longer leaves its job live.

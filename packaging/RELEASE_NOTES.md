@@ -1,3 +1,9 @@
+# Yaver 0.9.74
+
+A review that already printed its answer is no longer run again just because one todo stayed in progress. The turn is complete when OpenCode stops and no todo is still pending. A todo that is still pending keeps the job incomplete, and a build is asked to finish that work.
+
+The sidebar OpenCode line says "OpenCode healthy, reload waiting" when the process is healthy and a reload is waiting for the current job. A reload in progress reads "OpenCode reloading". The other lines say whether OpenCode is healthy, up but not answering, not running, failed, or the status could not be read.
+
 # Yaver 0.9.73
 
 Stop Yaver, then run yaver update or yaver.exe --update. The command reads RELEASE_HOST and RELEASE_PORT, or --host and --port, downloads the package for this computer, replaces the install, and starts Yaver again. Settings no longer has Check or Update. The release address stays in .env. The dashboard does not download or replace Yaver.
