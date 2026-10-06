@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CLI for JIRA Virtual Developer."""
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -38,7 +39,7 @@ def validate_config():
     "--update",
     "run_update",
     is_flag=True,
-    help="Install the published package. A running dashboard is stopped first.",
+    help="Print how to update. The install is not changed.",
 )
 @click.version_option(version=__version__)
 @click.pass_context
@@ -57,30 +58,23 @@ def cli(ctx: click.Context, run_update: bool):
 
 
 @cli.command("update")
-@click.option("--host", default=None, help="Release server address. Saved for the next run.")
-@click.option("--port", default=None, type=int, help="Release server port. Saved for the next run.")
+@click.option("--host", default=None, help="Ignored. Set RELEASE_HOST in .env.")
+@click.option("--port", default=None, type=int, help="Ignored. Set RELEASE_PORT in .env.")
 def update_cmd(host: Optional[str], port: Optional[int]):
-    """Install the published package. Start Yaver after the helper finishes.
+    """Print how to update this install.
 
-    If the dashboard port is open, that process is stopped before the
-    download. On Windows, yaver.exe exits before the files are replaced.
-    The command prompt can return first. Wait for the line that begins
-    with Updated to. The address is RELEASE_HOST and RELEASE_PORT in .env,
-    or --host and --port on this command.
+    The install is not changed. Run update.bat on Windows or ./update.sh
+    on Linux from this folder. Set RELEASE_HOST and RELEASE_PORT in .env.
     """
-    from src.self_update import UpdateError, update_stopped_install
-
-    try:
-        update_stopped_install(
-            host,
-            port,
-            shutdown=lambda: sys.exit(0),
-            report=lambda line: click.echo(line),
-        )
-    except UpdateError as exc:
-        click.echo(str(exc), err=True)
-        already = str(exc).startswith("This install is already ")
-        raise SystemExit(0 if already else 1) from exc
+    del host, port
+    if os.name == "nt":
+        click.echo("Run update.bat in this folder.")
+        click.echo("It stops yaver.exe, replaces the program files, and leaves .env in place.")
+        click.echo("Start yaver.exe when the script finishes.")
+        return
+    click.echo("Run ./update.sh in this folder.")
+    click.echo("It stops yaver, replaces the program files, and leaves .env in place.")
+    click.echo("Start ./yaver when the script finishes.")
 
 
 @cli.command()

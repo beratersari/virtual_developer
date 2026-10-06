@@ -8,17 +8,12 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
-### Fixed
-
-- On Windows, `yaver.exe update` exits before the helper moves `_internal`. The helper waits until that process has closed, then replaces the files. The command prompt can return before the copy finishes. Wait for the line that begins with Updated to. The steps keep printing in the same window.
-
 ### Changed
 
 - OpenCode, Claude Code, and Codex release zips are named with that tool's version. A Windows OpenCode 1.18.10 package is `yaver-opencode-windows-x64-1.18.10.zip`. Claude Code and Codex use the same pattern, and the Linux names do too.
-- `yaver update` replaces the program files and does not start the dashboard. A source install waits until the copy finishes. On Windows, `yaver.exe` exits before the helper moves `_internal`, and the helper keeps printing in the same window. Start Yaver after the copy finishes.
-- `yaver update` leaves an existing `.env` file as it is. The `.env` from the package is copied only when the install has none.
-- `yaver update` stops the process listening on the dashboard port, then replaces the files. Start Yaver after the helper prints Updated to.
-- `yaver update` prints each step in the terminal.
+- Update an executable install from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`. The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env`, checks the package, stops Yaver in that folder, and replaces the program files (`yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`). `.env` and the script you ran stay. Start Yaver after the line that begins with Updated to.
+- An install that does not have `update.bat` or `update.sh` yet can take the script from the published zip: download the zip once, copy that script into the Yaver folder, and run it there.
+- `yaver update` and `yaver --update` print that instruction and leave the install unchanged.
 - Settings Sync copies agent files into the OpenCode and Claude homes and reloads OpenCode when no job is running. Saving or creating an agent writes the catalog and leaves OpenCode running.
 
 ## [0.9.74] — 2026-10-06

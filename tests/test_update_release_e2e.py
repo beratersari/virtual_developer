@@ -255,8 +255,8 @@ def test_install_page_commands_extract_the_published_windows_zip(tmp_path: Path)
     _need_zips()
     _site_up("windows")
     page = _get(f"{_SITE}/install").decode("utf-8", errors="replace")
-    assert ".\\yaver.exe update" in page
-    assert "./yaver update" in page
+    assert "update.bat" in page
+    assert "./update.sh" in page
     assert "setsid nohup ./yaver start" in page
     assert "chmod 755 yaver" in page
     assert "notepad .env" in page

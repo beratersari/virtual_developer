@@ -1,7 +1,11 @@
-"""Ask a LAN release server for the latest package and install it.
+"""Retired in-process installer. The operator path is the script.
 
-``yaver update`` stops a dashboard that is already listening, then a
-helper copied outside the install swaps the files. The helper does not
+Run ``update.bat`` on Windows or ``./update.sh`` on Linux from the
+install folder. ``cli.py`` must not call ``update_stopped_install``.
+This module stays so the older helper tests still have a library.
+
+The old command stopped a dashboard that was already listening, then a
+helper copied outside the install swapped the files. The helper does not
 start Yaver. An existing ``.env`` is left untouched, and the data folder
 is kept. A git checkout is refused.
 

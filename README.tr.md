@@ -408,15 +408,18 @@ CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahib
 
 ### Ofis ağında güncelleme
 
-Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. `yaver update` çalıştırın (Windows: `yaver.exe update` veya `yaver.exe --update`). Pano zaten açıksa komut önce o süreci durdurur.
+Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Güncellemeyi Yaver klasöründeki betik yapar. Windows’ta `update.bat`, Ubuntu’da `./update.sh` çalıştırın.
 
-Sunucu adresi `.env` içindeki `RELEASE_HOST` ve `RELEASE_PORT` değerleridir. İlk çalıştırmada şöyle verilebilir:
+Site adresini `.env` içine yazın:
 
 ```text
-yaver update --host 192.168.1.20 --port 8090
+RELEASE_HOST=192.168.1.20
+RELEASE_PORT=8090
 ```
 
-Komut bu bilgisayara uyan paketi indirir ve kurulumu değiştirir. Kaynak kurulum kopya bitene kadar açık kalır. Windows’ta `yaver.exe` kendi süreç numarasını yazar ve yardımcı `_internal` klasörünü taşımadan önce kapanır. Yardımcı o süreç kapanana kadar bekler ve aynı pencerede yazmaya devam eder. Komut istemi kopya bitmeden geri gelebilir. Updated to ile başlayan satırı bekleyin, sonra Yaver’i başlatın. Kurulumda zaten bir `.env` dosyası varsa o dosya olduğu gibi kalır, veri klasörü de durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i. Pano portu açıksa komut orada dinleyen süreci durdurur, sonra indirir. Her adım terminalde görünür.
+Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
+
+Bu klasörde `update.bat` veya `update.sh` yoksa zip’i bir kez indirin, betiği Yaver klasörüne kopyalayın ve orada çalıştırın. `yaver update` ve `yaver.exe --update` bu yönergeyi yazar ve dosyaları olduğu gibi bırakır.
 
 ---
 

@@ -191,6 +191,7 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (internal / "web" / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
     (internal / "agent" / "PLAN_PROMPT.md").write_text("plan", encoding="utf-8")
     (internal / "agent" / "BUILD_PROMPT.md").write_text("build", encoding="utf-8")
+    (internal / "agent" / "REVIEW_PROMPT.md").write_text("review", encoding="utf-8")
     (payload / "yaver.exe").write_bytes(b"MZ")
     (payload / ".env.example").write_text("JIRA_HOST=\n", encoding="utf-8")
     (payload / "START_HERE.txt").write_text("start", encoding="utf-8")
@@ -205,11 +206,13 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (ocm_agents / "derman-build.md").write_text("build", encoding="utf-8")
     (ocm_agents / "derman-plan.md").write_text("plan", encoding="utf-8")
     (ocm_agents / "derman-test.md").write_text("test", encoding="utf-8")
+    (ocm_agents / "derman-reviewer.md").write_text("review", encoding="utf-8")
     for i in range(10):
         skill = ocm_skills / f"skill-{i}"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
     (payload / "install-agents.bat").write_text("@echo off\n", encoding="utf-8")
+    (payload / "update.bat").write_text("@echo off\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
     (payload / "opencode_configs").mkdir()
     dup = ap.assert_payload(payload, platform="windows")
@@ -259,6 +262,7 @@ def test_build_script_requires_spa_and_onedir():
     assert "dest_base.with_suffix" not in text
     assert "stage_opencoderman" in text
     assert "stage_agent_installers" in text
+    assert "stage_updater" in text
     assert "opencode_configs" not in text
     assert "opencoderman" in text
     assert "agents" in text
@@ -319,6 +323,22 @@ def test_stage_agent_installers_ships_one_script(tmp_path: Path, monkeypatch):
         assert not (bundled / "install_opencode_agents.py").exists()
 
 
+def test_stage_updater_ships_one_script(tmp_path: Path, monkeypatch):
+    build = _load("yaver_stage_updater", PKG / "build.py")
+    bundled = tmp_path / "payload"
+    bundled.mkdir()
+    monkeypatch.setattr(build, "ROOT", ROOT)
+    build.stage_updater(bundled)
+    if __import__("os").name == "nt":
+        assert (bundled / "update.bat").is_file()
+        assert not (bundled / "update.sh").exists()
+        assert b"YAVER_UPDATE_BODY" in (bundled / "update.bat").read_bytes()
+    else:
+        assert (bundled / "update.sh").is_file()
+        assert not (bundled / "update.bat").exists()
+        assert (bundled / "update.sh").stat().st_mode & 0o111
+
+
 def test_tag_workflows_share_release_notes():
     notes = ROOT / "packaging" / "RELEASE_NOTES.md"
     changelog = ROOT / "CHANGELOG.md"
@@ -344,6 +364,8 @@ def test_start_here_does_not_claim_opencode_is_bundled():
     assert "yaver start" in text or "yaver.exe start" in text
     assert "opencode_configs" not in text
     assert "install-agents" in text
+    assert "update.bat" in text
+    assert "update.sh" in text
     assert "opencoderman/" in text
     assert "agents/" in text
     assert "skills/" in text

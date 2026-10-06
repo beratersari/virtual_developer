@@ -208,11 +208,19 @@ def assert_payload(
             errors.append("missing install-agents.bat")
         if (root / "install-agents.sh").is_file():
             errors.append("Windows zip must not include install-agents.sh")
+        if not (root / "update.bat").is_file():
+            errors.append("missing update.bat")
+        if (root / "update.sh").is_file():
+            errors.append("Windows zip must not include update.sh")
     else:
         if not (root / "install-agents.sh").is_file():
             errors.append("missing install-agents.sh")
         if (root / "install-agents.bat").is_file():
             errors.append("Linux zip must not include install-agents.bat")
+        if not (root / "update.sh").is_file():
+            errors.append("missing update.sh")
+        if (root / "update.bat").is_file():
+            errors.append("Linux zip must not include update.bat")
         if max_glibc is not None or require_glibc_check:
             errors.extend(
                 assert_linux_glibc(

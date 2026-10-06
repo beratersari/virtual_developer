@@ -406,7 +406,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Jobs, schedules, session binds, issue state, and the queue live in ``{YAVER_DATA_DIR}/yaver.sqlite`` (indexed columns plus a JSON document, including deliveries). A first start imports leftover ``job_*.json``, ``sched_*.json``, ``osb_*.json``, ``q_*.json``, and issue-state JSON once, then deletes those files. Later starts do not scan them. Do not put plans, session logs, or clones in SQL.
 - Saved projects and repo sets live in ``{YAVER_DATA_DIR}/saved_catalog.json``. That file is the copy the dashboard reads and returns on ``GET /api/settings``, ``PATCH /api/settings``, and ``GET /api/dashboard``. A save of any other setting does not rewrite it. ``runtime_settings.json`` still receives a backup copy of the same two keys. Opening Settings, Scheduled, or the dashboard does not call GitLab or Azure. **Reload from tokens** is the import. Do not hide the stored list until that button. Do not put the catalog in SQLite.
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (saved for `yaver update`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -874,6 +874,8 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |
 | `packaging/pyinstaller/` | Frozen `yaver` / `yaver.exe` spec, versions, build + CI |
+| `packaging/windows/update.bat` | Windows update. Run it in the install folder |
+| `packaging/linux/update.sh` | Ubuntu update. Run it in the install folder |
 
 ---
 
@@ -885,7 +887,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), `update_helper.py` + `.ps1` + `.sh` (LAN self-update; see §12) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), one update script next to the exe (`update.bat` on Windows, `update.sh` on Linux; see §12) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
@@ -895,23 +897,29 @@ Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists
 
 ---
 
-## 12. LAN self-update (intentional)
+## 12. LAN update scripts (intentional)
 
 Operators publish Windows and Ubuntu zips on a separate release site
-(its own repository). Yaver stores that site’s address as `RELEASE_HOST`
-and `RELEASE_PORT`. The operator sets them in `.env` or with
-`yaver update --host … --port …`. The dashboard has no Update control.
-Run `yaver update` or `yaver --update` (`yaver.exe` on Windows). If the
-dashboard port is open, the command stops the process listening on that
-port and waits until the port closes. The helper still does not replace
-files while that port is open. On Windows the executable records its own
-pid and exits before the helper moves `_internal`. Windows keeps that
-folder locked for the whole life of `yaver.exe`. A plan pid of 0 makes
-the helper move the folder while this process is still open, and the
-move is denied. A source install can keep this process open and use pid
-0, because the running interpreter is not inside `_internal`. The client
-calls `GET /api/latest?platform=…` and downloads `GET /download/{platform}`
-on `http://{host}:{port}` only. It does not follow redirects.
+(its own repository). The install `.env` stores that site as `RELEASE_HOST`
+and `RELEASE_PORT`. The dashboard can save those two keys into `.env`.
+The dashboard has no Update control.
+
+The operator updates an executable install by running the script in that
+folder:
+
+- Windows: `update.bat`
+- Ubuntu: `chmod 755 update.sh`, then `./update.sh`
+
+`yaver update`, `yaver --update`, and `yaver.exe --update` only print
+that instruction. They do not download a package and they do not replace
+files. `--host` and `--port` are accepted so an old command line still
+exits, and they do not rewrite `.env`.
+
+The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env` (the last
+value wins). It calls `GET /api/latest?platform=…` and
+`GET /download/{platform}` on `http://{host}:{port}` only. It does not
+follow redirects. `curl --noproxy` keeps a corporate proxy off that LAN
+host. The sha256 must match before anything is stopped or replaced.
 
 | Platform id | Machine |
 |-------------|---------|
@@ -921,36 +929,58 @@ on `http://{host}:{port}` only. It does not follow redirects.
 | `ubuntu-22.04` | Ubuntu 22.04 |
 | `ubuntu-24.04` | Ubuntu 24.04 |
 
-`yaver update` downloads and checks the sha256 while that command is
-still the running process. A source install then waits while a helper
-copied **outside** the install (`src/update_helper.py`, or the `.ps1` /
-`.sh` when a frozen build has no Python outside that folder) swaps the
-files. On Windows the executable exits after that helper is running, and
-the helper swaps `_internal` only after that pid is gone. The helper
-keeps printing in the same window. ``cmd.exe`` waits for ``yaver.exe``
-only, so the prompt can return before the copy finishes. The operator
-waits for the line that begins with ``Updated to``, then starts Yaver.
-The helper does **not** start Yaver.
-On a source install the window stays open until the copy finishes. The
-operator starts ``yaver.exe`` or ``yaver`` after the helper prints that the
-files are in place. The install folder stays where it is, so a
-command prompt sitting in that folder does not block the copy. Old files
-move beside it. An existing `.env` is left as it is. A frozen package `.env` is copied only when the install has none. The data directory is not inside the install, so jobs, settings, and plans stay. The extractor keeps Unix
-permission bits from the zip. A `yaver` or `yaver.exe` member with no
-mode is marked executable. A failed copy puts the previous files back
-and does not start Yaver.
+Ubuntu comes from `/etc/os-release` (`ID=ubuntu` and `VERSION_ID`
+18.04, 20.04, 22.04, or 24.04). `YAVER_UPDATE_PLATFORM` overrides that
+with one of those four ids.
+
+When `VERSION` in the folder already matches the published version
+(text before `+`), the script exits 0 and does not stop Yaver.
+
+Otherwise it stops `yaver.exe` (Windows) or `yaver` (Linux) whose
+executable path is this folder, waits until that process is gone, then
+replaces each top-level name from the package. Directories such as
+`_internal` and `opencoderman` are replaced as a whole, so files removed
+upstream do not stay behind. `install-agents.bat` or `install-agents.sh`,
+`.env.example`, `VERSION`, and the executable are replaced. A name that
+is not in the package stays, including a data folder kept beside the exe.
+
+These stay:
+
+- The operator's `.env`. The package `.env` is copied only when the
+  folder has none. The script requires an existing `.env` because that
+  file holds the release address.
+- The script the operator ran (`update.bat` or `update.sh`). A later
+  package can contain a newer script; this run does not overwrite the
+  file it is executing. An install that does not have the script yet
+  (published builds through 0.9.74) needs one manual copy: download the
+  zip, copy `update.bat` or `update.sh` into the Yaver folder, then run it.
+
+The script does not start Yaver. Success prints a line that begins with
+`Updated to`. Then the operator starts `yaver.exe` or `./yaver`.
+
+A git checkout (a `.git` entry in the folder) and a drive root are
+refused before any download. The package must be a frozen executable
+(`yaver.exe` or `yaver` next to `_internal`). One wrapping folder is
+flattened. A member whose path contains `..` or is absolute is refused.
+A failed copy moves the previous files back.
+
+`src/self_update.py` and `src/update_helper.py` / `.ps1` / `.sh` remain
+in the repo so older tests still describe the retired in-process swap.
+They are not the operator path, and the frozen payload does not ship
+them. Do not call `update_stopped_install` from `cli.py`.
 
 **Do not “fix”** any of these:
 
-- Putting Check or Update back on the dashboard. Apply is `yaver update`. The command stops a dashboard that is already listening, and the helper does not start Yaver.
-- Having the helper start Yaver or open the dashboard. The operator starts it after the files are in place.
-- Refusing a folder that contains `.git`. That is a checkout, not an install.
-- Keeping `.env` and `.venv` when applying an install zip. Replacing `.venv` locks the interpreter that is doing the swap. Rewriting an existing `.env`, including with the same bytes, replaces the operator's file.
-- Replacing an executable install only with an executable zip (`yaver` / `yaver.exe` plus `_internal`), and an install zip only with a tree that has `src/daemon.py` and `VERSION`.
-- Detaching the helper before shutdown. `stop()` must not take the helper down with the daemon.
-- Setting plan pid to 0 for a Windows executable update. That tells the helper to move `_internal` while `yaver.exe` still has it mapped.
-- Running the Windows frozen helper inside `yaver.exe` and waiting for it. The executable has to exit before the move.
-- `verify=False` on the release-server client (same rule as every other outbound client).
-- Treating a drive root as an install folder.
+- Putting the download or the file swap back inside `yaver.exe` / `yaver update`.
+- Putting Check or Update back on the dashboard.
+- Starting Yaver at the end of `update.bat` or `update.sh`.
+- Overwriting the operator's `.env`.
+- Overwriting the running `update.bat` or `update.sh`.
+- Killing every `yaver.exe` on the machine. Stop only the process whose path is this install folder.
+- Following redirects, or using a scheme other than `http` for the release site.
+- Updating a folder that contains `.git`, or a drive root.
+- Replacing files when the checksum does not match.
 
-Proof lives in `tests/test_self_update.py` and `tests/test_update_e2e.py`. The helper is stdlib-only so the copy outside the install still runs after `src/` is replaced.
+Proof: `tests/test_update_scripts.py` runs the scripts against a local
+release server. `tests/test_self_update.py` still covers the retired
+library and asserts the CLI does not enter it.

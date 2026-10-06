@@ -1345,55 +1345,54 @@ def test_stopped_update_uses_the_saved_address(monkeypatch):
     assert saved == {"host": "10.4.5.6", "port": 8090}
 
 
-def test_cli_update_prints_a_stop_error(monkeypatch):
+def test_cli_update_points_at_update_bat(monkeypatch):
     from click.testing import CliRunner
 
     from cli import cli
 
     def refuse(*_args, **_kwargs):
-        raise UpdateError("Yaver is still running.")
+        raise AssertionError("yaver update must not download or replace files")
 
+    monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr("src.self_update.update_stopped_install", refuse)
     result = CliRunner().invoke(cli, ["--update"])
-    text = result.output + (result.stderr or "")
-    assert result.exit_code == 1
-    assert "Yaver is still running." in text
+    assert result.exit_code == 0
+    assert "Run update.bat in this folder." in result.output
+    assert ".env" in result.output
+    assert "Start yaver.exe when the script finishes." in result.output
 
 
-def test_cli_update_passes_the_address_and_closes(monkeypatch):
+def test_cli_update_ignores_host_and_does_not_apply(monkeypatch):
     from click.testing import CliRunner
 
     from cli import cli
 
-    seen: dict[str, object] = {}
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("yaver update must not download or replace files")
 
-    def run(host, port, *, shutdown, report=None):
-        seen["host"] = host
-        seen["port"] = port
-        if report is not None:
-            report("Downloading 0.9.80.")
-        shutdown()
-
-    monkeypatch.setattr("src.self_update.update_stopped_install", run)
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr("src.self_update.update_stopped_install", refuse)
     result = CliRunner().invoke(cli, ["update", "--host", "10.2.3.4", "--port", "8090"])
     assert result.exit_code == 0
-    assert seen == {"host": "10.2.3.4", "port": 8090}
-    assert "Downloading 0.9.80." in result.output
+    assert "Run update.bat in this folder." in result.output
+    assert "10.2.3.4" not in result.output
+    assert "8090" not in result.output
 
 
-def test_cli_update_is_quiet_when_the_install_is_current(monkeypatch):
+def test_cli_update_points_at_update_sh(monkeypatch):
     from click.testing import CliRunner
 
     from cli import cli
 
-    def current(*_args, **_kwargs):
-        raise UpdateError("This install is already 0.9.72.")
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("yaver update must not download or replace files")
 
-    monkeypatch.setattr("src.self_update.update_stopped_install", current)
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr("src.self_update.update_stopped_install", refuse)
     result = CliRunner().invoke(cli, ["update"])
-    text = result.output + (result.stderr or "")
     assert result.exit_code == 0
-    assert "already 0.9.72" in text
+    assert "Run ./update.sh in this folder." in result.output
+    assert "Start ./yaver when the script finishes." in result.output
 
 
 def test_powershell_helper_replaces_an_executable_and_keeps_env(tmp_path: Path):

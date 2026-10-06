@@ -410,15 +410,18 @@ CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: dow
 
 ### Update on the office network
 
-A separate release site holds the Windows package and one package for each Ubuntu version. Run `yaver update` (Windows: `yaver.exe update` or `yaver.exe --update`). If the dashboard is already open, the command stops that process first.
+A separate release site holds the Windows package and one package for each Ubuntu version. Update from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`.
 
-The server address is `RELEASE_HOST` and `RELEASE_PORT` in `.env`. The first run can set them:
+Set the site address in `.env`:
 
 ```text
-yaver update --host 192.168.1.20 --port 8090
+RELEASE_HOST=192.168.1.20
+RELEASE_PORT=8090
 ```
 
-The command downloads the package for this computer and replaces this install. A source install waits until the copy finishes. On Windows, `yaver.exe` records its own process id and exits before the helper moves `_internal`. The helper waits until that process has closed and keeps printing in the same window. The command prompt can return before the copy finishes. Wait for the line that begins with Updated to, then start Yaver. An existing `.env` file is left as it is, and the data folder stays. A git checkout is left alone. The published zip has to be the same kind this copy already is: the executable folder, or the full install zip. If the dashboard port is open, the command stops the process listening there and then downloads. Each step is printed in the terminal.
+The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
+
+If this folder does not have `update.bat` or `update.sh` yet, download the zip once, copy that script into the Yaver folder, and run it there. `yaver update` and `yaver.exe --update` print this instruction and leave the files as they are.
 
 ---
 
