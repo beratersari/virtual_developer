@@ -27,13 +27,39 @@ def test_sidebar_health_returns_the_serve_status(monkeypatch):
             "message": "Agents are saved. OpenCode will reload when KAN-1 finishes.",
         },
     )
+    monkeypatch.setattr(
+        "src.opencode_serve_supervisor.probe_healthy",
+        lambda url="": False,
+    )
     client = TestClient(create_dashboard_app())
     response = client.get("/api/opencode-serve")
     assert response.status_code == 200, response.text
     assert response.json() == {
         "status": "deferred",
         "message": "Agents are saved. OpenCode will reload when KAN-1 finishes.",
+        "healthy": False,
     }
+
+
+def test_sidebar_health_reports_a_healthy_serve_that_is_waiting_to_reload(monkeypatch):
+    from src.opencode_serve_supervisor import supervisor
+
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: {
+            "status": "deferred",
+            "message": "Agents are saved. OpenCode will reload when KAN-1 finishes.",
+        },
+    )
+    monkeypatch.setattr(
+        "src.opencode_serve_supervisor.probe_healthy",
+        lambda url="": True,
+    )
+    client = TestClient(create_dashboard_app())
+    body = client.get("/api/opencode-serve").json()
+    assert body["status"] == "deferred"
+    assert body["healthy"] is True
 
 
 def test_sidebar_health_does_not_report_a_failed_read_as_healthy(monkeypatch):
@@ -49,6 +75,7 @@ def test_sidebar_health_does_not_report_a_failed_read_as_healthy(monkeypatch):
     body = response.json()
     assert body["status"] == "unavailable"
     assert body["status"] != "ready"
+    assert body["healthy"] is False
     assert "unavailable" in body["message"].lower()
 
 
@@ -59,6 +86,7 @@ def test_sidebar_health_rejects_a_status_that_is_not_a_report(monkeypatch):
     client = TestClient(create_dashboard_app())
     body = client.get("/api/opencode-serve").json()
     assert body["status"] == "unavailable"
+    assert body["healthy"] is False
     assert "unavailable" in body["message"].lower()
 
 

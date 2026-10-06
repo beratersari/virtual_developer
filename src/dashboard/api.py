@@ -1510,12 +1510,20 @@ def create_dashboard_app(
             return {
                 "status": "unavailable",
                 "message": "OpenCode serve status is unavailable.",
+                "healthy": False,
             }
         status = str(serve.get("status") or "").strip().lower() or "unavailable"
         message = str(serve.get("message") or "").strip()
         if not message and status == "unavailable":
             message = "OpenCode serve status is unavailable."
-        return {"status": status, "message": message}
+        # A deferred reload keeps the current process. Say it is healthy
+        # only after /global/health answers. One miss stays "reload waiting".
+        healthy = status in {"ready", "started", "reloaded"}
+        if status == "deferred":
+            from src.opencode_serve_supervisor import probe_healthy
+
+            healthy = bool(probe_healthy())
+        return {"status": status, "message": message, "healthy": healthy}
 
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
