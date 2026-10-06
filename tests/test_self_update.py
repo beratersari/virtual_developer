@@ -176,6 +176,57 @@ def test_source_apply_keeps_env_and_venv(tmp_path: Path):
     assert (install / "src" / "keep.py").read_text(encoding="utf-8") == "new-keep"
     assert (install / "VERSION").read_text(encoding="utf-8").startswith("0.9.72")
     assert (install / "notes.txt").read_text(encoding="utf-8") == "leave me"
+    assert not (tmp_path / "app.source-backup").exists()
+
+
+def test_source_apply_puts_the_tree_back_when_a_copy_fails(tmp_path: Path, monkeypatch):
+    """A later copy must not leave removed files gone or a half-written file."""
+    import shutil
+
+    install = tmp_path / "app"
+    (install / "src").mkdir(parents=True)
+    (install / "src" / "old.py").write_text("old", encoding="utf-8")
+    (install / "src" / "keep.py").write_text("old-keep", encoding="utf-8")
+    (install / ".env").write_bytes(b"TOKEN=keep-me\n")
+    (install / "notes.txt").write_text("leave me", encoding="utf-8")
+    staging = tmp_path / "stage"
+    (staging / "src").mkdir(parents=True)
+    (staging / "src" / "keep.py").write_text("new-keep", encoding="utf-8")
+    (staging / "VERSION").write_text("0.9.72\n", encoding="utf-8")
+    real_copy = shutil.copy2
+    calls = {"n": 0}
+
+    def fail_second(source, dest, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("disk full")
+        return real_copy(source, dest, *args, **kwargs)
+
+    monkeypatch.setattr("src.update_helper.shutil.copy2", fail_second)
+    with pytest.raises(OSError, match="disk full"):
+        apply_source_tree(staging, install)
+    assert (install / "src" / "old.py").read_text(encoding="utf-8") == "old"
+    assert (install / "src" / "keep.py").read_text(encoding="utf-8") == "old-keep"
+    assert not (install / "VERSION").exists()
+    assert (install / ".env").read_bytes() == b"TOKEN=keep-me\n"
+    assert (install / "notes.txt").read_text(encoding="utf-8") == "leave me"
+    assert not (tmp_path / "app.source-backup").exists()
+
+
+def test_source_apply_refuses_a_leftover_backup(tmp_path: Path):
+    install = tmp_path / "app"
+    (install / "src").mkdir(parents=True)
+    (install / "src" / "keep.py").write_text("old-keep", encoding="utf-8")
+    staging = tmp_path / "stage"
+    (staging / "src").mkdir(parents=True)
+    (staging / "src" / "keep.py").write_text("new-keep", encoding="utf-8")
+    backup = tmp_path / "app.source-backup"
+    backup.mkdir()
+    (backup / "keep.txt").write_text("saved", encoding="utf-8")
+    with pytest.raises(UpdateError, match="source backup"):
+        apply_source_tree(staging, install)
+    assert (backup / "keep.txt").read_text(encoding="utf-8") == "saved"
+    assert (install / "src" / "keep.py").read_text(encoding="utf-8") == "old-keep"
 
 
 def test_frozen_apply_keeps_env_and_moves_the_old_tree(tmp_path: Path):

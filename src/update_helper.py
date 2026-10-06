@@ -158,30 +158,73 @@ def _emit(note: Callable[[str], None] | None, message: str) -> None:
         return
 
 
+def _source_backup(install: Path) -> Path:
+    return install.parent / f"{install.name}.source-backup"
+
+
+def _stash(path: Path, install: Path, backup_root: Path) -> Path:
+    """Move *path* under *backup_root*, keeping its path relative to *install*."""
+    dest = backup_root / path.relative_to(install)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        raise UpdateError(f"Could not save {path.name} before replacing it.")
+    rename_retry(path, dest)
+    return dest
+
+
+def _incoming(dest: Path, install: Path, backup_root: Path) -> Path:
+    tmp = backup_root / ".incoming" / dest.relative_to(install)
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    if tmp.exists() or tmp.is_symlink():
+        if tmp.is_dir() and not tmp.is_symlink():
+            _rmtree(tmp)
+        else:
+            tmp.unlink()
+    return tmp
+
+
 def apply_source_tree(
     staging: Path,
     install: Path,
     *,
     note: Callable[[str], None] | None = None,
 ) -> None:
-    """Copy a full install zip onto *install*. Keep ``.env`` and ``.venv``."""
+    """Copy a full install zip onto *install*. Keep ``.env`` and ``.venv``.
+
+    A failed copy puts the saved names back. The new bytes land in a side
+    file first, so a short write does not replace the file the operator has.
+    """
     install = assert_install_dir(install)
     _refuse_checkout(install)
     assert_no_symlinks(staging)
     if not staging.is_dir():
         raise UpdateError("The staged release is missing.")
+    backup_root = _source_backup(install)
+    if backup_root.exists():
+        raise UpdateError(
+            "A previous update left a source backup beside Yaver. "
+            "Move that folder back before updating again."
+        )
+    undo: list[tuple[str, Path, Path | None]] = []
     _emit(note, f"source swap install={install} staging={staging}")
-    for child in staging.iterdir():
-        if child.name in _PRESERVE:
-            _emit(note, f"kept {child.name}")
-            continue
-        dest = install / child.name
-        if child.is_dir():
-            _mirror_dir(child, dest)
-        else:
-            _copy_file(child, dest)
-        _emit(note, f"copied {child.name}")
-    _emit(note, "source swap finished")
+    try:
+        for child in staging.iterdir():
+            if child.name in _PRESERVE:
+                _emit(note, f"kept {child.name}")
+                continue
+            dest = install / child.name
+            if child.is_dir() and not child.is_symlink():
+                _mirror_dir(child, dest, install, backup_root, undo)
+            else:
+                _copy_file(child, dest, install, backup_root, undo)
+            _emit(note, f"copied {child.name}")
+        _emit(note, "source swap finished")
+    except Exception:
+        _emit(note, "restoring previous files")
+        _restore_source(undo, backup_root)
+        raise
+    if backup_root.exists():
+        _rmtree(backup_root)
 
 
 def _env_value(env_bytes: bytes | None, name: str) -> str:
@@ -422,29 +465,85 @@ def assert_no_symlinks(root: Path) -> None:
                 raise UpdateError("Refusing a symlink in the release.")
 
 
-def _mirror_dir(source: Path, dest: Path) -> None:
-    if dest.exists() and not dest.is_dir():
-        dest.unlink()
-    dest.mkdir(parents=True, exist_ok=True)
+def _mirror_dir(
+    source: Path,
+    dest: Path,
+    install: Path,
+    backup_root: Path,
+    undo: list[tuple[str, Path, Path | None]],
+) -> None:
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        undo.append(("restore", dest, _stash(dest, install, backup_root)))
+    created = False
+    if not dest.exists():
+        dest.mkdir(parents=True)
+        created = True
+        undo.append(("delete", dest, None))
     incoming = {child.name for child in source.iterdir()}
     for existing in list(dest.iterdir()):
         if existing.name in incoming:
             continue
-        if existing.is_dir() and not existing.is_symlink():
-            _rmtree(existing)
-        else:
-            existing.unlink()
+        undo.append(("restore", existing, _stash(existing, install, backup_root)))
     for child in source.iterdir():
         target = dest / child.name
         if child.is_dir() and not child.is_symlink():
-            _mirror_dir(child, target)
+            _mirror_dir(child, target, install, backup_root, undo)
         else:
-            _copy_file(child, target)
+            _copy_file(child, target, install, backup_root, undo)
 
 
-def _copy_file(source: Path, dest: Path) -> None:
+def _copy_file(
+    source: Path,
+    dest: Path,
+    install: Path,
+    backup_root: Path,
+    undo: list[tuple[str, Path, Path | None]],
+) -> None:
+    """Write *source* beside the install, then move it onto *dest*.
+
+    The previous file is renamed aside first only after the new bytes are
+    complete, and it is recorded so a later failure can put it back.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, dest)
+    tmp = _incoming(dest, install, backup_root)
+    shutil.copy2(source, tmp)
+    if dest.exists() or dest.is_symlink():
+        undo.append(("restore", dest, _stash(dest, install, backup_root)))
+    else:
+        undo.append(("delete", dest, None))
+    os.replace(tmp, dest)
+
+
+def _restore_source(
+    undo: list[tuple[str, Path, Path | None]],
+    backup_root: Path,
+) -> None:
+    """Put a partial source copy back. Leave the backup if a move fails."""
+    failed = False
+    for kind, dest, backup in reversed(undo):
+        try:
+            if kind == "delete":
+                if not dest.exists() and not dest.is_symlink():
+                    continue
+                if dest.is_dir() and not dest.is_symlink():
+                    _rmtree(dest)
+                else:
+                    dest.unlink()
+                continue
+            if backup is None or not (backup.exists() or backup.is_symlink()):
+                failed = True
+                continue
+            if dest.exists() or dest.is_symlink():
+                if dest.is_dir() and not dest.is_symlink():
+                    _rmtree(dest)
+                else:
+                    dest.unlink()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(backup, dest)
+        except OSError:
+            failed = True
+    if not failed and backup_root.exists():
+        _rmtree(backup_root)
 
 
 def rename_retry(source: Path, dest: Path, attempts: int = 40) -> None:
