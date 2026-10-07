@@ -150,7 +150,7 @@ Mode: plan
 |-------|---------|
 | `@yaver /yaver login için test ekle` | İş başlar. İstem yorumun geri kalanıdır. |
 | `@yaver` (`/yaver` yok) | **O konuda** kullanım notu. İş yok. |
-| `@yaver /ask …` veya `@yaver /review …` | Kod incelemesi başlar (`/ask` takip sorusu). Creasy ile aynı kurallar: `/review`, `/ask`, botu reviewer ata, veya bot zaten reviewer iken MR aç. Yeni commit yeniden incelemez. İtme veya yeni MR yok. |
+| `@yaver /ask …` veya `@yaver /review …` | Kod incelemesi başlar (`/ask` takip sorusu). Creasy ile aynı kurallar: `/review`, `/ask`, botu reviewer ata, veya bot zaten reviewer iken MR aç. Yeni commit yeniden incelemez. İtme veya yeni MR yok. Bitmiş `/review` veya `/ask` reviewed olarak işaretlenir; böylece yeniden inceleme isteme düğmesi çıkar. Boş bulgulu `/review` birleştirme isteğini onaylar ve notu yine yazar. `/ask` özeti yazar, onayı `/review` bırakır. Bitmiş `/yaver` yanıtı da incelemeyi reviewed yapar. |
 
 ### İş hangi kayda bağlanır
 
@@ -364,7 +364,7 @@ OpenCode TUI: proje klasöründen `./start-opencode.sh` (`$HOME`’dan değil).
 
 Yaver ile OpenCode serve aynı kullanıcı olmalıdır. Daemon git klonunu oluşturur. OpenCode serve o klona yazar ve commit atar. Transcript sekmesi bu sürecin sohbet veritabanını okur. 8080 kapısı root gerektirmez.
 
-Daemon, `OPENCODE_SERVE_URL` ayakta değilse `opencode serve` sürecini her zaman aynı kullanıcı olarak başlatır ve bu çocuk süreç kapanırsa yeniden başlatır. Sağlık kontrolü geçen bir serve’e dokunmaz. Kaçırılan bir sağlık yoklaması, oturumu açılmış bir iş varken hâlâ dinleyen süreci durdurmaz. OpenCode’a henüz ulaşmamış bir iş, serve cevap vermezse birkaç saniyede biter ve executing durumundan çıkar; sessiz süreç bundan sonra değiştirilebilir. Bu açılış kontrolü ajan süre bütçesini kullanmaz. Serve yeniden yüklenirken gelen iş, o yüklemenin bitmesini bekler. Bir ajanı kaydetmek veya oluşturmak kataloğu OpenCode ve Claude ev dizinlerine kopyalar ve çalışan iş yoksa serve’i yeniden yükler. Kuyrukta bekleyen işler, yeniden yükleme beklerken, sürerken veya hata verince kuyrukta kalır. Yeniden yükleme başarılı olduktan sonra başlarlar. Hata, kayıtlı ajanların henüz yüklenmediği anlamına gelir.
+Daemon, `OPENCODE_SERVE_URL` ayakta değilse `opencode serve` sürecini her zaman aynı kullanıcı olarak başlatır ve bu çocuk süreç kapanırsa yeniden başlatır. Sağlık kontrolü geçen bir serve’e dokunmaz. Kaçırılan bir sağlık yoklaması, oturumu açılmış bir iş varken hâlâ dinleyen süreci durdurmaz. OpenCode’a henüz ulaşmamış bir iş, serve cevap vermezse birkaç saniyede biter ve executing durumundan çıkar; sessiz süreç bundan sonra değiştirilebilir. Bu açılış kontrolü ajan süre bütçesini kullanmaz. Serve yeniden yüklenirken gelen iş, o yüklemenin bitmesini bekler. Sync, kataloğu OpenCode ve Claude ev dizinlerine kopyalar ve çalışan iş yoksa serve’i yeniden yükler. Bir ajanı kaydetmek veya oluşturmak kataloğu yazar ve çalışan süreci olduğu gibi bırakır. Kuyrukta bekleyen işler, yeniden yükleme beklerken, sürerken veya hata verince kuyrukta kalır. Yeniden yükleme başarılı olduktan sonra başlarlar. Hata, kayıtlı ajanların henüz yüklenmediği anlamına gelir.
 
 `User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/.local/share/yaver/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
 
@@ -408,15 +408,18 @@ CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahib
 
 ### Ofis ağında güncelleme
 
-Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Yaver’i durdurun, sonra `yaver update` çalıştırın (Windows: `yaver.exe update` veya `yaver.exe --update`).
+Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Güncellemeyi Yaver klasöründeki betik yapar. Windows’ta `update.bat`, Ubuntu’da `./update.sh` çalıştırın.
 
-Sunucu adresi `.env` içindeki `RELEASE_HOST` ve `RELEASE_PORT` değerleridir. İlk çalıştırmada şöyle verilebilir:
+Site adresini `.env` içine yazın:
 
 ```text
-yaver update --host 192.168.1.20 --port 8090
+RELEASE_HOST=192.168.1.20
+RELEASE_PORT=8090
 ```
 
-Komut bu bilgisayara uyan paketi indirir, kurulumu değiştirir ve Yaver’i yeniden başlatır. `.env` dosyası ve veri klasörü durur. Bir git çalışma kopyasına dokunulmaz. Yayınlanan zip, bu kopyanın türüyle aynı olmalıdır: çalıştırılabilir klasör ya da tam kurulum zip’i. Yaver zaten çalışıyorsa komut indirmeden durur.
+Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
+
+Bu klasörde `update.bat` veya `update.sh` yoksa zip’i bir kez indirin, betiği Yaver klasörüne kopyalayın ve orada çalıştırın. `yaver update` ve `yaver.exe --update` bu yönergeyi yazar ve dosyaları olduğu gibi bırakır.
 
 ---
 

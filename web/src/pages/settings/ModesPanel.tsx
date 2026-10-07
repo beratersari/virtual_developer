@@ -168,9 +168,9 @@ export function ModesPanel({ modes, onChange }: Props) {
     if (!editor || editor.loading || editor.saving) return
     setEditor({ ...editor, saving: true, error: null })
     try {
-      const saved = await saveOpencodeAgent(editor.name, editor.text)
+      await saveOpencodeAgent(editor.name, editor.text)
       await reloadAgents()
-      noteServe(`Saved ${editor.name}.`, saved.serve)
+      noteServe(`Saved ${editor.name}.`)
       closeEditor()
     } catch (e) {
       setEditor({
@@ -271,7 +271,7 @@ export function ModesPanel({ modes, onChange }: Props) {
         saving: false,
         error: null,
       })
-      noteServe(`Created ${created.name}.`, created.serve)
+      noteServe(`Created ${created.name}.`)
     } catch (e) {
       const text = e instanceof Error ? e.message : 'Could not create agent'
       const match = text.match(/^Agent (.+) already exists$/)
@@ -293,7 +293,7 @@ export function ModesPanel({ modes, onChange }: Props) {
       )}
       <div className="text-sm font-semibold text-text">Modes</div>
       <p className="text-xs text-text-muted">
-        Edit the agent for each mode. Saving copies the files and reloads
+        Edit the agent for each mode. Sync copies the files and reloads
         OpenCode when no job is running. Plan does not push. Build and test
         push and open a merge request. In the issue, write{' '}
         <span className="font-mono">Mode: name</span>.
@@ -375,14 +375,6 @@ export function ModesPanel({ modes, onChange }: Props) {
           onClick={() => syncAgents()}
         >
           {syncing ? 'Syncing…' : 'Sync'}
-        </button>
-        <button
-          type="button"
-          className="vd-btn vd-btn-secondary"
-          disabled={creating || syncing || agents.length === 0}
-          onClick={() => syncAgents()}
-        >
-          {syncing ? 'Reloading…' : 'Reload OpenCode'}
         </button>
       </div>
       {editOpen && (

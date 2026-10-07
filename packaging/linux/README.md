@@ -39,7 +39,7 @@ Extract the release zip or tar.gz. The install scripts sit next to `vendor/` and
 ./start-backend.sh
 ```
 
-Three more release files, `yaver-opencode-linux-x64-*.zip`, `yaver-claude-linux-x64-*.zip`, and `yaver-codex-linux-x64-*.zip`, each hold one CLI and its host config. `install-opencode.sh`, `install-claude.sh`, and `install-codex.sh` find the binary already on PATH, rename it with the date at the end, and put the new binary in that directory. Agents stay in the product zip.
+Three more release files, `yaver-opencode-linux-x64-*.zip`, `yaver-claude-linux-x64-*.zip`, and `yaver-codex-linux-x64-*.zip`, each hold one CLI and its host config. The filename ends with that tool's version, for example `yaver-opencode-linux-x64-1.18.10.zip`. `install-opencode.sh`, `install-claude.sh`, and `install-codex.sh` find the binary already on PATH, rename it with the date at the end, and put the new binary in that directory. Agents stay in the product zip.
 
 Without that zip, OpenCode falls back to `opencoderman/packaging/build_artifact.py --in-place` (official GitHub release). Dashboard still uses PyPI when wheels are missing.
 

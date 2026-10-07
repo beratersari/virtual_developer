@@ -433,6 +433,89 @@ class GitlabClient:
             logger.error(f"GitLab MR note error: {e}")
             return None
 
+    def publish_reviewer_state(
+        self,
+        *,
+        project: Any,
+        mr_iid: int,
+        state: str = "reviewed",
+    ) -> bool:
+        """Mark this user's review finished.
+
+        ``POST .../draft_notes/bulk_publish`` with ``reviewer_state``
+        sets the sidebar state even when there are no draft notes.
+        ``reviewed`` is the completed review. It does not approve.
+        The author can then re-request the review.
+        """
+        if not self.api_base:
+            return False
+        try:
+            iid = int(mr_iid)
+        except (TypeError, ValueError):
+            return False
+        if iid <= 0:
+            return False
+        review_state = (state or "").strip()
+        if review_state not in {"reviewed", "requested_changes"}:
+            logger.warning(
+                f"GitLab review state {review_state!r} is not a completed state"
+            )
+            return False
+        ident = self._project_ident(project)
+        url = (
+            f"{self._project_url(ident)}/merge_requests/{iid}"
+            "/draft_notes/bulk_publish"
+        )
+        try:
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                resp = client.post(
+                    url,
+                    headers=self._headers(),
+                    json={"reviewer_state": review_state},
+                )
+            if resp.status_code in (200, 201, 204):
+                logger.info(
+                    f"GitLab review completed {project}!{iid} state={review_state}"
+                )
+                return True
+            logger.warning(
+                f"GitLab review complete failed ({resp.status_code}) "
+                f"{project}!{iid}: {(resp.text or '')[:400]}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"GitLab review complete error {project}!{iid}: {e}")
+            return False
+
+    def approve_merge_request(self, *, project: Any, mr_iid: int) -> bool:
+        """Approve the merge request. Does not post a note."""
+        if not self.api_base:
+            return False
+        try:
+            iid = int(mr_iid)
+        except (TypeError, ValueError):
+            return False
+        if iid <= 0:
+            return False
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{iid}/approve"
+        try:
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                resp = client.post(url, headers=self._headers(), json={})
+            if resp.status_code in (200, 201):
+                logger.info(f"Approved GitLab MR {project}!{iid}")
+                return True
+            logger.warning(
+                f"GitLab approve failed ({resp.status_code}) "
+                f"{project}!{iid}: {(resp.text or '')[:400]}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"GitLab approve error {project}!{iid}: {e}")
+            return False
+
     def get_mr_discussion(
         self,
         *,

@@ -150,7 +150,7 @@ Set `GITLAB_WEBHOOK_SECRET` to the same secret GitLab sends. Set `GITLAB_TRIGGER
 |---------|----------------|
 | `@yaver /yaver add tests for login` | Starts a job. Prompt is the rest of the comment. |
 | `@yaver` (no `/yaver`) | Usage note in **that thread**. No job. |
-| `@yaver /ask …` or `@yaver /review …` | Starts a code review (or a follow-up on `/ask`). Same rules as Creasy: `/review`, `/ask`, assign the bot as reviewer, or open an MR that already lists the bot. New commits do not re-review. No push or new MR. |
+| `@yaver /ask …` or `@yaver /review …` | Starts a code review (or a follow-up on `/ask`). Same rules as Creasy: `/review`, `/ask`, assign the bot as reviewer, or open an MR that already lists the bot. New commits do not re-review. No push or new MR. A finished `/review` or `/ask` is marked reviewed, so Re-request review appears. An empty `/review` findings list approves the merge request and still posts the note. `/ask` posts the overview and leaves approval to `/review`. A finished `/yaver` reply marks the review reviewed too. |
 
 ### Which ticket the job binds to
 
@@ -366,7 +366,7 @@ OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`)
 
 Yaver and OpenCode serve have to be the same user. The daemon creates the git clone. OpenCode serve is the process that writes and commits in that clone, and the Transcript tab reads that process's chat database. Port 8080 does not need root.
 
-The daemon always starts `opencode serve` when `OPENCODE_SERVE_URL` is down, as that same user, and starts it again if that child exits. A serve that is already healthy is left running. A missed health check does not stop a process that is still listening while a job already has a session. A job that has not reached OpenCode fails within a few seconds when serve does not answer, then leaves executing so the quiet process can be replaced. That opening check does not use the agent time budget. A job that starts while serve is reloading waits for that restart. Saving or creating an agent copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. Jobs that are still queued stay queued while that reload is waiting, in progress, or failed. They start after a reload succeeds. A failed reload has not loaded the saved agents.
+The daemon always starts `opencode serve` when `OPENCODE_SERVE_URL` is down, as that same user, and starts it again if that child exits. A serve that is already healthy is left running. A missed health check does not stop a process that is still listening while a job already has a session. A job that has not reached OpenCode fails within a few seconds when serve does not answer, then leaves executing so the quiet process can be replaced. That opening check does not use the agent time budget. A job that starts while serve is reloading waits for that restart. Sync copies the catalog into the OpenCode and Claude homes and reloads serve when no job is planning or executing. Saving or creating an agent writes the catalog and leaves the current process running. Jobs that are still queued stay queued while that reload is waiting, in progress, or failed. They start after a reload succeeds. A failed reload has not loaded the saved agents.
 
 A systemd unit with no `User=` runs as root. `sudo nohup opencode serve` is root as well, and `sudo` sets `HOME` to `/root`. The clone under `~/.local/share/yaver/t` is then owned by root. A serve process started as the login user cannot write it, so the agent commits in `~/.tmp/opencode`. The job can show completed, and no merge request is opened. The root dashboard reads `/root/.local/share/opencode`, while the user's serve wrote `~/.local/share/opencode`, so Transcript stays empty. Windows does not split this way: one account runs the daemon, the clone, and OpenCode.
 
@@ -410,15 +410,18 @@ CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: dow
 
 ### Update on the office network
 
-A separate release site holds the Windows package and one package for each Ubuntu version. Stop Yaver, then run `yaver update` (Windows: `yaver.exe update` or `yaver.exe --update`).
+A separate release site holds the Windows package and one package for each Ubuntu version. Update from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`.
 
-The server address is `RELEASE_HOST` and `RELEASE_PORT` in `.env`. The first run can set them:
+Set the site address in `.env`:
 
 ```text
-yaver update --host 192.168.1.20 --port 8090
+RELEASE_HOST=192.168.1.20
+RELEASE_PORT=8090
 ```
 
-The command downloads the package for this computer, replaces this install, and starts Yaver again. The `.env` file and the data folder stay. A git checkout is left alone. The published zip has to be the same kind this copy already is: the executable folder, or the full install zip. If Yaver is already running, the command stops before the download.
+The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
+
+If this folder does not have `update.bat` or `update.sh` yet, download the zip once, copy that script into the Yaver folder, and run it there. `yaver update` and `yaver.exe --update` print this instruction and leave the files as they are.
 
 ---
 

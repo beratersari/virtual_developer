@@ -299,7 +299,7 @@ is not ahead of its target; that clone does not get a merge request.
 | Path | Role |
 |------|------|
 | `src/opencode_serve.py` | Serve orchestrator: compact wait, unattended nudge, post-nudge assess |
-| `src/opencode_serve_supervisor.py` | Daemon child: start serve when down, reload it when agents change and no job is in flight |
+| `src/opencode_serve_supervisor.py` | Daemon child: start serve when down, reload it when Sync copies the catalog and no job is in flight |
 | `src/opencode_sessions.py` | Completeness, `assistant_asked_question`, last-turn-only question tools |
 | `src/orchestrator/agent_runner.py` | Retries; do **not** re-send BUILD after question/compact follow-up |
 | `src/processor.py` | `_fail_from_agent_result` category `question`; `_push_and_create_mr` |
@@ -386,6 +386,18 @@ JIRA_API_TOKEN=your-api-token-here
 
 | `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment **or** when Assigned To matches on a work item. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /review` and `@name /ask` on a PR start a derman-reviewer job (no push). The same commands on a work item stay silent. |
 
+A finished GitLab `/review` posts the overview (and inline findings), then
+`POST .../draft_notes/bulk_publish` with `reviewer_state=reviewed`. A plain
+note leaves the reviewer unreviewed, so Re-request review stays hidden.
+A finished `/ask` posts the overview and sends the same completed event.
+It leaves approval and inline threads to `/review`. A finished `/yaver`
+reply on that merge request sends the same completed event. When the
+findings JSON is empty (`"findings": []` or no recoverable findings), a
+`/review` approves the merge request and still posts the note. A
+successful approve is the finished state; do not also send `reviewed`.
+If approve fails, send `reviewed`. Do not use `requested_changes` for a
+normal review. Proof: `tests/test_gitlab_review_complete.py`.
+
 ---
 
 ## 3b. Ops dashboard
@@ -406,7 +418,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Jobs, schedules, session binds, issue state, and the queue live in ``{YAVER_DATA_DIR}/yaver.sqlite`` (indexed columns plus a JSON document, including deliveries). A first start imports leftover ``job_*.json``, ``sched_*.json``, ``osb_*.json``, ``q_*.json``, and issue-state JSON once, then deletes those files. Later starts do not scan them. Do not put plans, session logs, or clones in SQL.
 - Saved projects and repo sets live in ``{YAVER_DATA_DIR}/saved_catalog.json``. That file is the copy the dashboard reads and returns on ``GET /api/settings``, ``PATCH /api/settings``, and ``GET /api/dashboard``. A save of any other setting does not rewrite it. ``runtime_settings.json`` still receives a backup copy of the same two keys. Opening Settings, Scheduled, or the dashboard does not call GitLab or Azure. **Reload from tokens** is the import. Do not hide the stored list until that button. Do not put the catalog in SQLite.
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (saved for `yaver update`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -676,7 +688,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
 | Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Runs `opencoderman/packaging/build_artifact.py --in-place` then `install.py`. Needs **Python** + network to the official OpenCode GitHub release. Offline CLI sources: `opencoderman/vendor/bin/<os>/`, `vendor/bin/opencode`, or `vendor/opencode-home.zip`. |
 | Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
-| CLI offline zips | Three release zips per OS, not one combined CLI zip: **`yaver-opencode-windows-x64-*.zip`**, **`yaver-claude-windows-x64-*.zip`**, **`yaver-codex-windows-x64-*.zip`**, and the same three names with **`linux-x64`**. Each zip is that CLI, its host config (`opencode.json`, `settings.json`, or `config.toml`), its installer, and a root **`VERSION`** file with that tool's version (OpenCode **1.18.10**, Claude Code **2.1.280**, Codex **0.149.0**). The installer finds the existing binary, renames it with the date at the end, and puts the new binary in that directory. No agents and no skills. Agents stay on **`install-agents.bat`** / **`install-agents.sh`** in the product zip. CI refuses any other tool version. |
+| CLI offline zips | Three release zips per OS, not one combined CLI zip: **`yaver-opencode-windows-x64-*.zip`**, **`yaver-claude-windows-x64-*.zip`**, **`yaver-codex-windows-x64-*.zip`**, and the same three names with **`linux-x64`**. The filename ends with that tool's version (`yaver-opencode-windows-x64-1.18.10.zip`, `yaver-claude-windows-x64-2.1.280.zip`, `yaver-codex-windows-x64-0.149.0.zip`, and the same three with `linux-x64`). Each zip is that CLI, its host config (`opencode.json`, `settings.json`, or `config.toml`), its installer, and a root **`VERSION`** file with the same version text. The installer finds the existing binary, renames it with the date at the end, and puts the new binary in that directory. No agents and no skills. Agents stay on **`install-agents.bat`** / **`install-agents.sh`** in the product zip. CI refuses any other tool version. |
 | Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only), **`install-agents.bat`** (copy `agents/` + `skills/` into the OpenCode home, and into the Claude Code home when Python is available). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
@@ -759,7 +771,7 @@ When TUI shows nothing, **logs still exist**:
 
 Daemon/agent runs use **opencode serve** with the issue temp clone as the session directory. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI. `start-backend.bat` / `start.bat` probe `:4096/global/health` and start serve if needed (`Ensure-OpencodeServe.ps1`). `start-opencode-serve.bat` still force-restarts serve.
 
-The daemon always starts serve when the health check is down, as the same user, and starts that child again if it exits. Shutdown stops only the child it started. A serve that is already healthy is left running until an agent save, create, or sync needs the new files. That reload kills the listener on the serve port and starts a new child. It waits while any job is `planning` or `executing`, including one that is only on disk. Queued jobs stay queued while that reload is deferred, in progress, or failed. They start on the new process only after the reload succeeds. Deferred means the agent files are saved and a planning or executing job is keeping the current process. A failed reload has not loaded those files, so the queue must not claim the next job. If the reload state cannot be read, the queue must not claim either. A missed `/global/health` does not kill a process that is still listening while a job already has a session. The opening gate is ready only after `/global/health` answers, and that check uses a few seconds, not the agent time budget. A listening process that does not answer fails the attempt, the job leaves executing, and the quiet process can then be replaced. Do not treat a listen socket as healthy, and do not run that opening GET with the job budget. Nothing listening is started again even during a job, including when an agent reload is already pending. Three missed checks with no job replace a quiet process, unless a job is visible in the last check immediately before the kill. A job that arrives during a reload waits for that one restart; the reload does not start a second process, and it does not kill the process when the job arrived before the old one was stopped. If the job list cannot be read, do not kill. If the work queue cannot be read, do not kill. An empty queue is the only queue result that leaves serve idle. Do not clear the miss count while holding the supervisor lock (`threading.Lock` is not reentrant). Job cancel still must not kill serve (`src/process_kill.py`). Do not “fix” a deferred reload by killing serve under a live job. Do not add a setting that turns this off. Do not treat one failed health probe as a dead serve. Do not retry the opening gate while the issue is still executing: that retry is what keeps the quiet process from being replaced.
+The daemon always starts serve when the health check is down, as the same user, and starts that child again if it exits. Shutdown stops only the child it started. A serve that is already healthy is left running until Sync copies the agent catalog. Saving or creating an agent file leaves the current process running. That reload kills the listener on the serve port and starts a new child. It waits while any job is `planning` or `executing`, including one that is only on disk. Queued jobs stay queued while that reload is deferred, in progress, or failed. They start on the new process only after the reload succeeds. Deferred means Sync copied the agent files and a planning or executing job is keeping the current process. A failed reload has not loaded those files, so the queue must not claim the next job. If the reload state cannot be read, the queue must not claim either. A missed `/global/health` does not kill a process that is still listening while a job already has a session. The opening gate is ready only after `/global/health` answers, and that check uses a few seconds, not the agent time budget. A listening process that does not answer fails the attempt, the job leaves executing, and the quiet process can then be replaced. Do not treat a listen socket as healthy, and do not run that opening GET with the job budget. Nothing listening is started again even during a job, including when an agent reload is already pending. Three missed checks with no job replace a quiet process, unless a job is visible in the last check immediately before the kill. A job that arrives during a reload waits for that one restart; the reload does not start a second process, and it does not kill the process when the job arrived before the old one was stopped. If the job list cannot be read, do not kill. If the work queue cannot be read, do not kill. An empty queue is the only queue result that leaves serve idle. Do not clear the miss count while holding the supervisor lock (`threading.Lock` is not reentrant). Job cancel still must not kill serve (`src/process_kill.py`). Do not “fix” a deferred reload by killing serve under a live job. Do not add a setting that turns this off. Do not treat one failed health probe as a dead serve. Do not retry the opening gate while the issue is still executing: that retry is what keeps the quiet process from being replaced.
 
 ### 9.8 Product start scripts, SPA, PowerShell — hard-won devops rules
 
@@ -868,12 +880,14 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `agent/PLAN_PROMPT.md` | Short plan-job user stub (`Mode: plan`) |
 | `agent/BUILD_PROMPT.md` | Short build-job user stub + git subject format |
 | `src/opencode_serve.py` | Serve loop: compact wait, unattended nudge (see §2 OpenCode serve) |
-| `src/opencode_serve_supervisor.py` | Start serve with the daemon; reload it after an agent save when idle |
+| `src/opencode_serve_supervisor.py` | Start serve with the daemon; reload it when Sync is pressed and no job is in flight |
 | `src/opencode_sessions.py` | Session completeness + clarifying-question detection |
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |
 | `packaging/pyinstaller/` | Frozen `yaver` / `yaver.exe` spec, versions, build + CI |
+| `packaging/windows/update.bat` | Windows update. Run it in the install folder |
+| `packaging/linux/update.sh` | Ubuntu update. Run it in the install folder |
 
 ---
 
@@ -885,7 +899,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), `update_helper.py` + `.ps1` + `.sh` (LAN self-update; see §12) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), one update script next to the exe (`update.bat` on Windows, `update.sh` on Linux; see §12) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
@@ -895,16 +909,29 @@ Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists
 
 ---
 
-## 12. LAN self-update (intentional)
+## 12. LAN update scripts (intentional)
 
 Operators publish Windows and Ubuntu zips on a separate release site
-(its own repository). Yaver stores that site’s address as `RELEASE_HOST`
-and `RELEASE_PORT`. The operator sets them in `.env` or with
-`yaver update --host … --port …`. The dashboard has no Update control.
-Stop Yaver, then run `yaver update` or `yaver --update` (`yaver.exe` on
-Windows). If the dashboard port is open, the command refuses. The client
-calls `GET /api/latest?platform=…` and downloads `GET /download/{platform}`
-on `http://{host}:{port}` only. It does not follow redirects.
+(its own repository). The install `.env` stores that site as `RELEASE_HOST`
+and `RELEASE_PORT`. The dashboard can save those two keys into `.env`.
+The dashboard has no Update control.
+
+The operator updates an executable install by running the script in that
+folder:
+
+- Windows: `update.bat`
+- Ubuntu: `chmod 755 update.sh`, then `./update.sh`
+
+`yaver update`, `yaver --update`, and `yaver.exe --update` only print
+that instruction. They do not download a package and they do not replace
+files. `--host` and `--port` are accepted so an old command line still
+exits, and they do not rewrite `.env`.
+
+The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env` (the last
+value wins). It calls `GET /api/latest?platform=…` and
+`GET /download/{platform}` on `http://{host}:{port}` only. It does not
+follow redirects. `curl --noproxy` keeps a corporate proxy off that LAN
+host. The sha256 must match before anything is stopped or replaced.
 
 | Platform id | Machine |
 |-------------|---------|
@@ -914,25 +941,58 @@ on `http://{host}:{port}` only. It does not follow redirects.
 | `ubuntu-22.04` | Ubuntu 22.04 |
 | `ubuntu-24.04` | Ubuntu 24.04 |
 
-`yaver update` downloads and checks the sha256 while that command is
-still the running process, then exits. A helper copied **outside** the
-install (`src/update_helper.py`, or the `.ps1` / `.sh` when a frozen
-build has no Python outside that folder) waits until this process exits,
-swaps the files, and starts Yaver again with `yaver start` and the same
-`.env`. The data directory is not inside the install, so jobs, settings,
-and plans stay. The extractor keeps Unix permission bits from the zip.
-A `yaver` or `yaver.exe` member with no mode is marked executable. If
-the new program cannot be started, the previous executable folder is
-restored and started.
+Ubuntu comes from `/etc/os-release` (`ID=ubuntu` and `VERSION_ID`
+18.04, 20.04, 22.04, or 24.04). `YAVER_UPDATE_PLATFORM` overrides that
+with one of those four ids.
+
+When `VERSION` in the folder already matches the published version
+(text before `+`), the script exits 0 and does not stop Yaver.
+
+Otherwise it stops `yaver.exe` (Windows) or `yaver` (Linux) whose
+executable path is this folder, waits until that process is gone, then
+replaces each top-level name from the package. Directories such as
+`_internal` and `opencoderman` are replaced as a whole, so files removed
+upstream do not stay behind. `install-agents.bat` or `install-agents.sh`,
+`.env.example`, `VERSION`, and the executable are replaced. A name that
+is not in the package stays, including a data folder kept beside the exe.
+
+These stay:
+
+- The operator's `.env`. The package `.env` is copied only when the
+  folder has none. The script requires an existing `.env` because that
+  file holds the release address.
+- The script the operator ran (`update.bat` or `update.sh`). A later
+  package can contain a newer script; this run does not overwrite the
+  file it is executing. An install that does not have the script yet
+  (published builds through 0.9.74) needs one manual copy: download the
+  zip, copy `update.bat` or `update.sh` into the Yaver folder, then run it.
+
+The script does not start Yaver. Success prints a line that begins with
+`Updated to`. Then the operator starts `yaver.exe` or `./yaver`.
+
+A git checkout (a `.git` entry in the folder) and a drive root are
+refused before any download. The package must be a frozen executable
+(`yaver.exe` or `yaver` next to `_internal`). One wrapping folder is
+flattened. A member whose path contains `..` or is absolute is refused.
+A failed copy moves the previous files back.
+
+`src/self_update.py` and `src/update_helper.py` / `.ps1` / `.sh` remain
+in the repo so older tests still describe the retired in-process swap.
+They are not the operator path, and the frozen payload does not ship
+them. Do not call `update_stopped_install` from `cli.py`.
 
 **Do not “fix”** any of these:
 
-- Putting Check or Update back on the dashboard. Apply is `yaver update` while Yaver is stopped.
-- Refusing a folder that contains `.git`. That is a checkout, not an install.
-- Keeping `.env` and `.venv` when applying an install zip. Replacing `.venv` locks the interpreter that is doing the swap.
-- Replacing an executable install only with an executable zip (`yaver` / `yaver.exe` plus `_internal`), and an install zip only with a tree that has `src/daemon.py` and `VERSION`.
-- Detaching the helper before shutdown. `stop()` must not take the helper down with the daemon.
-- `verify=False` on the release-server client (same rule as every other outbound client).
-- Treating a drive root as an install folder.
+- Putting the download or the file swap back inside `yaver.exe` / `yaver update`.
+- Putting Check or Update back on the dashboard.
+- Starting Yaver at the end of `update.bat` or `update.sh`.
+- Overwriting the operator's `.env`.
+- Overwriting the running `update.bat` or `update.sh`.
+- Killing every `yaver.exe` on the machine. Stop only the process whose path is this install folder.
+- Following redirects, or using a scheme other than `http` for the release site.
+- Updating a folder that contains `.git`, or a drive root.
+- Replacing files when the checksum does not match.
 
-Proof lives in `tests/test_self_update.py`. The helper is stdlib-only so the copy outside the install still runs after `src/` is replaced.
+Proof: `tests/test_update_scripts.py` runs the scripts against a local
+release server. `tests/test_self_update.py` still covers the retired
+library and asserts the CLI does not enter it.

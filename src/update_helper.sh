@@ -16,6 +16,10 @@ log_line() {
   fi
 }
 
+say() {
+  printf '%s\n' "$1"
+}
+
 write_result() {
   if [ -z "${RESULT:-}" ]; then
     return
@@ -24,6 +28,7 @@ write_result() {
 }
 
 fail() {
+  say "$1"
   log_line "$1"
   write_result "{\"ok\": false, \"version\": \"${VERSION:-}\", \"error\": \"$1\"}"
   exit 1
@@ -68,6 +73,7 @@ case "${PROBE:-127.0.0.1}" in
   *[!A-Za-z0-9.:-]*) fail "The update plan has a bad dashboard address." ;;
 esac
 PROBE=${PROBE:-127.0.0.1}
+say "helper install=$INSTALL staging=$STAGING layout=${LAYOUT:-} port=${PORT:-0} probe=$PROBE plan_pid=${PID:-0}"
 
 port_open() {
   probe_host=$1
@@ -100,44 +106,10 @@ port_open() {
 parent=$(dirname "$INSTALL")
 leaf=$(basename "$INSTALL")
 previous="$parent/$leaf.previous"
-env_copy=""
-if [ -f "$INSTALL/.env" ]; then
-  env_copy=$(mktemp)
-  cp -p "$INSTALL/.env" "$env_copy"
-fi
-
-# A data folder inside the executable folder would leave with the old tree.
+# Park only after the port check. An earlier move pulls a live data
+# folder out from under a Yaver that is still running.
 userdata_rel=""
 userdata_stash="$parent/$leaf.userdata"
-if [ -n "$env_copy" ] && [ -f "$env_copy" ]; then
-  base_dir=$(grep -E '^YAVER_BASE_DIR=' "$env_copy" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
-  base_dir=${base_dir#"${base_dir%%[![:space:]]*}"}
-  base_dir=${base_dir%"${base_dir##*[![:space:]]}"}
-  case "$base_dir" in
-    \"*\") base_dir=${base_dir#\"}; base_dir=${base_dir%\"} ;;
-    \'*\') base_dir=${base_dir#\'}; base_dir=${base_dir%\'} ;;
-  esac
-  if [ -n "$base_dir" ]; then
-    case "$base_dir" in
-      /*) data_path=$base_dir ;;
-      *) data_path="$INSTALL/$base_dir" ;;
-    esac
-    if [ -d "$data_path" ] && [ ! -L "$data_path" ]; then
-      install_real=$(cd "$INSTALL" && pwd -P)
-      data_real=$(cd "$data_path" && pwd -P)
-      case "$data_real" in
-        "$install_real"/_internal|"$install_real"/_internal/*) ;;
-        "$install_real"/*)
-          userdata_rel=${data_real#"$install_real"/}
-          if [ -e "$userdata_stash" ]; then
-            fail "A previous update left the data folder beside Yaver. Move that folder back before updating again."
-          fi
-          mv "$data_real" "$userdata_stash"
-          ;;
-      esac
-    fi
-  fi
-fi
 
 unpark_userdata() {
   if [ -z "${userdata_rel:-}" ] || [ ! -d "${userdata_stash:-}" ]; then
@@ -159,23 +131,113 @@ repark_userdata() {
   fi
 }
 
-restore_previous() {
-  if [ -n "${new_pid:-}" ]; then
-    kill "$new_pid" 2>/dev/null || true
-    sleep 1
-    kill -9 "$new_pid" 2>/dev/null || true
-    new_pid=""
+move_one() {
+  src=$1
+  dest=$2
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    mv "$src" "$dest" || return 1
   fi
+}
+
+undo_moves() {
+  if [ ! -d "$previous" ]; then
+    return 0
+  fi
+  for child in "$previous"/* "$previous"/.[!.]* "$previous"/..?*; do
+    if [ ! -e "$child" ] && [ ! -L "$child" ]; then
+      continue
+    fi
+    name=$(basename "$child")
+    if [ -e "$INSTALL/$name" ] || [ -L "$INSTALL/$name" ]; then
+      continue
+    fi
+    move_one "$child" "$INSTALL/$name" || true
+  done
+}
+
+restore_previous() {
+  # The install directory stays. A console may be using it as its cwd.
   repark_userdata || true
   broken="$parent/$leaf.broken"
-  rm -rf "$broken"
-  if [ -d "$INSTALL" ]; then
-    mv "$INSTALL" "$broken" || true
-  fi
-  if [ -d "$previous" ] && [ ! -d "$INSTALL" ]; then
-    mv "$previous" "$INSTALL" || true
+  mkdir -p "$broken"
+  for child in "$INSTALL"/* "$INSTALL"/.[!.]* "$INSTALL"/..?*; do
+    if [ ! -e "$child" ] && [ ! -L "$child" ]; then
+      continue
+    fi
+    name=$(basename "$child")
+    if [ "$name" = ".env" ]; then
+      continue
+    fi
+    move_one "$child" "$broken/$name" || true
+  done
+  if [ -d "$previous" ]; then
+    for child in "$previous"/* "$previous"/.[!.]* "$previous"/..?*; do
+      if [ ! -e "$child" ] && [ ! -L "$child" ]; then
+        continue
+      fi
+      name=$(basename "$child")
+      if [ -e "$INSTALL/$name" ] || [ -L "$INSTALL/$name" ]; then
+        continue
+      fi
+      move_one "$child" "$INSTALL/$name" || true
+    done
   fi
   unpark_userdata || true
+}
+
+copy_staging() {
+  # Leave an existing .env alone. Copy one from the package only when missing.
+  for child in "$STAGING"/* "$STAGING"/.[!.]* "$STAGING"/..?*; do
+    if [ ! -e "$child" ] && [ ! -L "$child" ]; then
+      continue
+    fi
+    name=$(basename "$child")
+    if [ "$name" = ".env" ] && [ -f "$INSTALL/.env" ]; then
+      say "package env file skipped"
+      continue
+    fi
+    cp -a "$child" "$INSTALL/" || return 1
+    say "copied $name"
+  done
+}
+
+# An existing .env stays where it is, so this read does not write the file.
+park_userdata() {
+  if [ ! -f "$INSTALL/.env" ]; then
+    say "env file absent"
+    return 0
+  fi
+  say "env file present"
+  base_dir=$(grep -E '^YAVER_BASE_DIR=' "$INSTALL/.env" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+  base_dir=${base_dir#"${base_dir%%[![:space:]]*}"}
+  base_dir=${base_dir%"${base_dir##*[![:space:]]}"}
+  case "$base_dir" in
+    \"*\") base_dir=${base_dir#\"}; base_dir=${base_dir%\"} ;;
+    \'*\') base_dir=${base_dir#\'}; base_dir=${base_dir%\'} ;;
+  esac
+  if [ -z "$base_dir" ]; then
+    return 0
+  fi
+  case "$base_dir" in
+    /*) data_path=$base_dir ;;
+    *) data_path="$INSTALL/$base_dir" ;;
+  esac
+  if [ ! -d "$data_path" ] || [ -L "$data_path" ]; then
+    return 0
+  fi
+  install_real=$(cd "$INSTALL" && pwd -P)
+  data_real=$(cd "$data_path" && pwd -P)
+  case "$data_real" in
+    "$install_real"/_internal|"$install_real"/_internal/*) return 0 ;;
+    "$install_real"/*) ;;
+    *) return 0 ;;
+  esac
+  userdata_rel=${data_real#"$install_real"/}
+  if [ -e "$userdata_stash" ]; then
+    fail "A previous update left the data folder beside Yaver. Move that folder back before updating again."
+  fi
+  mv "$data_real" "$userdata_stash"
+  say "parked data folder $userdata_rel"
 }
 
 port_value=${PORT:-0}
@@ -190,72 +252,47 @@ if [ "$port_value" -gt 0 ]; then
   done
   # An old listener still on this port would look like the new copy opened.
   if port_open "$PROBE" "$port_value"; then
-    unpark_userdata || true
     fail "The dashboard port is still open."
   fi
 fi
+say "dashboard port ${port_value} is closed"
+park_userdata
+# Covers rm/mkdir below. mv and cp failures unpark themselves too.
+trap 'unpark_userdata || true' EXIT
 
-start_argv() {
-  # This script is the session leader. A child left in that session gets
-  # SIGHUP when the script exits, and the new Yaver dies with it.
-  if [ -n "${LOG:-}" ]; then
-    if [ -n "${ARGV1:-}" ]; then
-      setsid "$ARGV0" "$ARGV1" >>"$LOG" 2>&1 </dev/null &
-    else
-      setsid "$ARGV0" >>"$LOG" 2>&1 </dev/null &
-    fi
-  else
-    if [ -n "${ARGV1:-}" ]; then
-      setsid "$ARGV0" "$ARGV1" >/dev/null 2>&1 </dev/null &
-    else
-      setsid "$ARGV0" >/dev/null 2>&1 </dev/null &
-    fi
+rm -rf "$previous" || fail "Could not remove the previous copy."
+mkdir -p "$previous" || fail "Could not prepare the previous copy."
+say "previous=$previous"
+for child in "$INSTALL"/* "$INSTALL"/.[!.]* "$INSTALL"/..?*; do
+  if [ ! -e "$child" ] && [ ! -L "$child" ]; then
+    continue
   fi
-  new_pid=$!
-}
-
-rm -rf "$previous"
-if ! mv "$INSTALL" "$previous"; then
-  unpark_userdata || true
-  fail "Could not move the install folder."
-fi
-if ! cp -a "$STAGING" "$INSTALL"; then
+  name=$(basename "$child")
+  if [ "$name" = ".env" ]; then
+    say "env file left in place"
+    continue
+  fi
+  if ! mv "$child" "$previous/$name"; then
+    say "restoring previous files"
+    undo_moves
+    unpark_userdata || true
+    fail "Could not move the install folder."
+  fi
+  say "moved $name"
+done
+if ! copy_staging; then
+  say "restoring previous files"
   restore_previous
   fail "Could not copy the new files."
 fi
-if [ -n "$env_copy" ] && [ -f "$env_copy" ]; then
-  cp -p "$env_copy" "$INSTALL/.env"
-  rm -f "$env_copy"
-  env_copy=""
-fi
+say "frozen swap finished"
 if [ -n "$userdata_rel" ] && [ -d "$userdata_stash" ]; then
   unpark_userdata
+  say "restored data folder $userdata_rel"
 fi
+trap - EXIT
 
-if [ -z "${ARGV0:-}" ]; then
-  restore_previous
-  fail "The update plan has no start command."
-fi
-start_argv
-health=${HEALTH_SECONDS:-45}
-if [ "$port_value" -gt 0 ] && [ "$health" -gt 0 ]; then
-  waited=0
-  opened=0
-  while [ "$waited" -lt "$health" ]; do
-    if port_open "$PROBE" "$port_value"; then
-      opened=1
-      break
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  if [ "$opened" -ne 1 ]; then
-    restore_previous
-    log_line "starting restored ${ARGV0}"
-    start_argv
-    fail "The new Yaver did not open. The previous copy was restored."
-  fi
-fi
-log_line "started ${VERSION:-}"
+log_line "updated ${VERSION:-}"
 write_result "{\"ok\": true, \"version\": \"${VERSION:-}\", \"error\": \"\"}"
+echo "Updated to ${VERSION:-}. Start Yaver when you want."
 exit 0

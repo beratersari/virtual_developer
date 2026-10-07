@@ -1,4 +1,4 @@
-"""The daemon owns opencode serve, and agent saves reload it when idle."""
+"""The daemon owns opencode serve, and Sync reloads it when idle."""
 
 from __future__ import annotations
 
@@ -270,7 +270,7 @@ async def test_watch_backs_off_when_serve_does_not_start():
     assert spawned == ["try"]
 
 
-def test_save_copies_the_agent_and_asks_serve_to_reload(tmp_path, monkeypatch):
+def test_sync_copies_the_agents_and_reloads_serve(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog"
     catalog.mkdir()
     opencode = tmp_path / "opencode"
@@ -293,36 +293,49 @@ def test_save_copies_the_agent_and_asks_serve_to_reload(tmp_path, monkeypatch):
     client = TestClient(create_dashboard_app())
     created = client.post("/api/opencode-agents", json={"name": "derman-docs", "text": ""})
     assert created.status_code == 200, created.text
-    assert calls == ["reload"]
+    assert "serve" not in created.json()
+    assert calls == []
+    assert not (opencode / "derman-docs.md").exists()
     saved = client.put(
         "/api/opencode-agents/derman-docs",
         json={"text": "---\nmode: primary\n---\n\nWrite the guide.\n"},
     )
     assert saved.status_code == 200, saved.text
     body = saved.json()
-    assert body["serve"]["status"] == "reloaded"
-    assert "Write the guide." in (opencode / "derman-docs.md").read_text(encoding="utf-8")
-    assert calls == ["reload", "reload"]
+    assert "serve" not in body
+    assert calls == []
+    assert "Write the guide." in (catalog / "derman-docs.md").read_text(encoding="utf-8")
+    assert not (opencode / "derman-docs.md").exists()
     synced = client.post("/api/opencode-agents/sync")
     assert synced.status_code == 200, synced.text
+    assert calls == ["reload"]
     assert synced.json()["serve"]["message"].startswith("OpenCode reloaded")
+    assert "Write the guide." in (opencode / "derman-docs.md").read_text(encoding="utf-8")
+    assert "Write the guide." in (config / "derman-docs.md").read_text(encoding="utf-8")
+    assert "Write the guide." in (claude / "derman-docs.md").read_text(encoding="utf-8")
     listed = client.get("/api/opencode-agents")
     assert listed.json()["serve"]["status"] == "ready"
 
 
-def test_save_reports_a_deferred_reload(tmp_path, monkeypatch):
+def test_sync_reports_a_deferred_reload(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog"
     catalog.mkdir()
     monkeypatch.setattr("src.opencode_agents.agents_dir", lambda: catalog)
     monkeypatch.setattr("src.opencode_agents.opencode_agents_dir", lambda: tmp_path / "opencode")
     monkeypatch.setattr("src.opencode_agents.opencode_xdg_agents_dir", lambda: tmp_path / "config")
     monkeypatch.setattr("src.opencode_agents.claude_agents_dir", lambda: tmp_path / "claude")
-    monkeypatch.setattr(
-        "src.opencode_serve_supervisor.supervisor.request_reload",
-        lambda: {
+    calls: list[str] = []
+
+    def reload():
+        calls.append("reload")
+        return {
             "status": "deferred",
             "message": "Agents are saved. OpenCode will reload when KAN-1 finishes.",
-        },
+        }
+
+    monkeypatch.setattr(
+        "src.opencode_serve_supervisor.supervisor.request_reload",
+        reload,
     )
     monkeypatch.setattr(
         "src.opencode_serve_supervisor.supervisor.status",
@@ -337,14 +350,19 @@ def test_save_reports_a_deferred_reload(tmp_path, monkeypatch):
         json={"name": "derman-docs", "text": "---\nmode: primary\n---\n\nWrite the guide.\n"},
     )
     assert created.status_code == 200, created.text
-    assert created.json()["serve"]["status"] == "deferred"
-    assert "KAN-1" in created.json()["serve"]["message"]
+    assert "serve" not in created.json()
     saved = client.put(
         "/api/opencode-agents/derman-docs",
         json={"text": "---\nmode: primary\n---\n\nWrite the guide.\n"},
     )
     assert saved.status_code == 200, saved.text
-    assert saved.json()["serve"]["status"] == "deferred"
+    assert "serve" not in saved.json()
+    assert calls == []
+    synced = client.post("/api/opencode-agents/sync")
+    assert synced.status_code == 200, synced.text
+    assert calls == ["reload"]
+    assert synced.json()["serve"]["status"] == "deferred"
+    assert "KAN-1" in synced.json()["serve"]["message"]
     assert client.get("/api/opencode-agents").json()["serve"]["status"] == "deferred"
 
 

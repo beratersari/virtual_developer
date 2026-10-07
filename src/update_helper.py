@@ -1,11 +1,12 @@
 """Replace an installed Yaver tree after this process has exited.
 
-Stdlib only. The daemon copies this file outside the install and runs:
+Stdlib only. The updater copies this file outside the install and runs:
 
     python update_helper.py --apply PLAN.json
 
-A git checkout is refused. ``.env`` is copied back after the new files
-are in place. The data folder is not inside the install, so it stays.
+A git checkout is refused. An existing ``.env`` is left untouched. The
+data folder is not inside the install, so it stays. This script does
+not start Yaver.
 """
 
 from __future__ import annotations
@@ -14,11 +15,11 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import time
 import zipfile
 from pathlib import Path
+from typing import Callable
 
 
 class UpdateError(Exception):
@@ -136,21 +137,94 @@ def assert_install_dir(path: Path) -> Path:
     return resolved
 
 
-def apply_source_tree(staging: Path, install: Path) -> None:
-    """Copy a full install zip onto *install*. Keep ``.env`` and ``.venv``."""
+def _show(message: str) -> None:
+    """Print one swap step. The text is a path or a file name."""
+    text = " ".join(str(message).splitlines()).strip()
+    if not text:
+        return
+    print(text, flush=True)
+
+
+def _emit(note: Callable[[str], None] | None, message: str) -> None:
+    text = " ".join(str(message).splitlines()).strip()
+    if not text:
+        return
+    _show(text)
+    if note is None:
+        return
+    try:
+        note(text)
+    except Exception:
+        return
+
+
+def _source_backup(install: Path) -> Path:
+    return install.parent / f"{install.name}.source-backup"
+
+
+def _stash(path: Path, install: Path, backup_root: Path) -> Path:
+    """Move *path* under *backup_root*, keeping its path relative to *install*."""
+    dest = backup_root / path.relative_to(install)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        raise UpdateError(f"Could not save {path.name} before replacing it.")
+    rename_retry(path, dest)
+    return dest
+
+
+def _incoming(dest: Path, install: Path, backup_root: Path) -> Path:
+    tmp = backup_root / ".incoming" / dest.relative_to(install)
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    if tmp.exists() or tmp.is_symlink():
+        if tmp.is_dir() and not tmp.is_symlink():
+            _rmtree(tmp)
+        else:
+            tmp.unlink()
+    return tmp
+
+
+def apply_source_tree(
+    staging: Path,
+    install: Path,
+    *,
+    note: Callable[[str], None] | None = None,
+) -> None:
+    """Copy a full install zip onto *install*. Keep ``.env`` and ``.venv``.
+
+    A failed copy puts the saved names back. The new bytes land in a side
+    file first, so a short write does not replace the file the operator has.
+    """
     install = assert_install_dir(install)
     _refuse_checkout(install)
     assert_no_symlinks(staging)
     if not staging.is_dir():
         raise UpdateError("The staged release is missing.")
-    for child in staging.iterdir():
-        if child.name in _PRESERVE:
-            continue
-        dest = install / child.name
-        if child.is_dir():
-            _mirror_dir(child, dest)
-        else:
-            _copy_file(child, dest)
+    backup_root = _source_backup(install)
+    if backup_root.exists():
+        raise UpdateError(
+            "A previous update left a source backup beside Yaver. "
+            "Move that folder back before updating again."
+        )
+    undo: list[tuple[str, Path, Path | None]] = []
+    _emit(note, f"source swap install={install} staging={staging}")
+    try:
+        for child in staging.iterdir():
+            if child.name in _PRESERVE:
+                _emit(note, f"kept {child.name}")
+                continue
+            dest = install / child.name
+            if child.is_dir() and not child.is_symlink():
+                _mirror_dir(child, dest, install, backup_root, undo)
+            else:
+                _copy_file(child, dest, install, backup_root, undo)
+            _emit(note, f"copied {child.name}")
+        _emit(note, "source swap finished")
+    except Exception:
+        _emit(note, "restoring previous files")
+        _restore_source(undo, backup_root)
+        raise
+    if backup_root.exists():
+        _rmtree(backup_root)
 
 
 def _env_value(env_bytes: bytes | None, name: str) -> str:
@@ -223,33 +297,69 @@ def _unpark_userdata(install: Path, rel: Path) -> None:
     rename_retry(stash, dest)
 
 
-def apply_frozen_tree(staging: Path, install: Path) -> None:
-    """Swap an executable folder. The previous folder is kept beside it."""
+def apply_frozen_tree(
+    staging: Path,
+    install: Path,
+    *,
+    note: Callable[[str], None] | None = None,
+) -> None:
+    """Replace an executable folder. The folder itself stays put.
+
+    A command prompt sitting in that folder cannot be renamed away, and
+    the running executable can. Old files move beside the folder. An
+    existing ``.env`` is left untouched. This does not start Yaver.
+    """
     install = assert_install_dir(install)
     _refuse_checkout(install)
     assert_no_symlinks(staging)
     if classify_tree(staging) != "frozen":
         raise UpdateError("The staged release is not a Yaver executable.")
-    env_bytes = None
     env_path = install / ".env"
-    if env_path.is_file():
-        env_bytes = env_path.read_bytes()
-    # The executable folder is replaced as a whole. A data folder inside
-    # it would leave with the old tree, so park it and put it back.
+    env_existed = env_path.is_file()
+    env_bytes = env_path.read_bytes() if env_existed else None
+    _emit(note, "env file present" if env_existed else "env file absent")
+    # A data folder inside the executable folder would leave with the old
+    # files, so park it and put it back after the new files are in place.
     rel = _park_userdata(install, env_bytes)
+    if rel is not None:
+        _emit(note, f"parked data folder {rel.as_posix()}")
     previous = install.parent / f"{install.name}.previous"
+    _emit(note, f"previous={previous}")
+    moved: list[str] = []
+    copying = False
     try:
         if previous.exists():
             _rmtree(previous)
-        rename_retry(install, previous)
-        shutil.copytree(staging, install)
-        if env_bytes is not None:
-            (install / ".env").write_bytes(env_bytes)
+        previous.mkdir()
+        for child in list(install.iterdir()):
+            if child.name == ".env":
+                _emit(note, "env file left in place")
+                continue
+            rename_retry(child, previous / child.name)
+            moved.append(child.name)
+            _emit(note, f"moved {child.name}")
+        copying = True
+        for child in staging.iterdir():
+            if child.name == ".env" and env_existed:
+                _emit(note, "package env file skipped")
+                continue
+            target = install / child.name
+            if child.is_dir() and not child.is_symlink():
+                shutil.copytree(child, target)
+            else:
+                shutil.copy2(child, target)
+            _emit(note, f"copied {child.name}")
         if rel is not None:
             _unpark_userdata(install, rel)
+            _emit(note, f"restored data folder {rel.as_posix()}")
             rel = None
+        _emit(note, "frozen swap finished")
     except Exception:
-        _restore_frozen(install, previous)
+        _emit(note, "restoring previous files")
+        if copying:
+            _restore_frozen(install, previous)
+        else:
+            _restore_moved(install, previous, moved)
         if rel is not None:
             _unpark_userdata(install, rel)
         raise
@@ -271,7 +381,8 @@ def run_plan(path: Path) -> None:
         raise
     if result_path:
         write_result(result_path, ok=True, version=version, error="")
-    _log(plan, f"started {version}")
+    _log(plan, f"updated {version}")
+    print(f"Updated to {version}. Start Yaver when you want.")
 
 
 def write_result(path: Path, *, ok: bool, version: str, error: str) -> None:
@@ -316,71 +427,27 @@ def _run(plan: dict) -> None:
     _refuse_checkout(install)
     pid = int(plan.get("pid") or 0)
     wait_seconds = float(plan.get("wait_seconds") or 90)
+    port = int(plan.get("port") or 0)
+    probe = str(plan.get("probe_host") or "127.0.0.1")
+    _show(
+        f"helper install={install} staging={staging} layout={layout} "
+        f"port={port} probe={probe} plan_pid={pid}"
+    )
     if pid > 0 and not wait_dead(pid, wait_seconds):
-        _log(plan, "stopping the running Yaver")
+        _show(f"stopping plan pid={pid}")
         terminate_pid(pid)
         if not wait_dead(pid, 15):
             raise UpdateError("Yaver is still running.")
-    port = int(plan.get("port") or 0)
-    probe = str(plan.get("probe_host") or "127.0.0.1")
+        _show(f"plan pid={pid} has exited")
     # An old listener still on this port would look like the new copy opened.
     if not wait_port_closed(port, 30, probe):
         raise UpdateError("The dashboard port is still open.")
-    _log(plan, f"applying {layout}")
+    _show(f"dashboard port {port} is closed")
+    _show(f"applying {layout}")
     if layout == "frozen":
         apply_frozen_tree(staging, install)
     else:
         apply_source_tree(staging, install)
-    argv = _argv(plan)
-    cwd = str(plan.get("cwd") or install)
-    log_path = str(plan.get("log") or "")
-    try:
-        proc = start_logged(argv, cwd, log_path)
-    except OSError as exc:
-        if layout == "frozen" and _restart_previous_frozen(install, argv, cwd, log_path):
-            raise UpdateError(
-                "The new Yaver could not be started. The previous copy was restored."
-            ) from exc
-        raise UpdateError("The new Yaver could not be started.") from exc
-    health_seconds = float(plan.get("health_seconds") if plan.get("health_seconds") is not None else 45)
-    if port > 0 and health_seconds > 0 and not wait_port_open(port, health_seconds, probe):
-        if proc.poll() is None:
-            terminate_pid(proc.pid)
-            wait_dead(proc.pid, 10)
-        if layout == "frozen":
-            _restart_previous_frozen(install, argv, cwd, log_path)
-            raise UpdateError(
-                "The new Yaver did not open. The previous copy was restored."
-            )
-        raise UpdateError(
-            "The new files are in place, but Yaver did not open the dashboard port."
-        )
-
-
-def _restart_previous_frozen(install: Path, argv: list[str], cwd: str, log_path: str) -> bool:
-    """Put the previous executable folder back and start it."""
-    previous = install.parent / f"{install.name}.previous"
-    if not previous.is_dir():
-        return False
-    env_path = install / ".env"
-    env_bytes = env_path.read_bytes() if env_path.is_file() else None
-    rel = _park_userdata(install, env_bytes)
-    try:
-        _restore_frozen(install, previous)
-    finally:
-        if rel is not None:
-            _unpark_userdata(install, rel)
-    start_logged(argv, cwd, log_path)
-    return True
-
-
-def _argv(plan: dict) -> list[str]:
-    raw = plan.get("argv")
-    if not isinstance(raw, list) or not raw:
-        raise UpdateError("The update plan has no start command.")
-    if not all(isinstance(item, str) and item.strip() for item in raw):
-        raise UpdateError("The update plan has no start command.")
-    return [str(item) for item in raw]
 
 
 def _refuse_checkout(install: Path) -> None:
@@ -398,29 +465,85 @@ def assert_no_symlinks(root: Path) -> None:
                 raise UpdateError("Refusing a symlink in the release.")
 
 
-def _mirror_dir(source: Path, dest: Path) -> None:
-    if dest.exists() and not dest.is_dir():
-        dest.unlink()
-    dest.mkdir(parents=True, exist_ok=True)
+def _mirror_dir(
+    source: Path,
+    dest: Path,
+    install: Path,
+    backup_root: Path,
+    undo: list[tuple[str, Path, Path | None]],
+) -> None:
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        undo.append(("restore", dest, _stash(dest, install, backup_root)))
+    created = False
+    if not dest.exists():
+        dest.mkdir(parents=True)
+        created = True
+        undo.append(("delete", dest, None))
     incoming = {child.name for child in source.iterdir()}
     for existing in list(dest.iterdir()):
         if existing.name in incoming:
             continue
-        if existing.is_dir() and not existing.is_symlink():
-            _rmtree(existing)
-        else:
-            existing.unlink()
+        undo.append(("restore", existing, _stash(existing, install, backup_root)))
     for child in source.iterdir():
         target = dest / child.name
         if child.is_dir() and not child.is_symlink():
-            _mirror_dir(child, target)
+            _mirror_dir(child, target, install, backup_root, undo)
         else:
-            _copy_file(child, target)
+            _copy_file(child, target, install, backup_root, undo)
 
 
-def _copy_file(source: Path, dest: Path) -> None:
+def _copy_file(
+    source: Path,
+    dest: Path,
+    install: Path,
+    backup_root: Path,
+    undo: list[tuple[str, Path, Path | None]],
+) -> None:
+    """Write *source* beside the install, then move it onto *dest*.
+
+    The previous file is renamed aside first only after the new bytes are
+    complete, and it is recorded so a later failure can put it back.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, dest)
+    tmp = _incoming(dest, install, backup_root)
+    shutil.copy2(source, tmp)
+    if dest.exists() or dest.is_symlink():
+        undo.append(("restore", dest, _stash(dest, install, backup_root)))
+    else:
+        undo.append(("delete", dest, None))
+    os.replace(tmp, dest)
+
+
+def _restore_source(
+    undo: list[tuple[str, Path, Path | None]],
+    backup_root: Path,
+) -> None:
+    """Put a partial source copy back. Leave the backup if a move fails."""
+    failed = False
+    for kind, dest, backup in reversed(undo):
+        try:
+            if kind == "delete":
+                if not dest.exists() and not dest.is_symlink():
+                    continue
+                if dest.is_dir() and not dest.is_symlink():
+                    _rmtree(dest)
+                else:
+                    dest.unlink()
+                continue
+            if backup is None or not (backup.exists() or backup.is_symlink()):
+                failed = True
+                continue
+            if dest.exists() or dest.is_symlink():
+                if dest.is_dir() and not dest.is_symlink():
+                    _rmtree(dest)
+                else:
+                    dest.unlink()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(backup, dest)
+        except OSError:
+            failed = True
+    if not failed and backup_root.exists():
+        _rmtree(backup_root)
 
 
 def rename_retry(source: Path, dest: Path, attempts: int = 40) -> None:
@@ -435,15 +558,49 @@ def rename_retry(source: Path, dest: Path, attempts: int = 40) -> None:
     raise UpdateError(f"Could not move {source.name}: {last}")
 
 
+def _restore_moved(install: Path, previous: Path, moved: list[str]) -> None:
+    """Put files back when a move stops halfway. Untouched files stay."""
+    for name in moved:
+        source = previous / name
+        dest = install / name
+        if source.exists() and not dest.exists():
+            try:
+                os.rename(source, dest)
+            except OSError:
+                continue
+
+
 def _restore_frozen(install: Path, previous: Path) -> None:
+    """Put a partial copy aside and move the previous files back.
+
+    The install directory is not renamed, so a console can keep it as its
+    current directory.
+    """
     if not previous.is_dir():
         return
     broken = install.parent / f"{install.name}.broken"
-    if broken.exists():
-        _rmtree(broken)
-    if install.exists():
-        rename_retry(install, broken)
-    rename_retry(previous, install)
+    for child in list(install.iterdir()):
+        if child.name == ".env":
+            continue
+        broken.mkdir(exist_ok=True)
+        dest = broken / child.name
+        if dest.exists():
+            if dest.is_dir() and not dest.is_symlink():
+                _rmtree(dest)
+            else:
+                dest.unlink()
+        try:
+            os.rename(child, dest)
+        except OSError:
+            continue
+    for child in list(previous.iterdir()):
+        dest = install / child.name
+        if dest.exists():
+            continue
+        try:
+            os.rename(child, dest)
+        except OSError:
+            continue
 
 
 def _rmtree(path: Path) -> None:
@@ -659,50 +816,6 @@ def wait_port_closed(port: int, seconds: float, host: str = "127.0.0.1") -> bool
             return True
         time.sleep(0.4)
     return not port_open(port, host)
-
-
-def wait_port_open(port: int, seconds: float, host: str = "127.0.0.1") -> bool:
-    if port <= 0 or seconds <= 0:
-        return True
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if port_open(port, host):
-            return True
-        time.sleep(0.4)
-    return port_open(port, host)
-
-
-def start_logged(argv: list[str], cwd: str, log_path: str) -> subprocess.Popen:
-    if log_path:
-        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        handle = open(log_path, "a", encoding="utf-8")
-    else:
-        handle = subprocess.DEVNULL
-    try:
-        kwargs: dict = {
-            "args": argv,
-            "cwd": cwd,
-            "stdin": subprocess.DEVNULL,
-            "stdout": handle,
-            "stderr": subprocess.STDOUT,
-            "close_fds": True,
-        }
-        env = os.environ.copy()
-        # A new yaver.exe must not stay tied to the executable that spawned us.
-        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        kwargs["env"] = env
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000 | 0x01000000
-            try:
-                return subprocess.Popen(**kwargs)
-            except OSError:
-                kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
-        else:
-            kwargs["start_new_session"] = True
-        return subprocess.Popen(**kwargs)
-    finally:
-        if handle is not subprocess.DEVNULL:
-            handle.close()
 
 
 def _log(plan: dict, message: str) -> None:

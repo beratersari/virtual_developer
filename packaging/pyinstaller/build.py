@@ -123,6 +123,22 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
     return dest
 
 
+def stage_updater(bundled: Path) -> None:
+    """Ship the operator update script next to the executable."""
+    if os.name == "nt":
+        src = ROOT / "packaging" / "windows" / "update.bat"
+        if not src.is_file():
+            raise FileNotFoundError(f"missing {src}")
+        shutil.copy2(src, bundled / "update.bat")
+        return
+    src = ROOT / "packaging" / "linux" / "update.sh"
+    if not src.is_file():
+        raise FileNotFoundError(f"missing {src}")
+    dest = bundled / "update.sh"
+    shutil.copy2(src, dest)
+    dest.chmod(dest.stat().st_mode | 0o111)
+
+
 def stage_agent_installers(bundled: Path) -> None:
     """Ship one copy script for this OS (bat on Windows, sh on Linux)."""
     if os.name == "nt":
@@ -281,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     stage_opencoderman(bundled)
     stage_agent_installers(bundled)
+    stage_updater(bundled)
 
     version = _product_version()
     version_safe = version.replace("+", ".")

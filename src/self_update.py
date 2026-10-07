@@ -1,8 +1,18 @@
-"""Ask a LAN release server for the latest package and install it.
+"""Retired in-process installer. The operator path is the script.
 
-``yaver update`` runs while Yaver is stopped. A helper copied outside the
-install waits until this process exits, swaps the files, and starts Yaver
-again. ``.env`` and the data folder are kept. A git checkout is refused.
+Run ``update.bat`` on Windows or ``./update.sh`` on Linux from the
+install folder. ``cli.py`` must not call ``update_stopped_install``.
+This module stays so the older helper tests still have a library.
+
+The old command stopped a dashboard that was already listening, then a
+helper copied outside the install swapped the files. The helper does not
+start Yaver. An existing ``.env`` is left untouched, and the data folder
+is kept. A git checkout is refused.
+
+On Windows a frozen ``yaver.exe`` keeps ``_internal`` mapped until the
+process exits. That command records its own pid and exits before the
+helper moves the folder. A source install can stay open: its pid in the
+plan is 0, and the helper swaps while the command waits.
 """
 
 from __future__ import annotations
@@ -333,6 +343,175 @@ def install_is_running() -> bool:
     return port_open(port, probe)
 
 
+def _endpoint_port(token: str) -> int | None:
+    text = token.strip()
+    if text.startswith("[") and "]:" in text:
+        text = text.rsplit("]:", 1)[-1]
+    else:
+        text = text.rsplit(":", 1)[-1]
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def listener_pids_from_netstat(text: str, port: int) -> list[int]:
+    """Listening PIDs from ``netstat -ano`` whose local port is exactly *port*."""
+    want = int(port)
+    found: list[int] = []
+    for line in (text or "").splitlines():
+        if "LISTEN" not in line.upper():
+            continue
+        parts = line.split()
+        if len(parts) < 4 or _endpoint_port(parts[1]) != want:
+            continue
+        pid_text = parts[-1]
+        if not pid_text.isdigit():
+            continue
+        pid = int(pid_text)
+        if pid > 0 and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _dashboard_listener_pids(port: int) -> list[int]:
+    """PIDs listening on the dashboard port. Empty when the list cannot be read."""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+            return listener_pids_from_netstat(result.stdout or "", port)
+        from src.opencode_serve_supervisor import pids_from_ss
+
+        result = subprocess.run(
+            ["ss", "-ltnp", f"sport = :{int(port)}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return pids_from_ss(result.stdout or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def _stop_listener(pid: int) -> None:
+    """Stop the process that owns the dashboard socket. Leave its other children."""
+    if pid <= 0 or pid == os.getpid():
+        return
+    if sys.platform == "win32":
+        from src.update_helper import _terminate_one
+
+        _terminate_one(pid)
+        return
+    import signal
+
+    from src.update_helper import wait_dead
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    if not wait_dead(pid, 5):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
+
+
+def _terminal(report: Callable[[str], None] | None, message: str) -> None:
+    """Print one update step on this command's terminal.
+
+    The line is paths, ports, and versions. ``.env`` contents stay out.
+    """
+    text = " ".join(str(message).splitlines()).strip()
+    if not text:
+        return
+    if report is not None:
+        report(text)
+        return
+    logger.info(text)
+
+
+def _process_image(pid: int) -> str:
+    """Executable name for a pid. Empty when it cannot be read.
+
+    The command line is left unread. It can hold paths from ``.env``.
+    """
+    if pid <= 0 or pid == os.getpid():
+        return ""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+            line = (result.stdout or "").strip()
+            if not line or str(int(pid)) not in line:
+                return ""
+            name = line.split(",")[0].strip().strip('"')
+            if not name or name.lower().startswith("info:"):
+                return ""
+            return name
+        comm = Path(f"/proc/{int(pid)}/comm")
+        if comm.is_file():
+            return comm.read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return ""
+    return ""
+
+
+def stop_running_dashboard(report: Callable[[str], None] | None = None) -> None:
+    """Stop the process listening on the dashboard port.
+
+    The update command itself keeps running while that listener stops.
+    The file swap still waits until this port is closed, and it does not
+    start Yaver. On Windows the executable exits later, before
+    ``_internal`` is moved.
+    """
+    from src.update_helper import pid_alive, port_open, wait_port_closed
+
+    probe, port = _dashboard_probe()
+    _terminal(report, f"dashboard probe={probe} port={port}")
+    if port < 1 or not port_open(port, probe):
+        _terminal(report, f"dashboard port {port} is closed")
+        return
+    if report is not None:
+        report("Stopping Yaver.")
+    logger.info(f"Stopping Yaver on port {port}")
+    victims = [
+        pid for pid in _dashboard_listener_pids(port) if pid > 0 and pid != os.getpid()
+    ]
+    if not victims:
+        _terminal(report, "dashboard port is open and no listener pid was found")
+        raise UpdateError(
+            "The dashboard port is open, and its process could not be found."
+        )
+    for pid in victims:
+        image = _process_image(pid)
+        label = f"pid={pid} image={image}" if image else f"pid={pid}"
+        _terminal(report, f"stopping listener {label}")
+        _stop_listener(pid)
+        _terminal(report, f"listener pid={pid} alive={str(pid_alive(pid)).lower()}")
+    if not wait_port_closed(port, 15, probe):
+        _terminal(report, f"dashboard port {port} still open")
+        raise UpdateError("Yaver is still running.")
+    _terminal(report, f"dashboard port {port} is closed")
+
+
 def _dashboard_probe() -> tuple[str, int]:
     from src.config import settings
 
@@ -367,14 +546,24 @@ def update_stopped_install(
     shutdown: Callable[[], None],
     report: Callable[[str], None] | None = None,
 ) -> None:
-    """Download the published package and hand the swap to the helper.
+    """Download the published package and wait while the helper swaps files.
 
-    Call this only when Yaver is stopped. ``shutdown`` must exit this
-    process. The helper waits for that exit, then starts Yaver again.
+    A dashboard that is already listening is stopped first. The helper
+    does not start Yaver. Each step is printed on this terminal.
     """
-    if install_is_running():
-        raise UpdateError("Yaver is running. Stop it, then run yaver update.")
+    _terminal(
+        report,
+        f"update pid={os.getpid()} frozen={is_frozen()} install={install_root()}",
+    )
+    try:
+        from src import __version__
+
+        _terminal(report, f"local version={__version__}")
+    except Exception as exc:
+        _terminal(report, f"local version unread: {type(exc).__name__}")
+    stop_running_dashboard(report)
     chosen_host, chosen_port = _chosen_release(host, port)
+    _terminal(report, f"release {chosen_host}:{chosen_port}")
     base = release_base_url(chosen_host, chosen_port)
     blocked = checkout_block()
     if blocked:
@@ -391,26 +580,40 @@ def run_apply_job(
     report: Callable[[str], None] | None = None,
 ) -> None:
     def say(text: str) -> None:
-        if report is not None:
-            report(text)
+        _terminal(report, text)
 
+    _run_apply_job(base, shutdown, say, spawn)
+
+
+def _run_apply_job(
+    base: str,
+    shutdown: Callable[[], None],
+    say: Callable[[str], None],
+    spawn: Callable[[Path, str], None] | None,
+) -> None:
     platform = local_platform()
     layout = local_layout()
+    say(f"fetch {base} platform={platform} layout={layout}")
     remote = fetch_latest(base, platform)
     version = str(remote["version"])
     remote_layout = str(remote.get("layout") or "")
+    size = int(remote.get("size") or 0)
     _set(remote_version=version, remote_notes=str(remote.get("notes") or ""), remote_layout=remote_layout)
     from src import __version__
 
+    say(
+        f"remote version={version} layout={remote_layout or 'unknown'} "
+        f"size={size} local={__version__}"
+    )
     if versions_equal(version, __version__):
         raise UpdateError(f"This install is already {version}.")
     if remote_layout in {"frozen", "source"} and remote_layout != layout:
         raise UpdateError(_layout_mismatch(layout, remote_layout))
     work = _work_dir()
     archive = work / f"yaver-{version}.zip"
-    size = int(remote.get("size") or 0)
     _set(phase="downloading", bytes_done=0, bytes_total=size, error="")
     say(f"Downloading {version}.")
+    say(f"downloading {archive}")
     download_release(
         base,
         platform,
@@ -418,6 +621,7 @@ def run_apply_job(
         expected_sha=str(remote["sha256"]),
         expected_size=size,
     )
+    say(f"downloaded {archive} bytes={archive.stat().st_size}")
     _set(phase="verifying")
     say("Checking the package.")
     staging_parent = work / "staging"
@@ -425,67 +629,195 @@ def run_apply_job(
         shutil.rmtree(staging_parent, ignore_errors=True)
     payload = safe_extract(archive, staging_parent)
     found = classify_tree(payload)
+    say(f"staging {payload} classified={found}")
     if found != layout:
         if found in {"frozen", "source"}:
             raise UpdateError(_layout_mismatch(layout, found))
         raise UpdateError("The published package is not a Yaver executable or install zip.")
     plan_path = work / "plan.json"
     plan = _plan(payload, version, layout)
+    # A source install swaps while this command waits. Pid 0 tells the
+    # helper the mover is already free. A Windows executable has
+    # _internal mapped for the whole process, so the plan keeps this pid
+    # and the process exits before the move.
+    handoff = spawn is None and _windows_frozen_handoff(layout)
+    if spawn is None and not handoff:
+        plan["pid"] = 0
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
     if layout == "frozen" and sys.platform != "win32":
         _write_shell_plan(work / "plan.env", plan)
     applier = _applier_kind()
-    launcher = spawn or spawn_helper
-    launcher(plan_path, applier)
+    say(f"helper {applier} plan={plan_path}")
+    if spawn is not None:
+        spawn(plan_path, applier)
+        _set(phase="restarting", error="")
+        logger.info(f"Update staged {version}; replacing files")
+        say("helper detached")
+        say(
+            "The package is ready. The files will be replaced after this process exits. "
+            "Start Yaver after that."
+        )
+        shutdown()
+        return
+    if handoff:
+        say("Closing Yaver so Windows can replace the files.")
+        say(
+            "The command prompt can return before the copy finishes. "
+            "Wait for the line that begins with Updated to."
+        )
+        try:
+            os.chdir(plan_path.parent)
+        except OSError as exc:
+            raise UpdateError("Could not leave the install folder.") from exc
+        _spawn_console(_helper_argv(plan_path, applier), plan_path.parent)
+        _set(phase="restarting", error="")
+        logger.info(f"Update staged {version}; replacing files after this process exits")
+        say("helper continues after this process exits")
+        shutdown()
+        return
     _set(phase="restarting", error="")
-    logger.info(f"Update staged {version}; restarting")
-    say("The package is ready. Yaver will close and start again.")
+    logger.info(f"Update staged {version}; replacing files")
+    say("Replacing the files.")
+    try:
+        code = _run_helper_foreground(plan_path, applier)
+    except OSError as exc:
+        logger.exception("Could not start the updater", exc)
+        say(f"helper launch failed: {type(exc).__name__}: {exc}")
+        plan["pid"] = os.getpid()
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        if layout == "frozen" and sys.platform != "win32":
+            _write_shell_plan(work / "plan.env", plan)
+        spawn_helper(plan_path, applier)
+        say("helper will run after this command exits")
+        say(
+            "The files will be replaced after this command exits. "
+            "Start Yaver when the copy finishes."
+        )
+        shutdown()
+        return
+    say(f"helper exit={code}")
+    if code != 0:
+        message = _helper_failure(plan)
+        _set(phase="error", error=message)
+        raise UpdateError(message)
     shutdown()
 
 
-def spawn_helper(plan_path: Path, kind: str) -> None:
+def _helper_argv(plan_path: Path, kind: str) -> list[str]:
     work = plan_path.parent
-    log_path = work / "update.log"
     if kind == "python":
         interpreter = _interpreter()
         if not interpreter:
             raise UpdateError("Python was not found, so the files cannot be replaced.")
         script = work / "update_helper.py"
         shutil.copy2(_helper_file("update_helper.py"), script)
-        _spawn([interpreter, str(script), "--apply", str(plan_path)], work, log_path)
-        return
+        return [interpreter, str(script), "--apply", str(plan_path)]
     if kind == "powershell":
         script = work / "update_helper.ps1"
         shutil.copy2(_helper_file("update_helper.ps1"), script)
         windir = os.environ.get("SystemRoot", r"C:\Windows")
         powershell = str(Path(windir) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        _spawn(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script),
-                "-PlanPath",
-                str(plan_path),
-            ],
-            work,
-            log_path,
-        )
-        return
+        return [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-PlanPath",
+            str(plan_path),
+        ]
     script = work / "update_helper.sh"
     shutil.copy2(_helper_file("update_helper.sh"), script)
     try:
         os.chmod(script, 0o755)
     except OSError:
         pass
-    _spawn(["sh", str(script), str(work / "plan.env")], work, log_path)
+    return ["sh", str(script), str(work / "plan.env")]
+
+
+def spawn_helper(plan_path: Path, kind: str) -> None:
+    work = plan_path.parent
+    _spawn(_helper_argv(plan_path, kind), work, work / "update.log")
+
+
+def _windows_frozen_handoff(layout: str) -> bool:
+    """True when this process is the Windows executable that maps ``_internal``."""
+    return sys.platform == "win32" and layout == "frozen" and is_frozen()
+
+
+def _spawn_console(args: list[str], cwd: Path) -> None:
+    """Start the helper on this console and return.
+
+    The caller exits afterwards. ``CREATE_NO_WINDOW`` would hide the
+    steps, and staying inside ``yaver.exe`` keeps ``_internal`` locked.
+    """
+    kwargs: dict[str, Any] = {
+        "args": args,
+        "cwd": str(cwd),
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        # Leave a kill-on-close job, and keep this console.
+        kwargs["creationflags"] = 0x00000200 | 0x01000000
+        try:
+            subprocess.Popen(**kwargs)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 5:
+                raise UpdateError(
+                    "Windows would stop the updater when this Yaver closes. "
+                    "Start yaver.exe on its own, then update again."
+                ) from exc
+            raise
+    kwargs["start_new_session"] = True
+    subprocess.Popen(**kwargs)
+
+
+def _run_helper_foreground(plan_path: Path, kind: str) -> int:
+    """Run the helper and wait. A source install stays open until the copy finishes.
+
+    A Windows executable does not use this path. It maps ``_internal`` until
+    it exits, so the helper runs only after that process is gone. Windows
+    ``os.execv`` starts a second process and drops its exit code, so the
+    console would return before the outcome is known. The helper replaces
+    files in place and does not start Yaver.
+    """
+    argv = _helper_argv(plan_path, kind)
+    try:
+        os.chdir(plan_path.parent)
+    except OSError as exc:
+        raise UpdateError("Could not leave the install folder.") from exc
+    program = argv[0]
+    if program == "sh":
+        resolved = shutil.which("sh") or "/bin/sh"
+        argv = [resolved, *argv[1:]]
+    completed = subprocess.run(
+        argv,
+        cwd=str(plan_path.parent),
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    return int(completed.returncode)
+
+
+def _helper_failure(plan: dict[str, Any]) -> str:
+    path = Path(str(plan.get("result") or ""))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        text = str(data.get("error") or "").strip()
+        if text:
+            return text
+    return "The files were not replaced. The update log has the details."
 
 
 def _apply_thread(base: str, shutdown: Callable[[], None]) -> None:
     try:
-        run_apply_job(base, shutdown)
+        # A background thread must not replace the daemon process image.
+        run_apply_job(base, shutdown, spawn=spawn_helper)
     except UpdateError as exc:
         logger.warning(f"Update stopped: {exc}")
         _set(phase="error", error=str(exc))
@@ -803,8 +1135,8 @@ def _message(
         return "Checking the download."
     if phase == "restarting":
         return (
-            f"Closing Yaver to install {remote_version}. "
-            "It will open again with the same settings."
+            f"Replacing this copy with {remote_version}. "
+            "Start Yaver after the files are in place."
         )
     if error:
         return error

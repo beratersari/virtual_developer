@@ -19,6 +19,17 @@ the full Windows/Linux offline zip, or your own OpenCode/Codex install).
 
 4. Open http://127.0.0.1:8080
 
+Later, update this folder in place. Set RELEASE_HOST and RELEASE_PORT
+in .env to the office release site, then run:
+
+  Windows:  update.bat
+  Linux:    chmod 755 update.sh
+            ./update.sh
+
+The script stops Yaver, then replaces the program files. .env and the
+script you ran stay. Start yaver.exe or ./yaver after the line that
+begins with "Updated to".
+
 Other commands (same as ``python cli.py``):
 
    yaver --help
