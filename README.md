@@ -77,7 +77,7 @@ This is the only Jira intake. There is no Jira comment webhook for starting work
 
 All of these:
 
-- Issue is on the configured **board** (`JIRA_BOARD_ID`). Scrum: **first active sprint only**.
+- Issue is on a configured **board** (`JIRA_BOARD_ID`, comma-separated). Each Scrum board: **first active sprint only**.
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like: To Do, New, Open, Backlog, Yapılacaklar, …).
 - Assignee matches `JIRA_TRIGGER_USER`.
 - If `JIRA_TRIGGER_LABEL` is set, the issue also needs one of those labels.
@@ -464,7 +464,7 @@ Copy [`.env.example`](.env.example) → `.env`. Never commit secrets.
 | `JIRA_API_TOKEN` | On-prem PAT or Cloud API token |
 | `JIRA_EMAIL` | Cloud/dev only → HTTP Basic. Empty = Bearer PAT (prod) |
 | `JIRA_PROJECTS` | Project keys: default create + parse keys from GitLab/Azure titles (`feat(KAN-12):`) |
-| `JIRA_BOARD_ID` | Agile board to poll (**required** for Jira discovery) |
+| `JIRA_BOARD_ID` | Agile boards to poll, comma-separated (**required** for Jira discovery). Each Scrum board uses its first active sprint |
 | `JIRA_TRIGGER_USER` | Assignee / mention names (comma-separated, no `@`) |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake also needs one of these labels |
 
@@ -563,7 +563,7 @@ Default branch is **`develop`**. Feature MRs go into `develop`. Release: tag `vM
 
 | Symptom | What to check |
 |---------|----------------|
-| Jira poller idle | `JIRA_BOARD_ID`, To Do, bot assignee, `python cli.py process KEY` |
+| Jira poller idle | `JIRA_BOARD_ID` (comma-separated), To Do, bot assignee, `python cli.py process KEY` |
 | Jira To Do + bot but nothing happens | `plan_ready` → use `plan_execute`. `completed`/`error`/`cancelled` on To Do **is** rework — check logs |
 | Azure assign does nothing | State must be To Do / In Progress / New / Active / Doing (not Resolved/Done). Webhook enabled? Assigned To matches `AZURE_TRIGGER_USER`? |
 | Azure plan never implements | Comment `@bot /planExecute` on the **work item**, not the PR |

@@ -1182,13 +1182,13 @@ export function SettingsPage() {
       <label className="field">
         <span>Board ID</span>
         <input
-          inputMode="numeric"
           value={draft.jira_board_id}
           onChange={(e) => mark('jira_board_id', e.target.value)}
-          placeholder="1"
+          placeholder="2, 5"
         />
         <span className="text-xs text-text-muted">
-          Numeric Agile board id from the board URL.
+          Agile board ids from each board URL, separated by commas. Each
+          Scrum board still uses only its first active sprint.
         </span>
       </label>
       <label className="field">

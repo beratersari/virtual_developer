@@ -362,6 +362,9 @@ JIRA_API_TOKEN=your-api-token-here
   from `/sprint?state=active`. Parallel sprints are not merged. Put bot
   tickets on that first sprint, or use a Kanban board (no sprints → whole
   board). Do not “fix” by loading every active sprint.
+  `JIRA_BOARD_ID` may list several boards (`2,5`). Each board is polled
+  on its own. One board's sprint error or empty sprint does not drop the
+  others. An issue present on two boards is taken once.
 
 ### Config checklist (common)
 
@@ -370,7 +373,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
-| `JIRA_BOARD_ID` | Sprint/board poller board. Scrum: first active sprint only (not parallel sprints). Kanban: whole board. |
+| `JIRA_BOARD_ID` | Sprint/board poller. Comma-separated Agile board ids (e.g. `2,5`). Each Scrum board uses its first active sprint only. Kanban loads that whole board. A sprint error on one board does not drop the others. An issue on two boards is taken once. |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |

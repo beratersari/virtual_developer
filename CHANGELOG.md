@@ -11,6 +11,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Added
 
 - Scheduled merge requests and pull requests can run as a review. On Scheduled → MR, Mode **GitLab review** starts a GitLab review. On Scheduled → PR, Mode **Azure review** starts an Azure review. Existing issues and new issues stay on plan, build, and test. An empty model uses the review model from Settings.
+- Settings Board ID accepts several Jira boards, comma-separated (for example `2, 5`). The poller reads each board. Each Scrum board still uses only its first active sprint. A failure on one board leaves the others in that cycle, and an issue that sits on two boards is taken once.
 
 ### Fixed
 

@@ -77,7 +77,7 @@ Jira’da tek giriş budur. Yorumla iş başlatan bir Jira webhook’u yoktur.
 
 Hepsi birden:
 
-- İş, ayarlı **panoda** (`JIRA_BOARD_ID`). Scrum: **yalnızca ilk aktif sprint**.
+- İş, ayarlı **panolardan** birinde (`JIRA_BOARD_ID`, virgülle). Her Scrum panosu: **yalnızca ilk aktif sprint**.
 - Durum **Yapılacaklar** gibi görünür (ad veya `statusCategory` new: To Do, New, Open, Backlog, Yapılacaklar, …).
 - Atanan `JIRA_TRIGGER_USER` ile eşleşir.
 - `JIRA_TRIGGER_LABEL` doluysa işte o etiketlerden biri de gerekir.
@@ -456,7 +456,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 | `JIRA_API_TOKEN` | Yerinde PAT veya Cloud API jetonu |
 | `JIRA_EMAIL` | Yalnız Cloud/dev → HTTP Basic. Boş = Bearer PAT |
 | `JIRA_PROJECTS` | Proje anahtarları; GitLab/Azure başlığından `KAN-12` okumak için de kullanılır |
-| `JIRA_BOARD_ID` | Taranacak Agile panosu (Jira keşfi için **zorunlu**) |
+| `JIRA_BOARD_ID` | Taranacak Agile panoları, virgülle (**zorunlu**). Her Scrum panosu ilk aktif sprinti kullanır |
 | `JIRA_TRIGGER_USER` | Atanan / bahis adları (virgül, `@` yok) |
 | `JIRA_TRIGGER_LABEL` | İsteğe bağlı. Doluysa Yapılacaklar girişinde bu etiketlerden biri de gerekir |
 
@@ -504,7 +504,7 @@ python cli.py cancel PROJ-123
 
 | Belirti | Bakın |
 |---------|--------|
-| Jira tarayıcı boş | `JIRA_BOARD_ID`, Yapılacaklar, bot ataması, `python cli.py process KEY` |
+| Jira tarayıcı boş | `JIRA_BOARD_ID` (virgülle), Yapılacaklar, bot ataması, `python cli.py process KEY` |
 | Jira Yapılacaklar + bot ama iş yok | `plan_ready` → `plan_execute`. To Do’da `completed`/`error`/`cancelled` **yeniden iştir** — günlüğe bakın |
 | Azure atama işe yaramıyor | Durum To Do / In Progress / New / Active / Doing olmalı (Resolved/Done değil). Webhook açık mı? Assigned To `AZURE_TRIGGER_USER` ile uyuşuyor mu? |
 | Azure planı uygulanmıyor | `@bot /planExecute` yorumunu **iş öğesine** yazın, PR’ye değil |
