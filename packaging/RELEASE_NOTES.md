@@ -1,3 +1,7 @@
+# Yaver 0.9.76
+
+The Windows offline package and the OpenCode, Claude Code, and Codex zips are built again. The 0.9.75 Windows dist deleted the downloaded binaries and then tried to pack those zips from the missing files. The zips are packed first, and the download cache is removed after that.
+
 # Yaver 0.9.75
 
 A finished GitLab `/review`, `/ask`, or `/yaver` reply is marked reviewed, so the merge request shows Re-request review. `/ask` posts the overview and leaves approval to `/review`. When a `/review` findings JSON is empty, Yaver approves the merge request and still posts the overview note.
