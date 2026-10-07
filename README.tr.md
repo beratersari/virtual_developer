@@ -150,7 +150,7 @@ Mode: plan
 |-------|---------|
 | `@yaver /yaver login için test ekle` | İş başlar. İstem yorumun geri kalanıdır. |
 | `@yaver` (`/yaver` yok) | **O konuda** kullanım notu. İş yok. |
-| `@yaver /ask …` veya `@yaver /review …` | Kod incelemesi başlar (`/ask` takip sorusu). Creasy ile aynı kurallar: `/review`, `/ask`, botu reviewer ata, veya bot zaten reviewer iken MR aç. Yeni commit yeniden incelemez. İtme veya yeni MR yok. |
+| `@yaver /ask …` veya `@yaver /review …` | Kod incelemesi başlar (`/ask` takip sorusu). Creasy ile aynı kurallar: `/review`, `/ask`, botu reviewer ata, veya bot zaten reviewer iken MR aç. Yeni commit yeniden incelemez. İtme veya yeni MR yok. Bitmiş `/review` veya `/ask` reviewed olarak işaretlenir; böylece yeniden inceleme isteme düğmesi çıkar. Boş bulgulu `/review` birleştirme isteğini onaylar ve notu yine yazar. `/ask` özeti yazar, onayı `/review` bırakır. Bitmiş `/yaver` yanıtı da incelemeyi reviewed yapar. |
 
 ### İş hangi kayda bağlanır
 

@@ -386,6 +386,18 @@ JIRA_API_TOKEN=your-api-token-here
 
 | `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment **or** when Assigned To matches on a work item. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /review` and `@name /ask` on a PR start a derman-reviewer job (no push). The same commands on a work item stay silent. |
 
+A finished GitLab `/review` posts the overview (and inline findings), then
+`POST .../draft_notes/bulk_publish` with `reviewer_state=reviewed`. A plain
+note leaves the reviewer unreviewed, so Re-request review stays hidden.
+A finished `/ask` posts the overview and sends the same completed event.
+It leaves approval and inline threads to `/review`. A finished `/yaver`
+reply on that merge request sends the same completed event. When the
+findings JSON is empty (`"findings": []` or no recoverable findings), a
+`/review` approves the merge request and still posts the note. A
+successful approve is the finished state; do not also send `reviewed`.
+If approve fails, send `reviewed`. Do not use `requested_changes` for a
+normal review. Proof: `tests/test_gitlab_review_complete.py`.
+
 ---
 
 ## 3b. Ops dashboard

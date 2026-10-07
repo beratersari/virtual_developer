@@ -150,7 +150,7 @@ Set `GITLAB_WEBHOOK_SECRET` to the same secret GitLab sends. Set `GITLAB_TRIGGER
 |---------|----------------|
 | `@yaver /yaver add tests for login` | Starts a job. Prompt is the rest of the comment. |
 | `@yaver` (no `/yaver`) | Usage note in **that thread**. No job. |
-| `@yaver /ask …` or `@yaver /review …` | Starts a code review (or a follow-up on `/ask`). Same rules as Creasy: `/review`, `/ask`, assign the bot as reviewer, or open an MR that already lists the bot. New commits do not re-review. No push or new MR. |
+| `@yaver /ask …` or `@yaver /review …` | Starts a code review (or a follow-up on `/ask`). Same rules as Creasy: `/review`, `/ask`, assign the bot as reviewer, or open an MR that already lists the bot. New commits do not re-review. No push or new MR. A finished `/review` or `/ask` is marked reviewed, so Re-request review appears. An empty `/review` findings list approves the merge request and still posts the note. `/ask` posts the overview and leaves approval to `/review`. A finished `/yaver` reply marks the review reviewed too. |
 
 ### Which ticket the job binds to
 

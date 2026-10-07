@@ -10,6 +10,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Changed
 
+- A finished GitLab `/review`, `/ask`, or `/yaver` reply is marked reviewed, so the merge request shows Re-request review. `/ask` posts the overview and leaves approval to `/review`. When a `/review` findings JSON is empty, Yaver approves the merge request and still posts the overview note.
 - OpenCode, Claude Code, and Codex release zips are named with that tool's version. A Windows OpenCode 1.18.10 package is `yaver-opencode-windows-x64-1.18.10.zip`. Claude Code and Codex use the same pattern, and the Linux names do too.
 - Update an executable install from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`. The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env`, checks the package, stops Yaver in that folder, and replaces the program files (`yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`). `.env` and the script you ran stay. Start Yaver after the line that begins with Updated to.
 - An install that does not have `update.bat` or `update.sh` yet can take the script from the published zip: download the zip once, copy that script into the Yaver folder, and run it there.

@@ -6315,6 +6315,7 @@ class JobProcessor:
         *,
         kind: str = "Answer",
         job_id: str = "",
+        finish_review: bool = False,
     ) -> bool:
         """Post *body* on the GitLab MR stored in issue metadata (CE + EE)."""
         meta = dict(state.metadata or {})
@@ -6369,7 +6370,50 @@ class JobProcessor:
                 discussion_id="",
                 allow_new_thread=True,
             )
+        if finish_review and posted is not None:
+            self._finish_gitlab_reviewer(state, approve=False)
         return posted is not None
+
+    def _finish_gitlab_reviewer(
+        self,
+        state: JiraAgentState,
+        *,
+        approve: bool = False,
+    ) -> None:
+        """Set the bot's GitLab review to a finished state.
+
+        A plain note leaves the reviewer unreviewed, so Re-request review
+        stays hidden. ``reviewed`` is that completed event. ``/review``,
+        ``/ask``, and a finished ``/yaver`` reply send it. An empty
+        ``/review`` approves instead. Approval is itself a finished
+        state, so a successful approve does not also send ``reviewed``.
+        """
+        meta = dict(getattr(state, "metadata", None) or {})
+        host = str(meta.get("gitlab_host") or "").strip()
+        project = meta.get("gitlab_project_id") or meta.get("gitlab_project")
+        try:
+            iid = int(meta.get("gitlab_mr_iid") or 0)
+        except (TypeError, ValueError):
+            iid = 0
+        key = getattr(state, "issue_key", "") or ""
+        if not host or not project or iid <= 0:
+            logger.warning(
+                f"{key}: GitLab review complete skipped "
+                f"(host={host!r} project={project!r} iid={iid})"
+            )
+            return
+        from src.gitlab.client import GitlabClient
+
+        client = GitlabClient(host=host)
+        try:
+            if approve and client.approve_merge_request(project=project, mr_iid=iid):
+                logger.info(f"{key}: approved GitLab MR !{iid} (no findings)")
+                return
+            client.publish_reviewer_state(
+                project=project, mr_iid=iid, state="reviewed"
+            )
+        except Exception as e:
+            logger.warning(f"{key}: GitLab review complete failed: {e}")
 
     async def _maybe_enqueue_lifecycle_review(self, event: Any) -> Dict[str, Any]:
         """Creasy: open+already-reviewer or assign/re-request starts a review."""
@@ -6688,7 +6732,11 @@ class JobProcessor:
         *,
         azure: bool,
     ) -> None:
-        """Overview note (thread reply when we have one) plus inline findings."""
+        """Overview note, then inline findings on /review.
+
+        /ask posts the overview only. On GitLab it still marks the
+        review reviewed. Approval stays on an empty /review.
+        """
         from src.backends.codex import format_agent_answer_for_comment
         from src.review.findings import split_findings
         from src.review.post import post_inline_findings
@@ -6703,6 +6751,8 @@ class JobProcessor:
         else:
             self._post_gitlab_mr_reply(live, markdown, kind="Review")
         if self._comment_command(event) == "ask":
+            if not azure:
+                self._finish_gitlab_reviewer(live, approve=False)
             return
         meta = dict(live.metadata or {})
         target = str(
@@ -6728,6 +6778,8 @@ class JobProcessor:
                 state.issue_key,
                 metadata={"review_findings_posted": posted},
             )
+        if not azure:
+            self._finish_gitlab_reviewer(live, approve=not findings)
 
     def _gitlab_mr_reply_body(
         self,
@@ -7094,6 +7146,7 @@ class JobProcessor:
                         commit_url=str(meta.get("last_commit_url") or ""),
                         delivery_note=delivery_note,
                     ),
+                    finish_review=True,
                 )
                 if not posted:
                     logger.error(
@@ -7169,6 +7222,7 @@ class JobProcessor:
                             commit_url=str(meta.get("last_commit_url") or ""),
                             delivery_note=note,
                         ),
+                        finish_review=True,
                     )
                     # Intentional: no expected_job_id. This stamp runs while the
                     # per-issue lock is held, so a newer begin cannot exist yet.
