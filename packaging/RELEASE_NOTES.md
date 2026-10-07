@@ -1,3 +1,11 @@
+# Yaver 0.9.77
+
+Scheduled merge requests and pull requests can run as a review. On Scheduled → MR, Mode **GitLab review** starts a GitLab review. On Scheduled → PR, Mode **Azure review** starts an Azure review. Existing issues and new issues stay on plan, build, and test. An empty model uses the review model from Settings.
+
+Settings Board ID accepts several Jira boards, comma-separated (for example `2, 5`). The poller reads each board. Each Scrum board still uses only its first active sprint. A failure on one board leaves the others in that cycle, and an issue that sits on two boards is taken once.
+
+Windows `update.bat` copies program folders with robocopy. It writes the published version into `VERSION` and `_internal/VERSION`, including when the package still has the previous text in those files. Copy the new `update.bat` from this zip into the Yaver folder once before you run it. The script that is already running is left in place.
+
 # Yaver 0.9.76
 
 The Windows offline package and the OpenCode, Claude Code, and Codex zips are built again. The 0.9.75 Windows dist deleted the downloaded binaries and then tried to pack those zips from the missing files. The zips are packed first, and the download cache is removed after that.
