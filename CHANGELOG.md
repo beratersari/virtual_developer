@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.79] — 2026-10-07
+
+`update.bat` and `update.sh` write the published version into `VERSION` and `_internal/VERSION` when either file is still older.
+
+### Fixed
+
+- `update.bat` and `update.sh` write the published version into `VERSION` and `_internal/VERSION` when either file is still older. A blank `RELEASE_HOST` uses `15.210.7.55`. A blank `RELEASE_PORT` uses `8090`.
+
+[0.9.79]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.79
+
 ## [0.9.78] — 2026-10-07
 
 Starting a Jira job assigns the issue to the trigger user from Settings.

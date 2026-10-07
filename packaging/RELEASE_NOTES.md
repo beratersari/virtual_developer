@@ -1,3 +1,7 @@
+# Yaver 0.9.79
+
+`update.bat` and `update.sh` write the published version into `VERSION` and `_internal/VERSION` when either file is still an older version. A root `VERSION` that already matches no longer leaves `_internal/VERSION` unchanged. Robocopy copies a version file even when the new text is the same length. A blank `RELEASE_HOST` uses `15.210.7.55`. A blank `RELEASE_PORT` uses `8090`. A host or port already in `.env` is kept. Copy the new `update.bat` or `update.sh` from this zip into the Yaver folder once before you run it. The script that is already in the folder stays until you replace it.
+
 # Yaver 0.9.78
 
 Starting a Jira job assigns the issue to the trigger user from Settings. The PAT user is used when that name is empty or Jira rejects the assign.
