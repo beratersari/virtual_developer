@@ -19,7 +19,10 @@ from werkzeug.serving import make_server
 from src.dashboard.api import create_dashboard_app
 from src.gitlab.client import GitlabClient, project_from_repo_url
 from src.processor import JobProcessor
+from unittest.mock import AsyncMock, MagicMock
+
 from src.scheduler.service import (
+    _dispatch_mr_followup,
     dispatch_schedule_now,
     format_dashboard_mr_prompt_note,
     preview_mr_followup,
@@ -147,6 +150,7 @@ def test_preview_and_schedule_mr_against_sim(tmp_path, monkeypatch, sim_gl):
     assert result["ok"] is True
     rec = result["schedule"]
     assert rec["source"] == "gitlab_mr"
+    assert rec["mode"] == "build"
     assert rec["mr_iid"] == 1
     assert rec["gitlab_project"] == "acme/demo"
     assert rec["status"] == "scheduled"
@@ -286,6 +290,7 @@ def test_api_preview_and_create_mr_schedule(tmp_path, monkeypatch, sim_gl):
     assert payload["ok"] is True
     rec = payload["schedule"]
     assert rec["source"] == "gitlab_mr"
+    assert rec["mode"] == "build"
     assert rec["mr_iid"] == 1
     listed = client.get("/api/schedules").json()["schedules"]
     assert any(r.get("schedule_id") == rec["schedule_id"] for r in listed)
@@ -295,3 +300,148 @@ def test_preview_missing_mr_is_hard_fail(sim_gl):
     result = preview_mr_followup(sim_gl.repo, 99)
     assert result["ok"] is False
     assert "99" in (result.get("error") or "")
+
+
+def _mr_preview_ok(url: str, iid: int) -> dict:
+    return {
+        "ok": True,
+        "mr_iid": int(iid or 3),
+        "gitlab_project": "acme/demo",
+        "gitlab_host": "gitlab.example.com",
+        "title": "feat(KAN-1): login",
+        "repository_url": url,
+        "source_branch": "feature/login",
+        "target_branch": "develop",
+        "merge_request_url": "https://gitlab.example.com/acme/demo/-/merge_requests/3",
+        "issue_key": "KAN-1",
+    }
+
+
+def test_schedule_mr_review_persists_review_mode(tmp_path, monkeypatch):
+    called = {"n": 0}
+
+    def preview(url, iid):
+        called["n"] += 1
+        return _mr_preview_ok(url, iid)
+
+    monkeypatch.setattr("src.scheduler.service.preview_mr_followup", preview)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    when = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    result = schedule_mr_followup(
+        repository_url="https://gitlab.example.com/acme/demo.git",
+        mr_iid=3,
+        prompt="Check the login change.",
+        scheduled_at=when,
+        mode=" Review ",
+        store=store,
+    )
+    assert result["ok"] is True
+    assert result["schedule"]["mode"] == "review"
+    assert result["schedule"]["source"] == "gitlab_mr"
+    assert called["n"] == 1
+
+
+def test_schedule_mr_rejects_plan_before_lookup(tmp_path, monkeypatch):
+    def preview(url, iid):
+        raise AssertionError("preview must not run for a bad mode")
+
+    monkeypatch.setattr("src.scheduler.service.preview_mr_followup", preview)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    when = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    result = schedule_mr_followup(
+        repository_url="https://gitlab.example.com/acme/demo.git",
+        mr_iid=3,
+        prompt="Check the login change.",
+        scheduled_at=when,
+        mode="plan",
+        store=store,
+    )
+    assert result["ok"] is False
+    assert "review" in (result.get("error") or "")
+    assert store.count_schedules() == 0
+
+
+def test_api_mr_schedule_review_mode(tmp_path, monkeypatch, sim_gl):
+    from src.config import settings
+    from src.dashboard import api as api_mod
+    from src.scheduler import service as sched_mod
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    monkeypatch.setattr(api_mod, "schedule_store", store)
+    monkeypatch.setattr(sched_mod, "schedule_store", store)
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    app = create_dashboard_app(processor=None)
+    client = TestClient(app)
+    when = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    created = client.post(
+        "/api/schedules/mr",
+        json={
+            "repository_url": sim_gl.repo,
+            "mr_iid": 1,
+            "prompt": "Check the login change.",
+            "scheduled_at": when,
+            "mode": "review",
+        },
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["schedule"]["mode"] == "review"
+    rejected = client.post(
+        "/api/schedules/mr",
+        json={
+            "repository_url": sim_gl.repo,
+            "mr_iid": 1,
+            "prompt": "Check the login change.",
+            "scheduled_at": when,
+            "mode": "plan",
+        },
+    )
+    assert rejected.status_code == 400
+
+
+def _mr_dispatch_http(rec):
+    return {
+        "ok": True,
+        "mr": {"project_id": 1},
+        "posted": {"id": 9, "discussion_id": "disc"},
+        "host": "gitlab.example.com",
+        "project": "acme/demo",
+        "iid": 3,
+        "prompt": "Check the login change.",
+        "repo_url": "https://gitlab.example.com/acme/demo.git",
+        "src": "feature/login",
+        "tgt": "develop",
+        "title": "feat(KAN-1): login",
+        "desc": "",
+        "web": "https://gitlab.example.com/acme/demo/-/merge_requests/3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mr_review_sets_review_command(monkeypatch):
+    monkeypatch.setattr(
+        "src.scheduler.service._gitlab_mr_followup_http", _mr_dispatch_http
+    )
+    proc = MagicMock()
+    proc.enqueue_gitlab_note = AsyncMock(return_value={"ok": True, "queued": True})
+    out = await _dispatch_mr_followup(
+        proc,
+        {"mode": "review", "issue_key": "KAN-1", "model": "", "backend": ""},
+    )
+    assert out["ok"] is True
+    event = proc.enqueue_gitlab_note.await_args.args[0]
+    assert event.command == "review"
+    assert event.prompt == "Check the login change."
+    assert JobProcessor._is_review_comment(event) is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mr_followup_defaults_to_yaver(monkeypatch):
+    monkeypatch.setattr(
+        "src.scheduler.service._gitlab_mr_followup_http", _mr_dispatch_http
+    )
+    proc = MagicMock()
+    proc.enqueue_gitlab_note = AsyncMock(return_value={"ok": True, "queued": True})
+    out = await _dispatch_mr_followup(proc, {"issue_key": "KAN-1"})
+    assert out["ok"] is True
+    event = proc.enqueue_gitlab_note.await_args.args[0]
+    assert event.command == "yaver"

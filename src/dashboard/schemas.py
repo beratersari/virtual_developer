@@ -165,7 +165,7 @@ class ScheduleCreateRequest(BaseModel):
 
 
 class ScheduleMrRequest(BaseModel):
-    """Body for POST /api/schedules/mr — follow-up prompt on an existing GitLab MR."""
+    """Body for POST /api/schedules/mr — follow-up or review on an existing GitLab MR."""
 
     repository_url: str = Field(..., min_length=1, max_length=2000)
     mr_iid: int = Field(..., ge=1, le=2_000_000)
@@ -174,10 +174,12 @@ class ScheduleMrRequest(BaseModel):
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
     backend: str = Field(default="", max_length=40)
+    # build = follow-up. review = GitLab review. Not an issue work mode.
+    mode: str = Field(default="build", max_length=40)
 
 
 class SchedulePrRequest(BaseModel):
-    """Body for POST /api/schedules/pr — follow-up prompt on an existing Azure PR."""
+    """Body for POST /api/schedules/pr — follow-up or review on an existing Azure PR."""
 
     repository_url: str = Field(..., min_length=1, max_length=2000)
     pr_id: int = Field(..., ge=1, le=2_000_000)
@@ -186,6 +188,8 @@ class SchedulePrRequest(BaseModel):
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
     backend: str = Field(default="", max_length=40)
+    # build = follow-up. review = Azure review. Not an issue work mode.
+    mode: str = Field(default="build", max_length=40)
 
 
 class ScheduleExistingRequest(BaseModel):
@@ -812,8 +816,8 @@ class SettingsUpdate(BaseModel):
     jira_board_id: Optional[str] = Field(
         default=None,
         min_length=1,
-        max_length=64,
-        description="Jira Agile board id (digits only, e.g. 1)",
+        max_length=400,
+        description="Comma-separated Jira Agile board ids (e.g. 2, 5)",
     )
     jira_projects: Optional[str] = Field(
         default=None,
@@ -838,17 +842,10 @@ class SettingsUpdate(BaseModel):
     def _jira_board_id_digits(cls, value: Any) -> Optional[str]:
         if value is None:
             return None
-        text = str(value).strip()
-        if not text:
-            return None
-        # Strip accidental markdown wrapping: `1` or ``1``
-        if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
-            text = text[1:-1].strip()
-        if not text.isdigit():
-            raise ValueError(
-                "Jira board ID must be a number (Agile board id from the board URL, e.g. 1)"
-            )
-        return text
+        from src.config import format_jira_board_ids
+
+        text = format_jira_board_ids(value)
+        return text or None
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
     temp_clone_max_age_days: Optional[float] = Field(

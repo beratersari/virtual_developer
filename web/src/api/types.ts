@@ -521,6 +521,7 @@ export type ScheduleMrBody = {
   prompt: string
   scheduled_at: string
   dispatch_now?: boolean
+  mode?: 'build' | 'review'
   model?: string
   backend?: string
 }
@@ -551,6 +552,7 @@ export type SchedulePrBody = {
   prompt: string
   scheduled_at: string
   dispatch_now?: boolean
+  mode?: 'build' | 'review'
   model?: string
   backend?: string
 }

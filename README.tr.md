@@ -77,7 +77,7 @@ Jira’da tek giriş budur. Yorumla iş başlatan bir Jira webhook’u yoktur.
 
 Hepsi birden:
 
-- İş, ayarlı **panoda** (`JIRA_BOARD_ID`). Scrum: **yalnızca ilk aktif sprint**.
+- İş, ayarlı **panolardan** birinde (`JIRA_BOARD_ID`, virgülle). Her Scrum panosu: **yalnızca ilk aktif sprint**.
 - Durum **Yapılacaklar** gibi görünür (ad veya `statusCategory` new: To Do, New, Open, Backlog, Yapılacaklar, …).
 - Atanan `JIRA_TRIGGER_USER` ile eşleşir.
 - `JIRA_TRIGGER_LABEL` doluysa işte o etiketlerden biri de gerekir.
@@ -417,7 +417,7 @@ RELEASE_HOST=192.168.1.20
 RELEASE_PORT=8090
 ```
 
-Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
+Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Windows’ta klasörler robocopy ile kopyalanır. Çalıştırılabilirin yanındaki `VERSION` ve `_internal/VERSION` yayınlanan sürüme yazılır. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
 
 Bu klasörde `update.bat` veya `update.sh` yoksa zip’i bir kez indirin, betiği Yaver klasörüne kopyalayın ve orada çalıştırın. `yaver update` ve `yaver.exe --update` bu yönergeyi yazar ve dosyaları olduğu gibi bırakır.
 
@@ -437,7 +437,7 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 - **Tasks / Jobs** — canlı ve geçmiş koşular (istem ve günlükler seçili işe özgüdür)
 - **Poll** — son Jira pano anlığı
 - **Storage and Sessions** — geçici klonlar. Details, klasörü kullanan OpenCode sohbetlerini gösterir. Klasörü silinen sohbetler bu sayfada kalır ve sıfırlanabilir. İş klonu sahipse silme reddedilir. Birleşen GitLab MR ve biten Azure PR eşleşen klasörü siler. Bağlı MR/PR’si olmayanlar uyarılır.
-- **Scheduled** — sonra Jira işi veya Azure iş öğesi oluşturun / var olanı bulun. **Cancel** yalnız `scheduled` / `error` içindir (`dispatching` iptal edilemez).
+- **Scheduled** — sonra Jira işi veya Azure iş öğesi oluşturun / var olanı bulun. MR bölümünde Mode **GitLab review** bir GitLab incelemesi başlatır. PR bölümünde Mode **Azure review** bir Azure incelemesi başlatır. Var olan ve yeni işler plan, build ve test olarak kalır. **Cancel** yalnız `scheduled` / `error` içindir (`dispatching` iptal edilemez).
 - **Settings** — pano, tarama aralığı, tetik adları, Azure koleksiyon PAT’leri (jeton gösterilmez)
 
 Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Genel **Start** kapalı kalır. **Stop work** ajan çocuklarını hemen öldürür.
@@ -456,7 +456,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 | `JIRA_API_TOKEN` | Yerinde PAT veya Cloud API jetonu |
 | `JIRA_EMAIL` | Yalnız Cloud/dev → HTTP Basic. Boş = Bearer PAT |
 | `JIRA_PROJECTS` | Proje anahtarları; GitLab/Azure başlığından `KAN-12` okumak için de kullanılır |
-| `JIRA_BOARD_ID` | Taranacak Agile panosu (Jira keşfi için **zorunlu**) |
+| `JIRA_BOARD_ID` | Taranacak Agile panoları, virgülle (**zorunlu**). Her Scrum panosu ilk aktif sprinti kullanır |
 | `JIRA_TRIGGER_USER` | Atanan / bahis adları (virgül, `@` yok) |
 | `JIRA_TRIGGER_LABEL` | İsteğe bağlı. Doluysa Yapılacaklar girişinde bu etiketlerden biri de gerekir |
 
@@ -504,7 +504,7 @@ python cli.py cancel PROJ-123
 
 | Belirti | Bakın |
 |---------|--------|
-| Jira tarayıcı boş | `JIRA_BOARD_ID`, Yapılacaklar, bot ataması, `python cli.py process KEY` |
+| Jira tarayıcı boş | `JIRA_BOARD_ID` (virgülle), Yapılacaklar, bot ataması, `python cli.py process KEY` |
 | Jira Yapılacaklar + bot ama iş yok | `plan_ready` → `plan_execute`. To Do’da `completed`/`error`/`cancelled` **yeniden iştir** — günlüğe bakın |
 | Azure atama işe yaramıyor | Durum To Do / In Progress / New / Active / Doing olmalı (Resolved/Done değil). Webhook açık mı? Assigned To `AZURE_TRIGGER_USER` ile uyuşuyor mu? |
 | Azure planı uygulanmıyor | `@bot /planExecute` yorumunu **iş öğesine** yazın, PR’ye değil |

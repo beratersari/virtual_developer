@@ -1,6 +1,7 @@
 @echo off
 rem Update Yaver in this folder. Run this file yourself.
 rem It stops yaver.exe, then replaces the program files.
+rem VERSION is set to the published version.
 rem .env and this file stay as they are. Start yaver.exe when this window finishes.
 setlocal
 cd /d "%~dp0"
@@ -14,6 +15,7 @@ $ProgressPreference = 'SilentlyContinue'
 $root = $env:YAVER_UPDATE_ROOT
 $failed = $false
 $work = ''
+$holdRoot = ''
 
 function Say([string]$text) {
     [Console]::Out.WriteLine($text)
@@ -88,6 +90,37 @@ function Get-OurYaver([string]$rootPrefix) {
         try { $full = [IO.Path]::GetFullPath($exePath) } catch { return $false }
         return $full.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
     })
+}
+function Copy-ReleaseItem([string]$Source, [string]$Destination) {
+    $item = Get-Item -LiteralPath $Source -Force
+    if ($item.PSIsContainer) {
+        # 0-7 means the copy worked. 8 and above stops the update.
+        & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP
+        $code = $LASTEXITCODE
+        if ($null -eq $code -or $code -ge 8) {
+            throw "Could not copy $Source."
+        }
+        return
+    }
+    [IO.File]::Copy($Source, $Destination, $true)
+}
+function Write-ReleaseVersion([string]$installRoot, [string]$versionText) {
+    # The release version wins over a stale VERSION shipped inside _internal.
+    $payload = [Text.Encoding]::ASCII.GetBytes($versionText.Trim() + "`n")
+    $targets = @(Join-Path $installRoot 'VERSION')
+    $internalDir = Join-Path $installRoot '_internal'
+    if (Test-Path -LiteralPath $internalDir -PathType Container) {
+        $targets += Join-Path $internalDir 'VERSION'
+    }
+    foreach ($path in $targets) {
+        $existing = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($existing -and $existing.PSIsContainer) {
+            Remove-Tree $path
+        } elseif ($existing -and $existing.IsReadOnly) {
+            $existing.IsReadOnly = $false
+        }
+        [IO.File]::WriteAllBytes($path, $payload)
+    }
 }
 try {
     if (-not $root) { throw 'Could not find this folder.' }
@@ -175,6 +208,8 @@ try {
         } while ((Get-Date) -lt $deadline)
         if ($alive.Count -gt 0) { throw 'Yaver is still running. Close it and run update.bat again.' }
         Say 'Replacing the files.'
+        $holdRoot = Join-Path $root ('.yaver-hold-' + [Guid]::NewGuid().ToString('n'))
+        New-Item -ItemType Directory -Path $holdRoot | Out-Null
         $moved = New-Object System.Collections.Generic.List[object]
         $created = New-Object System.Collections.Generic.List[string]
         try {
@@ -189,7 +224,7 @@ try {
                     if (Test-Path -LiteralPath $dest) {
                         Say 'left .env in place'
                     } else {
-                        Copy-Item -LiteralPath $child.FullName -Destination $dest -Force
+                        Copy-ReleaseItem $child.FullName $dest
                         Say 'copied .env'
                     }
                     continue
@@ -198,7 +233,7 @@ try {
                     Say 'left update.bat in place'
                     continue
                 }
-                $hold = Join-Path $work ("hold-" + $name)
+                $hold = Join-Path $holdRoot ('hold-' + $name)
                 Remove-Tree $hold
                 if (Test-Path -LiteralPath $dest) {
                     Move-Item -LiteralPath $dest -Destination $hold
@@ -206,9 +241,10 @@ try {
                 } else {
                     $created.Add($dest)
                 }
-                Copy-Item -LiteralPath $child.FullName -Destination $dest -Recurse -Force
+                Copy-ReleaseItem $child.FullName $dest
                 Say "copied $name"
             }
+            Write-ReleaseVersion $root $version
             foreach ($row in $moved) { Remove-Tree $row[1] }
         } catch {
             Restore-Moved $moved $created
@@ -224,6 +260,9 @@ try {
 } finally {
     if ($work -and (Test-Path -LiteralPath $work)) {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($holdRoot -and (Test-Path -LiteralPath $holdRoot)) {
+        Remove-Item -LiteralPath $holdRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 if ($failed) { exit 1 }

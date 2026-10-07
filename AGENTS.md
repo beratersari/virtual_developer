@@ -362,6 +362,9 @@ JIRA_API_TOKEN=your-api-token-here
   from `/sprint?state=active`. Parallel sprints are not merged. Put bot
   tickets on that first sprint, or use a Kanban board (no sprints → whole
   board). Do not “fix” by loading every active sprint.
+  `JIRA_BOARD_ID` may list several boards (`2,5`). Each board is polled
+  on its own. One board's sprint error or empty sprint does not drop the
+  others. An issue present on two boards is taken once.
 
 ### Config checklist (common)
 
@@ -370,7 +373,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
-| `JIRA_BOARD_ID` | Sprint/board poller board. Scrum: first active sprint only (not parallel sprints). Kanban: whole board. |
+| `JIRA_BOARD_ID` | Sprint/board poller. Comma-separated Agile board ids (e.g. `2,5`). Each Scrum board uses its first active sprint only. Kanban loads that whole board. A sprint error on one board does not drop the others. An issue on two boards is taken once. |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |
@@ -419,6 +422,7 @@ normal review. Proof: `tests/test_gitlab_review_complete.py`.
 - Jobs, schedules, session binds, issue state, and the queue live in ``{YAVER_DATA_DIR}/yaver.sqlite`` (indexed columns plus a JSON document, including deliveries). A first start imports leftover ``job_*.json``, ``sched_*.json``, ``osb_*.json``, ``q_*.json``, and issue-state JSON once, then deletes those files. Later starts do not scan them. Do not put plans, session logs, or clones in SQL.
 - Saved projects and repo sets live in ``{YAVER_DATA_DIR}/saved_catalog.json``. That file is the copy the dashboard reads and returns on ``GET /api/settings``, ``PATCH /api/settings``, and ``GET /api/dashboard``. A save of any other setting does not rewrite it. ``runtime_settings.json`` still receives a backup copy of the same two keys. Opening Settings, Scheduled, or the dashboard does not call GitLab or Azure. **Reload from tokens** is the import. Do not hide the stored list until that button. Do not put the catalog in SQLite.
 - Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
+- Scheduled → MR and Scheduled → PR accept mode `build` (default follow-up, command `yaver`) or `review`. `review` enqueues the same GitLab or Azure review as `@bot /review` (derman-reviewer, no push). The section picks the host. Do not add `review` to issue work modes or the existing/new issue Mode list. An empty model uses `default_review_model`. Proof: `tests/test_schedule_mr_followup.py`, `tests/test_schedule_pr_followup.py`, `tests/test_schedule_review_mode_ui.py`.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -444,8 +448,10 @@ Open: `http://127.0.0.1:8080` after daemon start.
 | POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
 | POST | `/yaver/webhook/azure` | Azure PR comment + lifecycle, and work-item created/updated/commented (`/webhooks/azure` still works) |
 | POST | `/api/azure/work-item` | Settings lookup: one work item by host + project + id |
+| GET | `/api/schedules/mr-preview` | Look up a GitLab MR before scheduling a follow-up |
+| POST | `/api/schedules/mr` | Schedule a follow-up or review on an existing GitLab MR (`mode` is `build` or `review`) |
 | GET | `/api/schedules/pr-preview` | Look up an Azure PR before scheduling a follow-up |
-| POST | `/api/schedules/pr` | Schedule a follow-up prompt on an existing Azure PR |
+| POST | `/api/schedules/pr` | Schedule a follow-up or review on an existing Azure PR (`mode` is `build` or `review`) |
 | WS | `/ws` | Live dashboard pushes |
 
 ---
@@ -955,6 +961,16 @@ replaces each top-level name from the package. Directories such as
 upstream do not stay behind. `install-agents.bat` or `install-agents.sh`,
 `.env.example`, `VERSION`, and the executable are replaced. A name that
 is not in the package stays, including a data folder kept beside the exe.
+
+Windows `update.bat` copies each directory with `robocopy` (exit 0-7
+is success). The previous tree is renamed in a `.yaver-hold-*` folder
+on the same drive, then removed after the new files are in place. Do
+not copy that tree with `Copy-Item -Recurse`, and do not park the hold
+copy on another drive. After the replace, the script writes the
+published version into `VERSION` and `_internal/VERSION`, including
+when the package omitted those files or still had the previous text.
+Leave a nested third-party file such as `_internal/atlassian/VERSION`
+as the package shipped it.
 
 These stay:
 

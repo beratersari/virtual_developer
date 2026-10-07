@@ -77,7 +77,7 @@ This is the only Jira intake. There is no Jira comment webhook for starting work
 
 All of these:
 
-- Issue is on the configured **board** (`JIRA_BOARD_ID`). Scrum: **first active sprint only**.
+- Issue is on a configured **board** (`JIRA_BOARD_ID`, comma-separated). Each Scrum board: **first active sprint only**.
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like: To Do, New, Open, Backlog, Yapılacaklar, …).
 - Assignee matches `JIRA_TRIGGER_USER`.
 - If `JIRA_TRIGGER_LABEL` is set, the issue also needs one of those labels.
@@ -419,7 +419,7 @@ RELEASE_HOST=192.168.1.20
 RELEASE_PORT=8090
 ```
 
-The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
+The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. On Windows the folders are copied with robocopy, and `VERSION` next to the executable and `_internal/VERSION` are set to the published version. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
 
 If this folder does not have `update.bat` or `update.sh` yet, download the zip once, copy that script into the Yaver folder, and run it there. `yaver update` and `yaver.exe --update` print this instruction and leave the files as they are.
 
@@ -441,7 +441,7 @@ Useful pages:
 - **Tasks / Jobs** — live and past runs (prompts and logs are per selected job)
 - **Poll** — last Jira board snapshot
 - **Storage and Sessions** — temp clones, with Details for the OpenCode chats that use each folder. Chats whose folder was deleted stay on this page so they can be reset. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
-- **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
+- **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. On MR, Mode **GitLab review** starts a GitLab review. On PR, Mode **Azure review** starts an Azure review. Existing and new issues stay on plan, build, and test. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
 - **Settings** — board id, poll interval, trigger names, Azure collection PATs (no token values shown)
 
 On a plan-ready job, **Implement** and **Revise** sit next to **Refresh**. Generic **Start** stays disabled. **Stop work** kills agent children immediately.
@@ -464,7 +464,7 @@ Copy [`.env.example`](.env.example) → `.env`. Never commit secrets.
 | `JIRA_API_TOKEN` | On-prem PAT or Cloud API token |
 | `JIRA_EMAIL` | Cloud/dev only → HTTP Basic. Empty = Bearer PAT (prod) |
 | `JIRA_PROJECTS` | Project keys: default create + parse keys from GitLab/Azure titles (`feat(KAN-12):`) |
-| `JIRA_BOARD_ID` | Agile board to poll (**required** for Jira discovery) |
+| `JIRA_BOARD_ID` | Agile boards to poll, comma-separated (**required** for Jira discovery). Each Scrum board uses its first active sprint |
 | `JIRA_TRIGGER_USER` | Assignee / mention names (comma-separated, no `@`) |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake also needs one of these labels |
 
@@ -563,7 +563,7 @@ Default branch is **`develop`**. Feature MRs go into `develop`. Release: tag `vM
 
 | Symptom | What to check |
 |---------|----------------|
-| Jira poller idle | `JIRA_BOARD_ID`, To Do, bot assignee, `python cli.py process KEY` |
+| Jira poller idle | `JIRA_BOARD_ID` (comma-separated), To Do, bot assignee, `python cli.py process KEY` |
 | Jira To Do + bot but nothing happens | `plan_ready` → use `plan_execute`. `completed`/`error`/`cancelled` on To Do **is** rework — check logs |
 | Azure assign does nothing | State must be To Do / In Progress / New / Active / Doing (not Resolved/Done). Webhook enabled? Assigned To matches `AZURE_TRIGGER_USER`? |
 | Azure plan never implements | Comment `@bot /planExecute` on the **work item**, not the PR |

@@ -772,6 +772,7 @@ export function scheduleMrFollowup(body: ScheduleMrBody) {
     scheduled_at: body.scheduled_at,
   }
   if (body.dispatch_now) payload.dispatch_now = true
+  if (body.mode) payload.mode = body.mode
   if (body.model) payload.model = body.model
   if (body.backend) payload.backend = body.backend
   return request<{
@@ -800,6 +801,7 @@ export function schedulePrFollowup(body: SchedulePrBody) {
     scheduled_at: body.scheduled_at,
   }
   if (body.dispatch_now) payload.dispatch_now = true
+  if (body.mode) payload.mode = body.mode
   if (body.model) payload.model = body.model
   if (body.backend) payload.backend = body.backend
   return request<{

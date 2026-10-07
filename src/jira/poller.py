@@ -121,6 +121,72 @@ class JiraPoller:
 
         return JiraPoller._is_todo_status_name(name)
 
+    def _issues_on_board(
+        self,
+        board_id: str,
+        issue_fields: List[str],
+    ) -> tuple:
+        """Load one board.
+
+        Returns ``(issues, source, error)``. ``error`` is set when this
+        board's sprint lookup or issue fetch failed. A Kanban board and a
+        Scrum board with no active sprint return no error and do not widen
+        to the rest of the board. ``last_error`` is read here, before the
+        next board overwrites it.
+        """
+        if hasattr(self.client, "last_error"):
+            self.client.last_error = None
+        sprint = self.client.get_active_sprint(board_id)
+        lookup = getattr(self.client, "sprint_lookup", None)
+        sprint_err = getattr(self.client, "last_error", None)
+        if sprint:
+            # First active sprint only (see JiraClient.get_active_sprint).
+            sprint_id = sprint["id"]
+            sprint_name = sprint.get("name", "unknown")
+            logger.info(f"Found active sprint: {sprint_name} (id: {sprint_id})")
+            issues = self.client.get_sprint_issues(
+                sprint_id,
+                fields=issue_fields,
+                max_results=100,
+            )
+            fetch_error = getattr(self.client, "last_error", None)
+            source = f"sprint {sprint_name}"
+            if not issues and fetch_error:
+                return [], source, f"board {board_id}: {fetch_error}"
+            return list(issues or []), source, None
+        if lookup == "error" or (
+            sprint_err and lookup not in ("kanban", "empty", "ok")
+        ):
+            # Scrum lookup failed — do not widen to the whole board/backlog.
+            detail = sprint_err or "sprint lookup failed"
+            logger.error(
+                f"Sprint lookup failed for board {board_id}"
+                + (f" ({sprint_err})" if sprint_err else "")
+                + "; skipping this board"
+            )
+            return [], f"board {board_id}", f"board {board_id}: {detail}"
+        if lookup == "empty":
+            # Active-sprint list is empty on a board that supports sprints.
+            logger.info(
+                f"No active sprint on board {board_id}; "
+                f"not loading the whole board"
+            )
+            return [], f"sprint (none active) board {board_id}", None
+        logger.info(
+            f"No active sprint on board {board_id}; "
+            f"loading issues from board (Kanban/simple)"
+        )
+        issues = self.client.get_board_issues(
+            board_id,
+            fields=issue_fields,
+            max_results=100,
+        )
+        fetch_error = getattr(self.client, "last_error", None)
+        source = f"board {board_id}"
+        if not issues and fetch_error:
+            return [], source, f"board {board_id}: {fetch_error}"
+        return list(issues or []), source, None
+
     def poll_board(self) -> List[dict]:
         if not getattr(settings, "jira_enabled", True):
             logger.info("Jira disabled; skipping board poll")
@@ -151,63 +217,48 @@ class JiraPoller:
             "parent",
         ]
 
-        logger.debug(f"Polling board {self.board_id}")
-        if hasattr(self.client, "last_error"):
-            self.client.last_error = None
-        sprint = self.client.get_active_sprint(self.board_id)
-        lookup = getattr(self.client, "sprint_lookup", None)
-        sprint_err = getattr(self.client, "last_error", None)
-        if sprint:
-            # First active sprint only (see JiraClient.get_active_sprint).
-            sprint_id = sprint["id"]
-            sprint_name = sprint.get("name", "unknown")
-            logger.info(f"Found active sprint: {sprint_name} (id: {sprint_id})")
-            issues = self.client.get_sprint_issues(
-                sprint_id,
-                fields=issue_fields,
-                max_results=100,
-            )
-            source = f"sprint {sprint_name}"
-        elif lookup == "error" or (
-            sprint_err and lookup not in ("kanban", "empty", "ok")
-        ):
-            # Scrum lookup failed — do not widen to the whole board/backlog.
+        from src.config import jira_board_id_list
+
+        try:
+            board_ids = jira_board_id_list(self.board_id)
+        except ValueError as exc:
             logger.error(
-                f"Sprint lookup failed for board {self.board_id}"
-                + (f" ({sprint_err})" if sprint_err else "")
-                + "; skipping intake this cycle"
+                f"Invalid JIRA_BOARD_ID {self.board_id!r}: {exc}; "
+                f"skipping intake this cycle"
             )
             poll_snapshot_store.end_poll(
                 source=f"board {self.board_id}",
                 issues=[],
                 interval_seconds=self.interval,
-                error=sprint_err or "sprint lookup failed",
+                error=str(exc),
             )
             return []
-        elif lookup == "empty":
-            # Active-sprint list is empty on a board that supports sprints.
-            logger.info(
-                f"No active sprint on board {self.board_id}; "
-                f"not loading the whole board"
+
+        logger.debug(f"Polling board {self.board_id}")
+        issues: List[dict] = []
+        seen_keys: Set[str] = set()
+        loaded_sources: List[str] = []
+        idle_sources: List[str] = []
+        board_errors: List[str] = []
+        for board_id in board_ids:
+            found, one_source, one_error = self._issues_on_board(
+                board_id, issue_fields
             )
-            poll_snapshot_store.end_poll(
-                source=f"sprint (none active) board {self.board_id}",
-                issues=[],
-                interval_seconds=self.interval,
-                error=None,
-            )
-            return []
-        else:
-            logger.info(
-                f"No active sprint on board {self.board_id}; "
-                f"loading issues from board (Kanban/simple)"
-            )
-            issues = self.client.get_board_issues(
-                self.board_id,
-                fields=issue_fields,
-                max_results=100,
-            )
-            source = f"board {self.board_id}"
+            if one_error:
+                board_errors.append(one_error)
+            if not found:
+                idle_sources.append(one_source)
+                continue
+            loaded_sources.append(one_source)
+            for issue in found:
+                key = issue.get("key") if isinstance(issue, dict) else None
+                if key:
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                issues.append(issue)
+        source = "; ".join(loaded_sources or idle_sources) or f"board {self.board_id}"
+        board_error = "; ".join(board_errors) if board_errors else None
 
         if not issues:
             fetch_error = getattr(self.client, "last_error", None)
@@ -219,7 +270,7 @@ class JiraPoller:
                 source=source,
                 issues=[],
                 interval_seconds=self.interval,
-                error=fetch_error,
+                error=board_error or fetch_error,
             )
             return []
 
@@ -408,6 +459,7 @@ class JiraPoller:
             source=source,
             issues=snapshot_rows,
             interval_seconds=self.interval,
+            error=board_error,
         )
         return new_issues + reprocess_issues + plan_handoff_issues
 
@@ -774,8 +826,9 @@ class JiraPoller:
                 self.interval = int(
                     getattr(settings, "poll_interval_seconds", None) or self.interval or 30
                 )
-                if settings.jira_board_id:
-                    self.board_id = settings.jira_board_id
+                raw_board = getattr(settings, "jira_board_id", "")
+                if isinstance(raw_board, str) and raw_board.strip():
+                    self.board_id = raw_board.strip()
 
                 poll_snapshot_store.begin_poll(
                     board_id=self.board_id,

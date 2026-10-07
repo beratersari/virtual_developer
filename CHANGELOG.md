@@ -8,6 +8,21 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.77] — 2026-10-07
+
+Scheduled merge requests and pull requests can run as a review. Settings Board ID accepts several Jira boards. Windows `update.bat` copies folders with robocopy and writes the published version.
+
+### Added
+
+- Scheduled merge requests and pull requests can run as a review. On Scheduled → MR, Mode **GitLab review** starts a GitLab review. On Scheduled → PR, Mode **Azure review** starts an Azure review. Existing issues and new issues stay on plan, build, and test. An empty model uses the review model from Settings.
+- Settings Board ID accepts several Jira boards, comma-separated (for example `2, 5`). The poller reads each board. Each Scrum board still uses only its first active sprint. A failure on one board leaves the others in that cycle, and an issue that sits on two boards is taken once.
+
+### Fixed
+
+- Windows `update.bat` copies program folders with robocopy. It writes the published version into `VERSION` and `_internal/VERSION`, including when the package still has the previous text in those files. Copy the new `update.bat` from this zip into the Yaver folder once before you run it. The script that is already running is left in place.
+
+[0.9.77]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.77
+
 ## [0.9.76] — 2026-10-07
 
 The Windows offline package and the OpenCode, Claude Code, and Codex zips are built again.

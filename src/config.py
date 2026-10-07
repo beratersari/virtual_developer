@@ -227,6 +227,53 @@ def format_jira_projects(raw: Any) -> str:
     return ",".join(keys)
 
 
+def format_jira_board_ids(raw: Any) -> str:
+    """``2, 5`` → ``2,5``. Blank stays blank.
+
+    Each token must be an Agile board id (digits). One bad token rejects
+    the whole value. Duplicate ids are dropped, first occurrence kept.
+    """
+    original = str(raw or "").strip()
+    if not original:
+        return ""
+    text = original
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+        text = text[1:-1].strip()
+    if not text:
+        raise ValueError(
+            "Jira board ID must be a number (Agile board id from the board URL, e.g. 1)"
+        )
+    ids: List[str] = []
+    seen: set[str] = set()
+    for item in text.split(","):
+        token = item.strip()
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "`'\"":
+            token = token[1:-1].strip()
+        if not token:
+            continue
+        if not token.isdigit():
+            raise ValueError(
+                f"Invalid Jira board id {item.strip()!r}. "
+                "Use Agile board ids from the board URL, comma-separated (e.g. 2, 5)."
+            )
+        if token not in seen:
+            seen.add(token)
+            ids.append(token)
+    if not ids:
+        raise ValueError(
+            "Jira board ID must be a number (Agile board id from the board URL, e.g. 1)"
+        )
+    return ",".join(ids)
+
+
+def jira_board_id_list(raw: Any) -> List[str]:
+    """Parsed board ids. Blank is an empty list. A bad token raises ValueError."""
+    text = format_jira_board_ids(raw)
+    if not text:
+        return []
+    return text.split(",")
+
+
 def _trigger_user_names(raw: Any) -> List[str]:
     """Split a comma list; strip ``@`` and empties. Keep first-seen spelling."""
     out: List[str] = []
@@ -303,7 +350,10 @@ class Settings(BaseSettings):
     jira_projects: str = Field(default="PROJ", description="Comma-separated project keys")
     jira_board_id: str = Field(
         default="",
-        description="JIRA board id (from URL or GET /rest/agile/1.0/board)",
+        description=(
+            "Comma-separated Jira Agile board ids "
+            "(from the board URL or GET /rest/agile/1.0/board)"
+        ),
     )
 
     # Oh My OpenAgent Configuration
@@ -1500,13 +1550,19 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
         if not hasattr(settings_obj, key):
             continue
         if key == "jira_board_id":
-            text = str(value or "").strip()
-            if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
-                text = text[1:-1].strip()
-            if not text.isdigit():
+            try:
+                text = format_jira_board_ids(value)
+            except ValueError:
                 logger.warning(
                     f"Ignoring invalid runtime jira_board_id={value!r} "
-                    f"(need digits, e.g. 1); keeping {getattr(settings_obj, key, None)!r}"
+                    f"(need digits, comma-separated, e.g. 1 or 2,5); "
+                    f"keeping {getattr(settings_obj, key, None)!r}"
+                )
+                continue
+            if not text:
+                logger.warning(
+                    f"Ignoring empty runtime jira_board_id={value!r}; "
+                    f"keeping {getattr(settings_obj, key, None)!r}"
                 )
                 continue
             value = text
