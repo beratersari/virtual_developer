@@ -1,7 +1,8 @@
 @echo off
 rem Update Yaver in this folder. Run this file yourself.
 rem It stops yaver.exe, then replaces the program files.
-rem VERSION is set to the published version.
+rem VERSION and _internal\VERSION are set to the published version.
+rem A blank RELEASE_HOST uses 15.210.7.55. A blank RELEASE_PORT uses 8090.
 rem .env and this file stay as they are. Start yaver.exe when this window finishes.
 setlocal
 cd /d "%~dp0"
@@ -64,9 +65,14 @@ function Restore-Moved($moved, $created) {
     }
 }
 function Save-Release([string]$url, [string]$dest, [string]$message) {
-    $code = & curl.exe --silent --show-error --connect-timeout 15 --max-time 600 --max-redirs 0 --noproxy "*" --output $dest --write-out "%{http_code}" $url
-    $code = ([string]$code).Trim()
-    if ($LASTEXITCODE -ne 0 -or $code -ne '200') { throw $message }
+    $curlBin = 'curl.exe'
+    if ($env:YAVER_UPDATE_CURL) { $curlBin = $env:YAVER_UPDATE_CURL }
+    $raw = & $curlBin --silent --show-error --connect-timeout 15 --max-time 600 --max-redirs 0 --noproxy "*" --output $dest --write-out "%{http_code}" $url
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) { $exitCode = 1 }
+    $code = ''
+    if ($null -ne $raw) { $code = ([string]$raw).Trim() }
+    if ($exitCode -ne 0 -or $code -ne '200') { throw $message }
 }
 function Assert-ArchiveSafe([string]$zipPath) {
     $names = & tar.exe -tf $zipPath
@@ -95,7 +101,8 @@ function Copy-ReleaseItem([string]$Source, [string]$Destination) {
     $item = Get-Item -LiteralPath $Source -Force
     if ($item.PSIsContainer) {
         # 0-7 means the copy worked. 8 and above stops the update.
-        & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP
+        # /IS /IT copy a same-size same-time file. A patch version is the same length.
+        & robocopy.exe $Source $Destination /E /IS /IT /COPY:DAT /DCOPY:DAT /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP
         $code = $LASTEXITCODE
         if ($null -eq $code -or $code -ge 8) {
             throw "Could not copy $Source."
@@ -120,7 +127,21 @@ function Write-ReleaseVersion([string]$installRoot, [string]$versionText) {
             $existing.IsReadOnly = $false
         }
         [IO.File]::WriteAllBytes($path, $payload)
+        Say 'copied VERSION'
     }
+}
+function Copy-StagedVersion([string]$Source, [string]$Destination) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return }
+    $parent = Split-Path -Parent $Destination
+    if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) { return }
+    $existing = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if ($existing -and $existing.PSIsContainer) {
+        Remove-Tree $Destination
+    } elseif ($existing -and $existing.IsReadOnly) {
+        $existing.IsReadOnly = $false
+    }
+    [IO.File]::Copy($Source, $Destination, $true)
+    Say 'copied VERSION'
 }
 try {
     if (-not $root) { throw 'Could not find this folder.' }
@@ -138,6 +159,8 @@ try {
     }
     $relHost = Read-EnvValue $envFile 'RELEASE_HOST'
     $relPort = Read-EnvValue $envFile 'RELEASE_PORT'
+    if (-not $relHost) { $relHost = '15.210.7.55' }
+    if (-not $relPort) { $relPort = '8090' }
     if ($relHost -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
         throw 'Set RELEASE_HOST in .env to an IP or a hostname.'
     }
@@ -162,13 +185,20 @@ try {
         throw 'The release server returned an unexpected checksum.'
     }
     $current = $false
-    $versionFile = Join-Path $root 'VERSION'
-    if (Test-Path -LiteralPath $versionFile) {
-        $localId = Version-Id (Get-Content -LiteralPath $versionFile -Raw)
-        if ($localId -and $localId -eq (Version-Id $version)) {
-            Say "This install is already $version."
-            $current = $true
-        }
+    $remoteId = Version-Id $version
+    $rootVersion = Join-Path $root 'VERSION'
+    $internalVersion = Join-Path $root '_internal\VERSION'
+    $rootId = ''
+    $internalId = ''
+    if (Test-Path -LiteralPath $rootVersion -PathType Leaf) {
+        $rootId = Version-Id (Get-Content -LiteralPath $rootVersion -Raw)
+    }
+    if (Test-Path -LiteralPath $internalVersion -PathType Leaf) {
+        $internalId = Version-Id (Get-Content -LiteralPath $internalVersion -Raw)
+    }
+    if ($rootId -and $internalId -and $rootId -eq $remoteId -and $internalId -eq $remoteId) {
+        Say "This install is already $version."
+        $current = $true
     }
     if (-not $current) {
         Say "Downloading $version."
@@ -215,7 +245,7 @@ try {
         try {
             foreach ($child in @(Get-ChildItem -LiteralPath $stage -Force)) {
                 $name = $child.Name
-                if ($name -notmatch '^[A-Za-z0-9._-]+$') {
+                if ($name -notmatch '^[A-Za-z0-9._-]+$' -and $name -ine 'VERSION') {
                     Say "skipped $name"
                     continue
                 }
@@ -244,6 +274,8 @@ try {
                 Copy-ReleaseItem $child.FullName $dest
                 Say "copied $name"
             }
+            Copy-StagedVersion (Join-Path $stage 'VERSION') (Join-Path $root 'VERSION')
+            Copy-StagedVersion (Join-Path $stage '_internal\VERSION') (Join-Path $root '_internal\VERSION')
             Write-ReleaseVersion $root $version
             foreach ($row in $moved) { Remove-Tree $row[1] }
         } catch {

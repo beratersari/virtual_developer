@@ -274,6 +274,7 @@ def test_update_bat_skips_a_current_install(tmp_path: Path):
     try:
         install = _windows_install(tmp_path, int(server.server_address[1]))
         (install / "VERSION").write_bytes(b"0.9.80+local\n")
+        (install / "_internal" / "VERSION").write_bytes(b"0.9.80+local\n")
         before = (install / "yaver.exe").read_bytes()
         code, text = _run(["cmd.exe", "/d", "/c", str(install / "update.bat")], install)
         assert code == 0, text
@@ -281,9 +282,86 @@ def test_update_bat_skips_a_current_install(tmp_path: Path):
         assert "/download/windows" not in server.hits
         assert (install / "yaver.exe").read_bytes() == before
         assert (install / "VERSION").read_bytes() == b"0.9.80+local\n"
+        assert (install / "_internal" / "VERSION").read_bytes() == b"0.9.80+local\n"
         assert "Stopping Yaver." not in text
     finally:
         server.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
+def test_update_bat_copies_version_when_only_the_root_file_matches(tmp_path: Path):
+    """yaver.exe reads _internal/VERSION. A matching root file must not skip it."""
+    files = _windows_package()
+    files["bundle/VERSION"] = b"0.9.74\n"
+    files["bundle/_internal/VERSION"] = b"0.9.74\n"
+    files["bundle/_internal/atlassian/VERSION"] = b"5.0.5"
+    blob = _zip(files)
+    server = _serve(blob, hashlib.sha256(blob).hexdigest(), "0.9.80", "/download/windows")
+    try:
+        install = _windows_install(tmp_path, int(server.server_address[1]))
+        (install / "VERSION").write_bytes(b"0.9.80\n")
+        (install / "_internal" / "VERSION").write_bytes(b"0.9.74\n")
+        (install / "_internal" / "atlassian").mkdir()
+        (install / "_internal" / "atlassian" / "VERSION").write_bytes(b"5.0.5")
+        code, text = _run(["cmd.exe", "/d", "/c", str(install / "update.bat")], install)
+        assert code == 0, text
+        assert "This install is already" not in text
+        assert "skipped VERSION" not in text
+        assert "copied VERSION" in text
+        assert (install / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "atlassian" / "VERSION").read_bytes() == b"5.0.5"
+        assert (install / "yaver.exe").read_bytes() == b"new-exe"
+        assert "/download/windows" in server.hits
+    finally:
+        server.shutdown()
+
+
+def _curl_stub(path: Path) -> None:
+    path.write_text(
+        "@echo off\r\n"
+        "echo %*>>\"%YAVER_CURL_LOG%\"\r\n"
+        "exit /b 28\r\n",
+        encoding="ascii",
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
+def test_update_bat_uses_the_default_release_host(tmp_path: Path):
+    install = _windows_install(tmp_path, 9)
+    (install / ".env").write_bytes(b"RELEASE_PORT=9\r\nTOKEN=super-secret-value\r\n")
+    log = tmp_path / "curl-log.txt"
+    stub = tmp_path / "curl.cmd"
+    _curl_stub(stub)
+    env = os.environ.copy()
+    env["YAVER_UPDATE_CURL"] = str(stub)
+    env["YAVER_CURL_LOG"] = str(log)
+    before = (install / "yaver.exe").read_bytes()
+    code, text = _run(["cmd.exe", "/d", "/c", str(install / "update.bat")], install, env)
+    assert "Release server 15.210.7.55:9" in text
+    assert code != 0, text
+    assert "Could not reach the release server." in text
+    assert (install / "yaver.exe").read_bytes() == before
+    assert "http://15.210.7.55:9/api/latest?platform=windows" in log.read_text(encoding="utf-8")
+    assert "super-secret-value" not in text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
+def test_update_bat_uses_the_default_release_port(tmp_path: Path):
+    install = _windows_install(tmp_path, 9)
+    (install / ".env").write_bytes(b"RELEASE_HOST=127.0.0.1\r\nTOKEN=super-secret-value\r\n")
+    log = tmp_path / "curl-log.txt"
+    stub = tmp_path / "curl.cmd"
+    _curl_stub(stub)
+    env = os.environ.copy()
+    env["YAVER_UPDATE_CURL"] = str(stub)
+    env["YAVER_CURL_LOG"] = str(log)
+    before = (install / "yaver.exe").read_bytes()
+    code, text = _run(["cmd.exe", "/d", "/c", str(install / "update.bat")], install, env)
+    assert "Release server 127.0.0.1:8090" in text
+    assert code != 0, text
+    assert (install / "yaver.exe").read_bytes() == before
+    assert "http://127.0.0.1:8090/api/latest?platform=windows" in log.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
@@ -317,6 +395,14 @@ def test_update_bat_does_not_follow_a_redirect(tmp_path: Path):
         server.shutdown()
 
 
+def test_update_scripts_use_the_office_release_host():
+    from src.config import DEFAULT_RELEASE_HOST
+
+    assert DEFAULT_RELEASE_HOST == "15.210.7.55"
+    assert DEFAULT_RELEASE_HOST in WINDOWS_SCRIPT.read_text(encoding="utf-8")
+    assert DEFAULT_RELEASE_HOST.encode("ascii") in LINUX_SCRIPT.read_bytes()
+
+
 def test_update_scripts_avoid_powershell_automatic_names():
     bat = WINDOWS_SCRIPT.read_text(encoding="utf-8")
     assert not bat.startswith("\ufeff")
@@ -329,6 +415,7 @@ def test_update_bat_copies_directories_with_robocopy():
     bat = WINDOWS_SCRIPT.read_text(encoding="utf-8")
     body = bat[bat.rfind("YAVER_UPDATE_BODY") + len("YAVER_UPDATE_BODY") :]
     assert "robocopy.exe" in body
+    assert "/IS" in body and "/IT" in body
     assert "Copy-Item -LiteralPath $child.FullName -Destination $dest -Recurse -Force" not in body
     raw = LINUX_SCRIPT.read_bytes()
     assert b"\r" not in raw
@@ -440,11 +527,64 @@ def test_update_sh_skips_a_current_install(tmp_path: Path):
     try:
         install = _linux_install(tmp_path, int(server.server_address[1]))
         (install / "VERSION").write_bytes(b"0.9.80+local\n")
+        (install / "_internal" / "VERSION").write_bytes(b"0.9.80+local\n")
         before = (install / "yaver").read_bytes()
         code, text = _run_sh(install)
         assert code == 0, text
         assert "This install is already 0.9.80." in text
         assert "/download/ubuntu-22.04" not in server.hits
         assert (install / "yaver").read_bytes() == before
+        assert (install / "_internal" / "VERSION").read_bytes() == b"0.9.80+local\n"
     finally:
         server.shutdown()
+
+
+@pytest.mark.skipif(not _linux_ready(), reason="Git bash with unzip, sha256sum, and curl")
+def test_update_sh_copies_version_when_only_the_root_file_matches(tmp_path: Path):
+    files = _linux_package()
+    files["VERSION"] = b"0.9.74\n"
+    files["_internal/VERSION"] = b"0.9.74\n"
+    files["_internal/atlassian/VERSION"] = b"5.0.5"
+    blob = _zip(files)
+    server = _serve(blob, hashlib.sha256(blob).hexdigest(), "0.9.80", "/download/ubuntu-22.04")
+    try:
+        install = _linux_install(tmp_path, int(server.server_address[1]))
+        (install / "VERSION").write_bytes(b"0.9.80\n")
+        (install / "_internal" / "VERSION").write_bytes(b"0.9.74\n")
+        (install / "_internal" / "atlassian").mkdir()
+        (install / "_internal" / "atlassian" / "VERSION").write_bytes(b"5.0.5")
+        code, text = _run_sh(install)
+        assert code == 0, text
+        assert "This install is already" not in text
+        assert "skipped VERSION" not in text
+        assert "copied VERSION" in text
+        assert (install / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "atlassian" / "VERSION").read_bytes() == b"5.0.5"
+        assert (install / "yaver").read_bytes() == b"new-exe"
+    finally:
+        server.shutdown()
+
+
+def _sh_curl_stub(path: Path) -> None:
+    path.write_bytes(b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$YAVER_CURL_LOG\"\nexit 28\n")
+
+
+@pytest.mark.skipif(not _linux_ready(), reason="Git bash with unzip, sha256sum, and curl")
+def test_update_sh_uses_the_default_release_host(tmp_path: Path):
+    install = _linux_install(tmp_path, 9)
+    (install / ".env").write_bytes(b"RELEASE_PORT=9\nTOKEN=super-secret-value\n")
+    log = tmp_path / "curl-log.txt"
+    stub = tmp_path / "curl-stub.sh"
+    _sh_curl_stub(stub)
+    env = os.environ.copy()
+    env["YAVER_UPDATE_PLATFORM"] = "ubuntu-22.04"
+    env["MSYS_NO_PATHCONV"] = "1"
+    env["YAVER_UPDATE_CURL"] = stub.as_posix()
+    env["YAVER_CURL_LOG"] = log.as_posix()
+    before = (install / "yaver").read_bytes()
+    code, text = _run([str(BASH), str(install / "update.sh")], install, env)
+    assert "Release server 15.210.7.55:9" in text
+    assert code != 0, text
+    assert (install / "yaver").read_bytes() == before
+    assert "http://15.210.7.55:9/api/latest?platform=ubuntu-22.04" in log.read_text(encoding="utf-8")

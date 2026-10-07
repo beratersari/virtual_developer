@@ -890,7 +890,7 @@ class SettingsUpdate(BaseModel):
     release_host: Optional[str] = Field(
         default=None,
         max_length=253,
-        description="LAN release server IP or hostname. Empty clears it.",
+        description="LAN release server IP or hostname. Blank uses 15.210.7.55.",
     )
     release_port: Optional[int] = Field(
         default=None,

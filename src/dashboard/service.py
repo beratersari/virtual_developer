@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.config import (
+    DEFAULT_RELEASE_HOST,
     jira_host_is_cloud,
     save_runtime_settings,
     settings,
@@ -832,6 +833,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         _write_env("agent_backend", settings.agent_backend)
     if "release_host" in data and data["release_host"] is not None:
         host = str(data["release_host"] or "").replace("\r", "").replace("\n", "").strip()
+        if not host:
+            host = DEFAULT_RELEASE_HOST
         settings.release_host = host
         runtime_persist["release_host"] = host
         _write_env("release_host", host)

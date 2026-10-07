@@ -41,7 +41,7 @@ Data is `{base}/yaver` and clones are `{base}/t`. Plans are
 4. If OpenCode is already installed, run that copy script to put `opencoderman/agents` and `opencoderman/skills` into the OpenCode home.
 5. Run `yaver start` (Windows: `yaver.exe start`).
 6. Open http://127.0.0.1:8080
-7. Later updates: set `RELEASE_HOST` and `RELEASE_PORT` in `.env`, then run `update.bat` or `./update.sh` in this folder. Start Yaver again after the script finishes.
+7. Later updates: run `update.bat` or `./update.sh` in this folder. A blank `RELEASE_HOST` uses `15.210.7.55`. A blank `RELEASE_PORT` uses `8090`. A value already in `.env` is the one the script uses. Start Yaver again after the script finishes.
 
 ```text
 yaver --help
