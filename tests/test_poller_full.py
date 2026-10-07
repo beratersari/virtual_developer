@@ -190,7 +190,12 @@ def test_poll_board_new_and_reprocess(poller, state_manager):
     )
 
 
-def test_process_issue_create_and_update(poller):
+def test_process_issue_create_and_update(poller, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_trigger_user", "")
+    monkeypatch.setattr(settings, "trigger_assignee_names", "")
+    monkeypatch.setattr(settings, "trigger_mentions", "")
     events = []
     poller._handler = lambda e: events.append(e)
     poller.client = MagicMock()

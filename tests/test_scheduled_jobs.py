@@ -770,7 +770,12 @@ def test_schedule_existing_issue(tmp_path):
     assert "already has a pending schedule" in out2["error"]
 
 
-def test_create_with_custom_issue_type(tmp_path):
+def test_create_with_custom_issue_type(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_trigger_user", "")
+    monkeypatch.setattr(settings, "trigger_assignee_names", "")
+    monkeypatch.setattr(settings, "trigger_mentions", "")
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     client = MagicMock()
     client.create_issue.return_value = {"key": "KAN-77"}

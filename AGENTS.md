@@ -357,6 +357,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
 - Poller focuses on board/sprint + To Do + bot assignee. The board poller is the only Jira intake.
+- When a Jira job starts, assign the issue to `JIRA_TRIGGER_USER` (each configured name, first success). The PAT user (`GET /myself`) is the fallback when that list is empty or every assign fails. Do not assign the hardcoded intake names when Settings is empty. GitLab MR and Azure jobs keep their own assign path.
 - Azure Boards work items use the same `/yaver/webhook/azure` URL as PR comments (always on when `AZURE_WEBHOOK_ENABLED` is true). New work is assignment while the item is **To Do** or **In Progress**, or the same process-template column (New / Proposed / Approved, Active / Doing / Committed). Resolved and Done/Closed are ignored. Moving In Progress → To Do while still assigned does **not** re-queue. Plan revise/implement is **comment-only**: `@mention /planRefactor <prompt>` or `@mention /planExecute`. Mention without those commands gets a work-item usage note. Do **not** use Jira plan tags on Azure work items. Do **not** use these commands on Jira, GitLab, or Azure PR comments.
 - **First active sprint only (intentional).** Scrum boards use `values[0]`
   from `/sprint?state=active`. Parallel sprints are not merged. Put bot
@@ -374,7 +375,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller. Comma-separated Agile board ids (e.g. `2,5`). Each Scrum board uses its first active sprint only. Kanban loads that whole board. A sprint error on one board does not drop the others. An issue on two boards is taken once. |
-| `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
+| `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. On job start the issue is assigned to the first of these names that Jira accepts. The PAT user is the fallback when the list is empty or every assign fails. The hardcoded intake names are not assignees. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |
 | `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. Windows default `%LOCALAPPDATA%\Yaver`. Linux default `$XDG_DATA_HOME/yaver` or `~/.local/share/yaver`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. |

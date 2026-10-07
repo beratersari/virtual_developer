@@ -605,7 +605,7 @@ class JobProcessor:
             return False
 
     def _assign_jira_to_pat_user(self, issue_key: str) -> bool:
-        """Set the Jira assignee to the PAT user. Never used for GitLab jobs."""
+        """Assign the Jira issue to the Settings trigger user, else the PAT user."""
         if self._is_git_comment_triggered(issue_key):
             return False
         if self._is_azure_workitem_triggered(issue_key):

@@ -1,3 +1,7 @@
+# Yaver 0.9.78
+
+Starting a Jira job assigns the issue to the trigger user from Settings. The PAT user is used when that name is empty or Jira rejects the assign.
+
 # Yaver 0.9.77
 
 Scheduled merge requests and pull requests can run as a review. On Scheduled → MR, Mode **GitLab review** starts a GitLab review. On Scheduled → PR, Mode **Azure review** starts an Azure review. Existing issues and new issues stay on plan, build, and test. An empty model uses the review model from Settings.

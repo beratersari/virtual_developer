@@ -62,7 +62,7 @@ Her işte Yaver’ın uzak depoyu ve dalları bilmesi için bir **`{params}`** b
 
 | | Jira | Azure iş öğesi | GitLab MR / Azure PR |
 |--|------|----------------|----------------------|
-| **Kabul** | **In Progress**’e geçiş (elinden geldiğince) ve PAT kullanıcısına atama | `System.State` o tipin **InProgress** adına: Agile/CMMI **Active**, Basic **Doing**, Scrum **Committed** veya **In Progress** | Pano değişmez |
+| **Kabul** | **In Progress**’e geçiş (elinden geldiğince) ve Ayarlardaki tetik kullanıcıya atama. PAT kullanıcısı yedektir | `System.State` o tipin **InProgress** adına: Agile/CMMI **Active**, Basic **Doing**, Scrum **Committed** veya **In Progress** | Pano değişmez |
 | **İş bitti** | **In Progress**’te kalır. Yalnızca yorum. | **Active / Doing / In Progress**’te kalır. **Resolved / Done olmaz.** | Konuda yanıt |
 | **Yeniden çalıştır** | İşı **Yapılacaklar**’a alın (botta kalsın) | Yapılacaklar / Devam Ediyor (veya New / Active / Doing) üzerinde yeniden atayın. Hâlâ atalıyken Active → New **yeniden kuyruğa almaz**. Hata sonrası başlık/açıklamayı düzenleyin. | Yeni `@bot /yaver …` yorumu |
 | **Devam eden iş** | Tarama veya webhook gürültüsüyle yeniden başlatılmaz | Aynı | Aynı |

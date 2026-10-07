@@ -761,7 +761,7 @@ def schedule_existing_issue(
         except Exception as e:
             logger.warning(f"{key}: In Progress soft-failed: {e}")
 
-        # Soft: assign to the PAT user so the board shows who is handling it
+        # Soft: assign the Settings trigger user. The PAT user is the fallback.
         try:
             if azure_wi:
                 if hasattr(client, "assign_to_pat_user"):

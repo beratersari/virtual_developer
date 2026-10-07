@@ -21,7 +21,12 @@ def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
     return proc
 
 
-def test_mark_jira_in_progress_calls_client(processor, fake_jira):
+def test_mark_jira_in_progress_calls_client(processor, fake_jira, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_trigger_user", "")
+    monkeypatch.setattr(settings, "trigger_assignee_names", "")
+    monkeypatch.setattr(settings, "trigger_mentions", "")
     fake_jira.transition_to_in_progress = MagicMock(return_value=True)
     fake_jira.assign_issue = MagicMock(return_value=True)
     processor._mark_jira_in_progress("KAN-1")
