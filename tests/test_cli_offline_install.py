@@ -31,6 +31,13 @@ def test_each_worker_has_its_own_bat_and_host_config():
                 raise AssertionError(f"cmd.exe redirect landmine: {stripped}")
 
 
+def test_windows_cli_zips_are_packed_before_the_download_cache_is_removed():
+    text = (ROOT / "packaging" / "windows" / "build-dist.ps1").read_text(encoding="utf-8")
+    pack = text.index('New-CliZip -Tool "opencode"')
+    drop = text.index("Remove-Item -LiteralPath $dl")
+    assert pack < drop
+
+
 def test_build_dist_ships_a_separate_cli_zip_without_agents():
     text = (ROOT / "packaging" / "windows" / "build-dist.ps1").read_text(encoding="utf-8")
     assert "yaver-clis-" not in text

@@ -937,6 +937,13 @@ OpenCoderman pin: opencoderman.pin (exact submodule commit for this build)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 
+# The CLI zips copy opencode.exe, claude.exe, and codex.exe out of this
+# cache. Pack them before the cache is removed.
+$cliSrc = Join-Path $root "packaging\windows\cli-offline"
+$opencodeZip = New-CliZip -Tool "opencode" -Version $OPENCODE_VERSION -ExeSource $opencodeExe.FullName -ExeName "opencode.exe" -ConfigSource (Join-Path $cliSrc "opencode.json") -ConfigName "opencode.json" -OsToken "windows-x64"
+$claudeZip = New-CliZip -Tool "claude" -Version $CLAUDE_CODE_VERSION -ExeSource $claudeExe -ExeName "claude.exe" -ConfigSource (Join-Path $cliSrc "settings.json") -ConfigName "settings.json" -OsToken "windows-x64"
+$codexZip = New-CliZip -Tool "codex" -Version $CODEX_VERSION -ExeSource $codexExe.FullName -ExeName "codex.exe" -ConfigSource (Join-Path $cliSrc "config.toml") -ConfigName "config.toml" -OsToken "windows-x64"
+
 if (Test-Path -LiteralPath $dl) {
     Remove-Item -LiteralPath $dl -Recurse -Force
 }
@@ -972,11 +979,6 @@ if ($tar) {
         $false  # do not nest an extra root directory
     )
 }
-
-$cliSrc = Join-Path $root "packaging\windows\cli-offline"
-$opencodeZip = New-CliZip -Tool "opencode" -Version $OPENCODE_VERSION -ExeSource $opencodeExe.FullName -ExeName "opencode.exe" -ConfigSource (Join-Path $cliSrc "opencode.json") -ConfigName "opencode.json" -OsToken "windows-x64"
-$claudeZip = New-CliZip -Tool "claude" -Version $CLAUDE_CODE_VERSION -ExeSource $claudeExe -ExeName "claude.exe" -ConfigSource (Join-Path $cliSrc "settings.json") -ConfigName "settings.json" -OsToken "windows-x64"
-$codexZip = New-CliZip -Tool "codex" -Version $CODEX_VERSION -ExeSource $codexExe.FullName -ExeName "codex.exe" -ConfigSource (Join-Path $cliSrc "config.toml") -ConfigName "config.toml" -OsToken "windows-x64"
 
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
 $payloadSize = (Get-ChildItem -Path $payload -Recurse -File -ErrorAction SilentlyContinue |
