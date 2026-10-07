@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,76 @@ def test_latest_zip_name_covers_each_binary(tmp_path: Path):
     assert "latest" in copied.name
 
 
+def test_executable_bundle_packs_the_five_versioned_zips(tmp_path: Path):
+    mod = _load("yaver_executable_bundle", PKG / "executable_bundle.py")
+    names = [
+        "yaver-windows-x64-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-18.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-20.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-22.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-24.04-0.9.79.zip",
+    ]
+    source = tmp_path / "artifacts"
+    nested = source / "linux"
+    nested.mkdir(parents=True)
+    for name in names:
+        folder = source if name.startswith("yaver-windows") else nested
+        (folder / name).write_bytes(b"PK\x03\x04" + name.encode("ascii"))
+    (source / "yaver-windows-latest.zip").write_bytes(b"latest-windows")
+    (nested / "yaver-ubuntu-22.04-latest.zip").write_bytes(b"latest-ubuntu")
+    (nested / "yaver-linux-x64-ubuntu-22.04-0.9.79.tar.gz").write_bytes(b"tar")
+    dest = mod.write_bundle(source, tmp_path / "out")
+    assert dest.name == "yaver-executables-0.9.79.zip"
+    with zipfile.ZipFile(dest) as archive:
+        assert archive.namelist() == [*names, "RELEASE_NOTES.txt"]
+        assert archive.read(names[0]) == b"PK\x03\x04" + names[0].encode("ascii")
+        packed = archive.read("RELEASE_NOTES.txt").decode("utf-8")
+    assert packed.startswith("# Yaver 0.9.79\n")
+    assert "15.210.7.55" in packed
+    assert "# Yaver 0.9.78" not in packed
+    assert mod.main(["--from", str(source), "--out", str(tmp_path / "cli")]) == 0
+    assert (tmp_path / "cli" / "yaver-executables-0.9.79.zip").is_file()
+    (source / "notes.zip").write_bytes(b"PK")
+    with pytest.raises(mod.BundleError, match="notes.zip"):
+        mod.collect_versioned_zips(source)
+
+
+def test_executable_bundle_includes_the_version_release_note(tmp_path: Path):
+    mod = _load("yaver_executable_bundle_notes", PKG / "executable_bundle.py")
+    source = tmp_path / "artifacts"
+    source.mkdir()
+    for name in (
+        "yaver-windows-x64-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-18.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-20.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-22.04-0.9.79.zip",
+        "yaver-linux-x64-ubuntu-24.04-0.9.79.zip",
+    ):
+        (source / name).write_bytes(b"PK\x03\x04" + name.encode("ascii"))
+    notes = tmp_path / "RELEASE_NOTES.md"
+    notes.write_text(
+        "# Yaver 0.9.79\n\n"
+        "Windows `update.bat` writes the version.\n\n"
+        "A second paragraph stays.\n\n"
+        "# Yaver 0.9.78\n\n"
+        "Older text must stay out.\n",
+        encoding="utf-8",
+    )
+    dest = mod.write_bundle(source, tmp_path / "out", notes)
+    with zipfile.ZipFile(dest) as archive:
+        packed = archive.read("RELEASE_NOTES.txt").decode("utf-8")
+        assert archive.namelist().count("RELEASE_NOTES.txt") == 1
+    assert packed.startswith("# Yaver 0.9.79\n")
+    assert "Windows `update.bat` writes the version." in packed
+    assert "A second paragraph stays." in packed
+    assert "0.9.78" not in packed
+    assert "Older text" not in packed
+    missing = tmp_path / "other.md"
+    missing.write_text("# Yaver 0.9.1\n\nNothing here.\n", encoding="utf-8")
+    with pytest.raises(mod.BundleError, match="0.9.79"):
+        mod.write_bundle(source, tmp_path / "missing", missing)
+
+
 def test_runtime_hook_chdirs_when_frozen():
     text = (PKG / "runtime_hook.py").read_text(encoding="utf-8")
     assert "os.chdir" in text
@@ -163,6 +234,11 @@ def test_workflow_builds_both_platforms():
     assert "Upload tar.gz archive (Linux)" in text
     assert "yaver-*-latest.zip" in text
     assert "Require latest binary zip" in text
+    attach = text.split("Attach to GitHub Release (tags only)", 1)[1].split("uses:", 1)[0]
+    assert "matrix.platform == 'windows'" in attach
+    assert "executable_bundle.py" in text
+    assert "yaver-executables-*.zip" in text
+    assert "pattern: yaver-*-zip" in text
 
 
 def test_parse_glibc_versions_flags_per_ubuntu():
@@ -284,6 +360,9 @@ def test_stage_opencoderman_copies_only_agents_and_skills(tmp_path: Path):
     (repo / "opencoderman" / "agents" / "derman-test.md").write_text(
         "test\n", encoding="utf-8"
     )
+    (repo / "opencoderman" / "agents" / "derman-reviewer.md").write_text(
+        "reviewer\n", encoding="utf-8"
+    )
     (repo / "opencoderman" / "agents" / "gitlab-reviewer.md").write_text(
         "review\n", encoding="utf-8"
     )
@@ -298,6 +377,8 @@ def test_stage_opencoderman_copies_only_agents_and_skills(tmp_path: Path):
     assert ocm == bundled / "opencoderman"
     assert (ocm / "agents" / "derman-build.md").is_file()
     assert (ocm / "agents" / "derman-plan.md").is_file()
+    assert (ocm / "agents" / "derman-test.md").is_file()
+    assert (ocm / "agents" / "derman-reviewer.md").is_file()
     assert not (ocm / "agents" / "gitlab-reviewer.md").exists()
     assert len(list((ocm / "skills").rglob("SKILL.md"))) == 10
     assert not (ocm / "skills" / "__pycache__").exists()

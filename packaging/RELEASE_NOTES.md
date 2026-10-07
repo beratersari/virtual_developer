@@ -557,11 +557,10 @@ Changelog: see `CHANGELOG.md` in the source tree.
 
 | File | Platform |
 |------|----------|
-| `yaver-windows-x64-*.zip` | Windows x64 |
-| `yaver-linux-x64-ubuntu-18.04-*.zip` or `.tar.gz` | Ubuntu 18.04 (glibc 2.27) |
-| `yaver-linux-x64-ubuntu-20.04-*.zip` or `.tar.gz` | Ubuntu 20.04 (glibc 2.31) |
-| `yaver-linux-x64-ubuntu-22.04-*.zip` or `.tar.gz` | Ubuntu 22.04 (glibc 2.35) |
-| `yaver-linux-x64-ubuntu-24.04-*.zip` or `.tar.gz` | Ubuntu 24.04 (glibc 2.39) |
+| `yaver-executables-*.zip` | Windows and Ubuntu 18.04, 20.04, 22.04, and 24.04. One versioned zip for each system is inside this file. |
+| `yaver-windows-x64-*.zip` | Windows x64. The same Windows zip is also inside `yaver-executables-*.zip`. |
+
+The Ubuntu executable zips are inside `yaver-executables-*.zip`. Their names are `yaver-linux-x64-ubuntu-18.04-<version>.zip`, `yaver-linux-x64-ubuntu-20.04-<version>.zip`, `yaver-linux-x64-ubuntu-22.04-<version>.zip`, and `yaver-linux-x64-ubuntu-24.04-<version>.zip`. Upload that one file to the office release site. The version is in those names.
 
 Each archive is an **onedir** folder:
 

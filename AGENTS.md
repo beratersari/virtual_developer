@@ -638,6 +638,7 @@ Write each version as normal prose:
 - Say what changed and what the operator can do differently. Match the detail already in `CHANGELOG.md` for that version. A version with several fixes gets several sentences, not a three-word telegram.
 - Keep sentences on one line. Do not hard-wrap the paragraph every few words. A newline in this file shows up as a line break on the GitHub release. Short stacked lines (`Analytics no longer hangs.` / `Issue key is exact.`) are a broken release note.
 - Leave older version sections in place. Prepend the new version. Do not restyle the download table or the config block at the bottom into prose.
+- `packaging/pyinstaller/executable_bundle.py` copies that version's section into `RELEASE_NOTES.txt` inside `yaver-executables-<version>.zip`. The office site reads that file on upload.
 
 ---
 
@@ -908,7 +909,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
 | Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux), one update script next to the exe (`update.bat` on Windows, `update.sh` on Linux; see §12) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
-| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
+| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. A tag attaches `yaver-executables-<version>.zip` (`packaging/pyinstaller/executable_bundle.py`) and does **not** attach the Ubuntu zips, their `yaver-ubuntu-*-latest.zip` copies, or the Ubuntu `.tar.gz` files. That bundle also contains `RELEASE_NOTES.txt` for the version. Actions artifacts still keep each zip. `yaver-windows-x64-<version>.zip` and `yaver-windows-latest.zip` stay on the release page too. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
 | OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |
 
