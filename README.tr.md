@@ -417,7 +417,7 @@ RELEASE_HOST=192.168.1.20
 RELEASE_PORT=8090
 ```
 
-Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
+Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Windows’ta klasörler robocopy ile kopyalanır. Çalıştırılabilirin yanındaki `VERSION` ve `_internal/VERSION` yayınlanan sürüme yazılır. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
 
 Bu klasörde `update.bat` veya `update.sh` yoksa zip’i bir kez indirin, betiği Yaver klasörüne kopyalayın ve orada çalıştırın. `yaver update` ve `yaver.exe --update` bu yönergeyi yazar ve dosyaları olduğu gibi bırakır.
 

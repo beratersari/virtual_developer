@@ -195,6 +195,34 @@ def test_update_bat_replaces_program_files_and_keeps_env(tmp_path: Path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
+def test_update_bat_writes_the_published_version(tmp_path: Path):
+    files = _windows_package()
+    files["bundle/VERSION"] = b"0.9.74\n"
+    files["bundle/_internal/VERSION"] = b"0.9.74\n"
+    files["bundle/_internal/atlassian/VERSION"] = b"5.0.5"
+    files["bundle/_internal/marker.txt"] = b"new-text"
+    blob = _zip(files)
+    server = _serve(blob, hashlib.sha256(blob).hexdigest(), "0.9.80", "/download/windows")
+    try:
+        install = _windows_install(tmp_path, int(server.server_address[1]))
+        (install / "_internal" / "VERSION").write_bytes(b"0.9.74\n")
+        (install / "_internal" / "atlassian").mkdir()
+        (install / "_internal" / "atlassian" / "VERSION").write_bytes(b"5.0.5")
+        (install / "_internal" / "marker.txt").write_bytes(b"old-text")
+        code, text = _run(["cmd.exe", "/d", "/c", str(install / "update.bat")], install)
+        assert code == 0, text
+        assert "Updated to 0.9.80." in text
+        assert (install / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "VERSION").read_bytes() == b"0.9.80\n"
+        assert (install / "_internal" / "atlassian" / "VERSION").read_bytes() == b"5.0.5"
+        assert (install / "_internal" / "marker.txt").read_bytes() == b"new-text"
+        assert not (install / "_internal" / "stale.txt").exists()
+        assert [path.name for path in install.iterdir() if path.name.startswith(".yaver-hold-")] == []
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows update.bat")
 def test_update_bat_leaves_files_when_the_checksum_mismatches(tmp_path: Path):
     blob = _zip(_windows_package())
     server = _serve(blob, "a" * 64, "0.9.80", "/download/windows")
@@ -252,6 +280,7 @@ def test_update_bat_skips_a_current_install(tmp_path: Path):
         assert "This install is already 0.9.80." in text
         assert "/download/windows" not in server.hits
         assert (install / "yaver.exe").read_bytes() == before
+        assert (install / "VERSION").read_bytes() == b"0.9.80+local\n"
         assert "Stopping Yaver." not in text
     finally:
         server.shutdown()
@@ -294,6 +323,13 @@ def test_update_scripts_avoid_powershell_automatic_names():
     body = bat[bat.rfind("YAVER_UPDATE_BODY") + len("YAVER_UPDATE_BODY") :]
     for bad in ("$pid", "$PID", "$args", "$host", "$Host", "taskkill"):
         assert bad not in body
+
+
+def test_update_bat_copies_directories_with_robocopy():
+    bat = WINDOWS_SCRIPT.read_text(encoding="utf-8")
+    body = bat[bat.rfind("YAVER_UPDATE_BODY") + len("YAVER_UPDATE_BODY") :]
+    assert "robocopy.exe" in body
+    assert "Copy-Item -LiteralPath $child.FullName -Destination $dest -Recurse -Force" not in body
     raw = LINUX_SCRIPT.read_bytes()
     assert b"\r" not in raw
     assert b"$'" not in raw

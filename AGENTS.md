@@ -959,6 +959,16 @@ upstream do not stay behind. `install-agents.bat` or `install-agents.sh`,
 `.env.example`, `VERSION`, and the executable are replaced. A name that
 is not in the package stays, including a data folder kept beside the exe.
 
+Windows `update.bat` copies each directory with `robocopy` (exit 0-7
+is success). The previous tree is renamed in a `.yaver-hold-*` folder
+on the same drive, then removed after the new files are in place. Do
+not copy that tree with `Copy-Item -Recurse`, and do not park the hold
+copy on another drive. After the replace, the script writes the
+published version into `VERSION` and `_internal/VERSION`, including
+when the package omitted those files or still had the previous text.
+Leave a nested third-party file such as `_internal/atlassian/VERSION`
+as the package shipped it.
+
 These stay:
 
 - The operator's `.env`. The package `.env` is copied only when the
