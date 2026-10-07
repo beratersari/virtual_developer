@@ -1110,6 +1110,47 @@ def _assignee_already_pat_user(
     return False
 
 
+def _configured_jira_trigger_names() -> List[str]:
+    """Settings trigger names, original spelling.
+
+    The hardcoded intake list (``jira ai bot``, ``devbot``, …) is not an
+    assignee. An empty Settings value means "use the PAT user".
+    """
+    try:
+        text = settings.resolved_jira_trigger_user()
+    except Exception:
+        return []
+    if not isinstance(text, str):
+        return []
+    from src.config import _trigger_user_names
+
+    return _trigger_user_names(text)
+
+
+def _issue_assignee(client: Any, key: str, issue: Optional[Dict[str, Any]]) -> Any:
+    fields: Dict[str, Any] = {}
+    if isinstance(issue, dict):
+        raw = issue.get("fields")
+        fields = raw if isinstance(raw, dict) else {}
+    elif hasattr(client, "get_issue"):
+        try:
+            live = client.get_issue(key, fields=["assignee"])
+            if isinstance(live, dict):
+                raw = live.get("fields")
+                fields = raw if isinstance(raw, dict) else {}
+        except Exception:
+            fields = {}
+    return fields.get("assignee")
+
+
+def _assignee_is_trigger(assignee: Any, names: List[str]) -> bool:
+    if not names or not isinstance(assignee, dict):
+        return False
+    from src.jira.triggers import assignee_looks_like_bot
+
+    return assignee_looks_like_bot(assignee, needles=names)
+
+
 def assign_to_pat_user(
     client: Any,
     issue_key: str,
@@ -1117,12 +1158,14 @@ def assign_to_pat_user(
     issue: Optional[Dict[str, Any]] = None,
     source: str = "",
 ) -> bool:
-    """Assign a **Jira** issue to the user authenticated by the configured PAT.
+    """Assign a **Jira** issue when a job starts.
 
-    GitLab / Azure trigger points never assign (synthetic ``GL-…`` / ``AZ-…``
-    keys, or ``source=gitlab|azure``). Soft-fails (logs + ``False``) — never
-    blocks poll / schedule / start. Skips the write when the ticket is already
-    that user.
+    Prefer ``JIRA_TRIGGER_USER`` (each configured name, first success wins).
+    The PAT user (``GET /myself``) is the fallback when that list is empty
+    or every trigger assign fails. Already assigned to a trigger name is
+    left alone. GitLab / Azure trigger points never assign (synthetic
+    ``GL-…`` / ``AZ-…`` keys, or ``source=gitlab|azure``). Soft-fails
+    (logs + ``False``) — never blocks poll / schedule / start.
     """
     key = (issue_key or "").strip()
     if not key or client is None or not hasattr(client, "assign_issue"):
@@ -1132,6 +1175,23 @@ def assign_to_pat_user(
         return False
     try:
         is_cloud = bool(getattr(client, "is_cloud", False))
+        assignee = _issue_assignee(client, key, issue)
+        names = _configured_jira_trigger_names()
+        if _assignee_is_trigger(assignee, names):
+            return True
+        for name in names:
+            try:
+                ok = bool(client.assign_issue(key, name))
+            except Exception as exc:
+                logger.warning(
+                    f"{key}: assign to trigger user {name} soft-failed: {exc}"
+                )
+                ok = False
+            if ok:
+                logger.info(f"{key}: assigned to trigger user {name}")
+                return True
+            logger.warning(f"{key}: assign to trigger user {name} failed")
+
         ident = getattr(client, "_pat_assign_ident", None)
         if not isinstance(ident, str) or not ident.strip():
             me = client.get_myself() if hasattr(client, "get_myself") else None
@@ -1144,21 +1204,7 @@ def assign_to_pat_user(
         if not ident:
             logger.warning(f"{key}: cannot assign PAT user (GET /myself empty)")
             return False
-
-        fields: Dict[str, Any] = {}
-        if isinstance(issue, dict):
-            fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
-        elif hasattr(client, "get_issue"):
-            try:
-                live = client.get_issue(key, fields=["assignee"])
-                if isinstance(live, dict):
-                    raw = live.get("fields")
-                    fields = raw if isinstance(raw, dict) else {}
-            except Exception:
-                fields = {}
-        if _assignee_already_pat_user(
-            fields.get("assignee"), ident, is_cloud=is_cloud
-        ):
+        if _assignee_already_pat_user(assignee, ident, is_cloud=is_cloud):
             return True
 
         ok = client.assign_issue(key, ident)

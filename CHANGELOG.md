@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- Starting a Jira job assigns the issue to the trigger user from Settings. The PAT user is used when that name is empty or Jira rejects the assign.
+
 ## [0.9.77] — 2026-10-07
 
 Scheduled merge requests and pull requests can run as a review. Settings Board ID accepts several Jira boards. Windows `update.bat` copies folders with robocopy and writes the published version.

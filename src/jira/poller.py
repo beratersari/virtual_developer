@@ -786,7 +786,7 @@ class JiraPoller:
 
             assign_to_pat_user(self.client, issue_key, issue=issue)
         except Exception as e:
-            logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
+            logger.warning(f"{issue_key}: assignee update soft-failed: {e}")
 
         if self._handler:
             handoff = issue.pop("_plan_handoff", None)

@@ -62,7 +62,7 @@ Every job still needs a **`{params}`** block so Yaver knows the git remote and b
 
 | | Jira | Azure work item | GitLab MR / Azure PR |
 |--|------|-----------------|----------------------|
-| **Accept** | Transition toward **In Progress** (best-effort) and assign the PAT user when configured | Set `System.State` to the type’s **InProgress** name: Agile/CMMI **Active**, Basic **Doing**, Scrum **Committed**, or **In Progress** | No board change |
+| **Accept** | Transition toward **In Progress** (best-effort) and assign the Settings trigger user. The PAT user is the fallback | Set `System.State` to the type’s **InProgress** name: Agile/CMMI **Active**, Basic **Doing**, Scrum **Committed**, or **In Progress** | No board change |
 | **Job done** (plan or build) | Stays **In Progress**. Comment only. | Stays **Active / Doing / In Progress**. **Not** Resolved or Done. | Reply on the thread |
 | **Run again** | Move the ticket back to **To Do** (still assigned to the bot) | Assign again while it is To Do / In Progress (or New / Active / Doing). Moving Active → New while still assigned does **not** re-queue. After an error, edit the title/description. | New `@bot /yaver …` comment |
 | **In-flight** | Never restarted from poll or webhook noise | Same | Same |

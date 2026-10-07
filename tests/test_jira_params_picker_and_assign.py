@@ -268,7 +268,8 @@ def test_assign_to_pat_user_never_writes_for_gitlab_source():
     client.assign_issue.assert_not_called()
 
 
-def test_assign_to_pat_user_skips_when_already_set():
+def test_assign_to_pat_user_skips_when_already_set(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "")
     client = MagicMock()
     client.is_cloud = False
     client.get_myself.return_value = {"name": "devbot", "key": "devbot"}
@@ -279,7 +280,8 @@ def test_assign_to_pat_user_skips_when_already_set():
     client.assign_issue.assert_not_called()
 
 
-def test_assign_to_pat_user_writes_when_unassigned():
+def test_assign_to_pat_user_writes_when_unassigned(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "")
     client = MagicMock()
     client.is_cloud = False
     client.get_myself.return_value = {"name": "devbot", "key": "devbot"}
@@ -289,7 +291,8 @@ def test_assign_to_pat_user_writes_when_unassigned():
     client.assign_issue.assert_called_once_with("KAN-2", "devbot")
 
 
-def test_assign_to_pat_user_uses_issue_arg_without_refetch():
+def test_assign_to_pat_user_uses_issue_arg_without_refetch(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "")
     client = MagicMock()
     client.is_cloud = False
     client.get_myself.return_value = {"name": "devbot"}
@@ -300,7 +303,78 @@ def test_assign_to_pat_user_uses_issue_arg_without_refetch():
     client.assign_issue.assert_called_once_with("KAN-3", "devbot")
 
 
+def _pin_jira_trigger(monkeypatch, value: str) -> None:
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_trigger_user", value)
+    monkeypatch.setattr(settings, "trigger_assignee_names", "")
+    monkeypatch.setattr(settings, "trigger_mentions", "")
+
+
+def test_assign_on_start_uses_the_trigger_user(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "botuser")
+    client = MagicMock()
+    client.is_cloud = False
+    client.get_issue.return_value = {"fields": {"assignee": None}}
+    client.assign_issue.return_value = True
+    assert assign_to_pat_user(client, "KAN-9") is True
+    client.assign_issue.assert_called_once_with("KAN-9", "botuser")
+    client.get_myself.assert_not_called()
+
+
+def test_assign_on_start_tries_each_trigger_name(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "first, second")
+    client = MagicMock()
+    client.is_cloud = False
+    client.get_issue.return_value = {"fields": {"assignee": None}}
+    client.assign_issue.side_effect = [False, True]
+    assert assign_to_pat_user(client, "KAN-9") is True
+    assert [call.args[1] for call in client.assign_issue.call_args_list] == [
+        "first",
+        "second",
+    ]
+    client.get_myself.assert_not_called()
+
+
+def test_assign_on_start_falls_back_to_pat_when_trigger_assign_fails(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "botuser")
+    client = MagicMock()
+    client.is_cloud = False
+    client.get_myself.return_value = {"name": "patuser", "key": "patuser"}
+    client.get_issue.return_value = {"fields": {"assignee": None}}
+    client.assign_issue.side_effect = [False, True]
+    assert assign_to_pat_user(client, "KAN-9") is True
+    assert [call.args for call in client.assign_issue.call_args_list] == [
+        ("KAN-9", "botuser"),
+        ("KAN-9", "patuser"),
+    ]
+
+
+def test_assign_on_start_skips_when_already_the_trigger_user(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "botuser")
+    client = MagicMock()
+    client.is_cloud = False
+    client.get_issue.return_value = {
+        "fields": {"assignee": {"name": "botuser", "displayName": "Bot User"}}
+    }
+    assert assign_to_pat_user(client, "KAN-9") is True
+    client.assign_issue.assert_not_called()
+    client.get_myself.assert_not_called()
+
+
+def test_assign_on_start_ignores_hardcoded_names_when_trigger_is_empty(monkeypatch):
+    _pin_jira_trigger(monkeypatch, "")
+    client = MagicMock()
+    client.is_cloud = False
+    client.get_myself.return_value = {"name": "patuser", "key": "patuser"}
+    client.get_issue.return_value = {"fields": {"assignee": None}}
+    client.assign_issue.return_value = True
+    assert assign_to_pat_user(client, "KAN-9") is True
+    client.assign_issue.assert_called_once_with("KAN-9", "patuser")
+
+
 def test_api_from_issue_picker_writes_params(tmp_path, monkeypatch):
+    _pin_jira_trigger(monkeypatch, "")
     from fastapi.testclient import TestClient
 
     from src.dashboard.api import create_dashboard_app
