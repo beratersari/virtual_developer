@@ -8,9 +8,15 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.78] — 2026-10-07
+
+Starting a Jira job assigns the issue to the trigger user from Settings.
+
 ### Changed
 
 - Starting a Jira job assigns the issue to the trigger user from Settings. The PAT user is used when that name is empty or Jira rejects the assign.
+
+[0.9.78]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.78
 
 ## [0.9.77] — 2026-10-07
 
