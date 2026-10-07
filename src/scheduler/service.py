@@ -79,6 +79,25 @@ def _canonical_mode(mode: str) -> str:
     raise ValueError("mode must be 'plan', 'build', or 'test'")
 
 
+def canonical_mr_pr_mode(mode: str) -> str:
+    """Mode on a scheduled GitLab MR or Azure PR.
+
+    This is not an issue work mode. ``review`` starts the existing reviewer
+    for that host. Plan, test, and ask stay off these forms.
+    """
+    key = (mode or "").strip().lower()
+    if key in ("", "yaver", "build"):
+        return "build"
+    if key == "review":
+        return "review"
+    raise ValueError("mode must be 'build' or 'review'")
+
+
+def mr_pr_followup_command(mode: str) -> str:
+    """Enqueue command. Only a stored review mode starts a review."""
+    return "review" if (mode or "").strip().lower() == "review" else "yaver"
+
+
 def build_issue_description(
     *,
     description: str,
@@ -952,17 +971,23 @@ def schedule_mr_followup(
     scheduled_at: str,
     model: str = "",
     backend: str = "",
+    mode: str = "",
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
-    """Schedule a follow-up prompt on an existing GitLab merge request.
+    """Schedule a follow-up or review on an existing GitLab merge request.
 
-    Hard-fail if the MR cannot be loaded or the prompt is empty. No Jira
-    issue is created. At fire time the prompt is posted on the MR, then
-    the existing GitLab MR job runs and posts the agent answer.
+    Hard-fail if the MR cannot be loaded, the prompt is empty, or mode is
+    not build or review. No Jira issue is created. At fire time the prompt
+    is posted on the MR. ``review`` enqueues a GitLab review; otherwise the
+    usual MR follow-up runs.
     """
     text = (prompt or "").strip()
     if not text:
         return {"ok": False, "error": "Prompt is required."}
+    try:
+        mode_c = canonical_mr_pr_mode(mode)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     preview = preview_mr_followup(repository_url, mr_iid)
     if not preview.get("ok"):
         return preview
@@ -981,7 +1006,7 @@ def schedule_mr_followup(
         repository_url=str(preview.get("repository_url") or repository_url),
         source_branch=str(preview.get("source_branch") or ""),
         target_branch=str(preview.get("target_branch") or ""),
-        mode="build",
+        mode=mode_c,
         scheduled_at=scheduled_iso,
         issue_key=str(preview.get("issue_key") or ""),
         issue_description=text,
@@ -994,15 +1019,16 @@ def schedule_mr_followup(
         gitlab_project=project,
         merge_request_url=str(preview.get("merge_request_url") or ""),
     )
+    kind = "review" if mode_c == "review" else "follow-up"
     logger.info(
-        f"Schedule MR follow-up {project}!{iid} "
+        f"Schedule MR {kind} {project}!{iid} "
         f"schedule_id={rec.get('schedule_id')} at={scheduled_iso}"
     )
     return {
         "ok": True,
         "schedule": rec,
         "issue_key": rec.get("issue_key") or "",
-        "message": f"Scheduled follow-up on {project}!{iid}",
+        "message": f"Scheduled {kind} on {project}!{iid}",
     }
 
 
@@ -1153,17 +1179,23 @@ def schedule_pr_followup(
     scheduled_at: str,
     model: str = "",
     backend: str = "",
+    mode: str = "",
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
-    """Schedule a follow-up prompt on an existing Azure DevOps pull request.
+    """Schedule a follow-up or review on an existing Azure DevOps pull request.
 
-    Hard-fail if the PR cannot be loaded or the prompt is empty. No Jira
-    issue is created. At fire time the prompt is posted on the PR, then
-    the existing Azure PR job runs and posts the agent answer.
+    Hard-fail if the PR cannot be loaded, the prompt is empty, or mode is
+    not build or review. No Jira issue is created. At fire time the prompt
+    is posted on the PR. ``review`` enqueues an Azure review; otherwise the
+    usual PR follow-up runs.
     """
     text = (prompt or "").strip()
     if not text:
         return {"ok": False, "error": "Prompt is required."}
+    try:
+        mode_c = canonical_mr_pr_mode(mode)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     preview = preview_pr_followup(repository_url, pr_id)
     if not preview.get("ok"):
         return preview
@@ -1183,7 +1215,7 @@ def schedule_pr_followup(
         repository_url=str(preview.get("repository_url") or repository_url),
         source_branch=str(preview.get("source_branch") or ""),
         target_branch=str(preview.get("target_branch") or ""),
-        mode="build",
+        mode=mode_c,
         scheduled_at=scheduled_iso,
         issue_key=str(preview.get("issue_key") or ""),
         issue_description=text,
@@ -1199,15 +1231,16 @@ def schedule_pr_followup(
         azure_repository=repo,
         azure_repository_id=str(preview.get("azure_repository_id") or ""),
     )
+    kind = "review" if mode_c == "review" else "follow-up"
     logger.info(
-        f"Schedule PR follow-up {project}/{repo}!{iid} "
+        f"Schedule PR {kind} {project}/{repo}!{iid} "
         f"schedule_id={rec.get('schedule_id')} at={scheduled_iso}"
     )
     return {
         "ok": True,
         "schedule": rec,
         "issue_key": rec.get("issue_key") or "",
-        "message": f"Scheduled follow-up on {project}/{repo}!{iid}",
+        "message": f"Scheduled {kind} on {project}/{repo}!{iid}",
     }
 
 
@@ -2175,6 +2208,7 @@ async def _dispatch_mr_followup(
         mr_url=web,
         discussion_id=discussion_id,
         webhook_event="schedule",
+        command=mr_pr_followup_command(str(rec.get("mode") or "")),
         raw={
             "model": (rec.get("model") or "").strip(),
             "backend": (rec.get("backend") or "").strip(),
@@ -2323,6 +2357,7 @@ async def _dispatch_pr_followup(
         pr_url=str(posted_info.get("web") or ""),
         thread_id=str(posted_info.get("thread_id") or ""),
         webhook_event="schedule",
+        command=mr_pr_followup_command(str(rec.get("mode") or "")),
         raw={
             "model": (rec.get("model") or "").strip(),
             "backend": (rec.get("backend") or "").strip(),

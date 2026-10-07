@@ -78,6 +78,27 @@ function scheduleModeNames(saved: WorkMode[] | undefined, current: string): stri
   return names
 }
 
+function scheduleListKind(source: string | undefined, mode: string | undefined): string {
+  const review = (mode || '').trim().toLowerCase() === 'review'
+  if (source === 'gitlab_mr') return review ? 'MR review' : 'MR follow-up'
+  if (source === 'azure_pr') return review ? 'PR review' : 'PR follow-up'
+  return mode || ''
+}
+
+const MR_PR_MODE_CHOICES: {
+  mr: { value: string; label: string }[]
+  pr: { value: string; label: string }[]
+} = {
+  mr: [
+    { value: 'build', label: 'build' },
+    { value: 'review', label: 'GitLab review' },
+  ],
+  pr: [
+    { value: 'build', label: 'build' },
+    { value: 'review', label: 'Azure review' },
+  ],
+}
+
 /** Picker default for "schedule later" only — not used by Run now. */
 function defaultWhen(): string {
   const d = new Date()
@@ -296,13 +317,7 @@ export function SchedulesPage() {
               <StatusBadge status={s.status} size="sm" />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
-              <span>
-                {s.source === 'gitlab_mr'
-                  ? 'MR follow-up'
-                  : s.source === 'azure_pr'
-                    ? 'PR follow-up'
-                    : s.mode}
-              </span>
+              <span>{scheduleListKind(s.source, s.mode)}</span>
               <span>{formatScheduleWhen(s.scheduled_at)}</span>
               {(s.status === 'scheduled' || s.status === 'error') && (
                 <button
@@ -402,6 +417,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
   const [preview, setPreview] = useState<ScheduleMrPreview | null>(null)
   const [prompt, setPrompt] = useState('')
   const [when, setWhen] = useState(defaultWhen)
+  const [mode, setMode] = useState('build')
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
   const [err, setErr] = useState<string | null>(null)
@@ -447,6 +463,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
     } catch (e) {
       setPreview(null)
       setPrompt('')
+      setMode('build')
       setModel('')
       setBackend('')
       setErr(e instanceof Error ? e.message : 'MR lookup failed')
@@ -480,6 +497,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
         prompt: prompt.trim(),
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
+        mode: mode === 'review' ? 'review' : 'build',
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
       })
@@ -490,6 +508,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
       }
       setPreview(null)
       setPrompt('')
+      setMode('build')
       setIid('')
       onDone()
     } catch (e2) {
@@ -576,8 +595,9 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
               required
             />
             <span className="mt-1 block text-xs text-text-muted">
-              Posted on the MR as a *Yaver* note marked “written in the ops
-              dashboard”. The agent answer is posted there when the worker finishes.
+              {mode === 'review'
+                ? 'Posted on the MR as a *Yaver* note marked “written in the ops dashboard”, then run as a GitLab review. The review does not push.'
+                : 'Posted on the MR as a *Yaver* note marked “written in the ops dashboard”. The agent answer is posted there when the worker finishes.'}
             </span>
           </label>
           <WorkerBlock
@@ -585,8 +605,20 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
             setBackend={setBackend}
             model={model}
             setModel={setModel}
+            mode={mode}
+            setMode={setMode}
+            modeChoices={MR_PR_MODE_CHOICES.mr}
+            modeHint={
+              mode === 'review'
+                ? 'Starts a GitLab review on this merge request. Does not push.'
+                : 'Posts the prompt and runs the usual follow-up on this merge request.'
+            }
             fallbackBackend={live.settings?.agent_backend || 'opencode'}
-            fallbackModel={live.settings?.default_model || ''}
+            fallbackModel={
+              mode === 'review'
+                ? live.settings?.default_review_model || live.settings?.default_model || ''
+                : live.settings?.default_model || ''
+            }
             setModelsLoading={setModelsLoading}
           />
           <ScheduleWhenField value={when} onChange={setWhen} />
@@ -632,6 +664,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
   const [preview, setPreview] = useState<SchedulePrPreview | null>(null)
   const [prompt, setPrompt] = useState('')
   const [when, setWhen] = useState(defaultWhen)
+  const [mode, setMode] = useState('build')
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
   const [err, setErr] = useState<string | null>(null)
@@ -671,6 +704,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
     } catch (e) {
       setPreview(null)
       setPrompt('')
+      setMode('build')
       setModel('')
       setBackend('')
       setErr(e instanceof Error ? e.message : 'PR lookup failed')
@@ -704,6 +738,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
         prompt: prompt.trim(),
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
+        mode: mode === 'review' ? 'review' : 'build',
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
       })
@@ -714,6 +749,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
       }
       setPreview(null)
       setPrompt('')
+      setMode('build')
       setIid('')
       onDone()
     } catch (e2) {
@@ -800,8 +836,9 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
               required
             />
             <span className="mt-1 block text-xs text-text-muted">
-              Posted on the PR as a *Yaver* comment marked “written in the ops
-              dashboard”. The agent answer is posted there when the worker finishes.
+              {mode === 'review'
+                ? 'Posted on the PR as a *Yaver* comment marked “written in the ops dashboard”, then run as an Azure review. The review does not push.'
+                : 'Posted on the PR as a *Yaver* comment marked “written in the ops dashboard”. The agent answer is posted there when the worker finishes.'}
             </span>
           </label>
           <WorkerBlock
@@ -809,8 +846,20 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
             setBackend={setBackend}
             model={model}
             setModel={setModel}
+            mode={mode}
+            setMode={setMode}
+            modeChoices={MR_PR_MODE_CHOICES.pr}
+            modeHint={
+              mode === 'review'
+                ? 'Starts an Azure review on this pull request. Does not push.'
+                : 'Posts the prompt and runs the usual follow-up on this pull request.'
+            }
             fallbackBackend={live.settings?.agent_backend || 'opencode'}
-            fallbackModel={live.settings?.default_model || ''}
+            fallbackModel={
+              mode === 'review'
+                ? live.settings?.default_review_model || live.settings?.default_model || ''
+                : live.settings?.default_model || ''
+            }
             setModelsLoading={setModelsLoading}
           />
           <ScheduleWhenField value={when} onChange={setWhen} />
@@ -1540,6 +1589,8 @@ function WorkerBlock({
   setModel,
   mode,
   setMode,
+  modeChoices,
+  modeHint,
   workModes,
   fallbackBackend,
   fallbackModel,
@@ -1551,11 +1602,16 @@ function WorkerBlock({
   setModel: (value: string) => void
   mode?: string
   setMode?: (value: string) => void
+  modeChoices?: readonly { value: string; label: string }[]
+  modeHint?: string
   workModes?: WorkMode[]
   fallbackBackend: string
   fallbackModel: string
   setModelsLoading: (loading: boolean) => void
 }) {
+  const choices = modeChoices?.length
+    ? modeChoices
+    : scheduleModeNames(workModes, mode || '').map((name) => ({ value: name, label: name }))
   return (
     <div className="rounded-xl border border-border p-3">
       <div className="text-sm font-semibold text-text">Worker</div>
@@ -1567,12 +1623,15 @@ function WorkerBlock({
         <label className="field">
           <span>Mode</span>
           <select value={mode} onChange={(e) => setMode(e.target.value.trim().toLowerCase())}>
-            {scheduleModeNames(workModes, mode).map((name) => (
-              <option key={name} value={name}>
-                {name}
+            {choices.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.label}
               </option>
             ))}
           </select>
+          {modeHint ? (
+            <span className="mt-1 block text-xs text-text-muted">{modeHint}</span>
+          ) : null}
         </label>
       ) : null}
       <BackendField

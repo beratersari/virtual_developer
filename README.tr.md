@@ -437,7 +437,7 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 - **Tasks / Jobs** — canlı ve geçmiş koşular (istem ve günlükler seçili işe özgüdür)
 - **Poll** — son Jira pano anlığı
 - **Storage and Sessions** — geçici klonlar. Details, klasörü kullanan OpenCode sohbetlerini gösterir. Klasörü silinen sohbetler bu sayfada kalır ve sıfırlanabilir. İş klonu sahipse silme reddedilir. Birleşen GitLab MR ve biten Azure PR eşleşen klasörü siler. Bağlı MR/PR’si olmayanlar uyarılır.
-- **Scheduled** — sonra Jira işi veya Azure iş öğesi oluşturun / var olanı bulun. **Cancel** yalnız `scheduled` / `error` içindir (`dispatching` iptal edilemez).
+- **Scheduled** — sonra Jira işi veya Azure iş öğesi oluşturun / var olanı bulun. MR bölümünde Mode **GitLab review** bir GitLab incelemesi başlatır. PR bölümünde Mode **Azure review** bir Azure incelemesi başlatır. Var olan ve yeni işler plan, build ve test olarak kalır. **Cancel** yalnız `scheduled` / `error` içindir (`dispatching` iptal edilemez).
 - **Settings** — pano, tarama aralığı, tetik adları, Azure koleksiyon PAT’leri (jeton gösterilmez)
 
 Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Genel **Start** kapalı kalır. **Stop work** ajan çocuklarını hemen öldürür.

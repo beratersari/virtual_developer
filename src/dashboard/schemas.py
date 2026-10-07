@@ -165,7 +165,7 @@ class ScheduleCreateRequest(BaseModel):
 
 
 class ScheduleMrRequest(BaseModel):
-    """Body for POST /api/schedules/mr — follow-up prompt on an existing GitLab MR."""
+    """Body for POST /api/schedules/mr — follow-up or review on an existing GitLab MR."""
 
     repository_url: str = Field(..., min_length=1, max_length=2000)
     mr_iid: int = Field(..., ge=1, le=2_000_000)
@@ -174,10 +174,12 @@ class ScheduleMrRequest(BaseModel):
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
     backend: str = Field(default="", max_length=40)
+    # build = follow-up. review = GitLab review. Not an issue work mode.
+    mode: str = Field(default="build", max_length=40)
 
 
 class SchedulePrRequest(BaseModel):
-    """Body for POST /api/schedules/pr — follow-up prompt on an existing Azure PR."""
+    """Body for POST /api/schedules/pr — follow-up or review on an existing Azure PR."""
 
     repository_url: str = Field(..., min_length=1, max_length=2000)
     pr_id: int = Field(..., ge=1, le=2_000_000)
@@ -186,6 +188,8 @@ class SchedulePrRequest(BaseModel):
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
     backend: str = Field(default="", max_length=40)
+    # build = follow-up. review = Azure review. Not an issue work mode.
+    mode: str = Field(default="build", max_length=40)
 
 
 class ScheduleExistingRequest(BaseModel):

@@ -104,6 +104,84 @@ def test_preview_pr_followup_needs_azure_url():
     assert "Azure" in (preview.get("error") or "")
 
 
+def test_schedule_pr_review_persists_review_mode(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    _patch_get_pr(monkeypatch)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    when = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
+    result = schedule_pr_followup(
+        repository_url=AZURE_REPO,
+        pr_id=4,
+        prompt="Check the login change.",
+        scheduled_at=when,
+        mode="review",
+        store=store,
+    )
+    assert result["ok"] is True
+    assert result["schedule"]["mode"] == "review"
+    assert result["schedule"]["source"] == "azure_pr"
+
+
+def test_schedule_pr_rejects_plan_before_lookup(tmp_path, monkeypatch):
+    def boom(self, project, repository, pr_id):
+        raise AssertionError("PR lookup must not run for a bad mode")
+
+    monkeypatch.setattr("src.azure.client.AzureDevOpsClient.get_pull_request", boom)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    when = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    result = schedule_pr_followup(
+        repository_url=AZURE_REPO,
+        pr_id=4,
+        prompt="Check the login change.",
+        scheduled_at=when,
+        mode="ask",
+        store=store,
+    )
+    assert result["ok"] is False
+    assert "review" in (result.get("error") or "")
+    assert store.count_schedules() == 0
+
+
+def test_api_pr_schedule_review_mode(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.dashboard import api as api_mod
+    from src.scheduler import service as sched_mod
+
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    _patch_get_pr(monkeypatch)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    monkeypatch.setattr(api_mod, "schedule_store", store)
+    monkeypatch.setattr(sched_mod, "schedule_store", store)
+    app = create_dashboard_app(processor=None)
+    client = TestClient(app)
+    when = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    created = client.post(
+        "/api/schedules/pr",
+        json={
+            "repository_url": AZURE_REPO,
+            "pr_id": 4,
+            "prompt": "Check the login change.",
+            "scheduled_at": when,
+            "mode": "review",
+        },
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["schedule"]["mode"] == "review"
+    rejected = client.post(
+        "/api/schedules/pr",
+        json={
+            "repository_url": AZURE_REPO,
+            "pr_id": 4,
+            "prompt": "Check the login change.",
+            "scheduled_at": when,
+            "mode": "test",
+        },
+    )
+    assert rejected.status_code == 400
+
+
 def test_schedule_pr_followup_persists_azure_source(tmp_path, monkeypatch):
     from src.config import settings
 
@@ -121,6 +199,7 @@ def test_schedule_pr_followup_persists_azure_source(tmp_path, monkeypatch):
     assert result["ok"] is True
     rec = result["schedule"]
     assert rec["source"] == "azure_pr"
+    assert rec["mode"] == "build"
     assert rec["pr_id"] == 4
     assert rec["azure_project"] == "Demo"
     assert rec["azure_repository"] == "demo"
@@ -178,7 +257,37 @@ async def test_dispatch_pr_followup_posts_overview_and_enqueues(monkeypatch):
     assert event.thread_id == "8"
     assert event.comment_id == "1"
     assert event.prompt == "Please add a log line."
+    assert event.command == "yaver"
     assert event.raw.get("backend") == "opencode"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_review_enqueues_review_command(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    _patch_get_pr(monkeypatch)
+    posted = {}
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 8, "comments": [{"id": 1, "content": kwargs.get("body")}]}
+
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.post_pr_comment", fake_post
+    )
+    proc = MagicMock()
+    proc.enqueue_azure_comment = AsyncMock(
+        return_value={"ok": True, "queued": True, "issue_key": "KAN-12"}
+    )
+    out = await _dispatch_pr_followup(proc, _schedule_rec(mode="review"))
+    assert out["ok"] is True
+    assert "*Yaver* — written in the ops dashboard" in (posted.get("body") or "")
+    assert "/review" not in (posted.get("body") or "")
+    event = proc.enqueue_azure_comment.await_args.args[0]
+    assert event.command == "review"
+    assert event.prompt == "Please add a log line."
+    assert JobProcessor._is_review_comment(event) is True
 
 
 def _schedule_rec(**extra) -> dict:

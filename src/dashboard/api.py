@@ -969,10 +969,10 @@ def create_dashboard_app(
 
     @app.post("/api/schedules/mr")
     async def schedules_mr(body: ScheduleMrRequest) -> dict:
-        """Schedule a follow-up prompt on an existing GitLab merge request.
+        """Schedule a follow-up or review on an existing GitLab merge request.
 
-        At fire time the prompt is posted on the MR, then the usual GitLab
-        MR job runs and posts the agent answer.
+        At fire time the prompt is posted on the MR. mode ``review`` starts
+        a GitLab review. mode ``build`` runs the usual MR follow-up.
         """
         result = schedule_mr_followup(
             repository_url=body.repository_url,
@@ -981,6 +981,7 @@ def create_dashboard_app(
             scheduled_at=body.scheduled_at,
             model=body.model or "",
             backend=body.backend or "",
+            mode=body.mode or "",
             store=schedule_store,
         )
         if not result.get("ok"):
@@ -1016,10 +1017,10 @@ def create_dashboard_app(
 
     @app.post("/api/schedules/pr")
     async def schedules_pr(body: SchedulePrRequest) -> dict:
-        """Schedule a follow-up prompt on an existing Azure DevOps pull request.
+        """Schedule a follow-up or review on an existing Azure DevOps pull request.
 
-        At fire time the prompt is posted on the PR, then the usual Azure
-        PR job runs and posts the agent answer.
+        At fire time the prompt is posted on the PR. mode ``review`` starts
+        an Azure review. mode ``build`` runs the usual PR follow-up.
         """
         result = schedule_pr_followup(
             repository_url=body.repository_url,
@@ -1028,6 +1029,7 @@ def create_dashboard_app(
             scheduled_at=body.scheduled_at,
             model=body.model or "",
             backend=body.backend or "",
+            mode=body.mode or "",
             store=schedule_store,
         )
         if not result.get("ok"):
