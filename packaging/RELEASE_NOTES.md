@@ -1,3 +1,9 @@
+# Yaver 0.9.80
+
+A tagged release attaches `yaver-executables-X.Y.Z.zip`. That file contains `yaver-windows-x64-X.Y.Z.zip` and `yaver-linux-x64-ubuntu-18.04-X.Y.Z.zip` through `24.04`. Those Ubuntu zips are no longer separate files on the release page. `yaver-windows-x64-X.Y.Z.zip` and `yaver-windows-latest.zip` stay on the release page. The office site takes this one zip and still offers each system as its own download. That same zip contains `RELEASE_NOTES.txt`, the `# Yaver X.Y.Z` section from these notes. The office site reads that file and shows it as the release note for the version.
+
+Analytics status filters show the job count beside Completed, Error, and Cancelled, the same way Executing already does.
+
 # Yaver 0.9.79
 
 `update.bat` and `update.sh` write the published version into `VERSION` and `_internal/VERSION` when either file is still an older version. A root `VERSION` that already matches no longer leaves `_internal/VERSION` unchanged. Robocopy copies a version file even when the new text is the same length. A blank `RELEASE_HOST` uses `15.210.7.55`. A blank `RELEASE_PORT` uses `8090`. A host or port already in `.env` is kept. Copy the new `update.bat` or `update.sh` from this zip into the Yaver folder once before you run it. The script that is already in the folder stays until you replace it.
