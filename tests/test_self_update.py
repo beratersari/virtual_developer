@@ -915,6 +915,32 @@ def test_settings_save_the_release_server(tmp_path: Path, monkeypatch):
     assert stored["release_port"] == 8090
 
 
+def test_blank_release_host_saves_the_office_address(tmp_path: Path, monkeypatch):
+    from src.config import DEFAULT_RELEASE_HOST, settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "release_host", "10.1.2.3")
+    monkeypatch.setattr(settings, "release_port", 8090)
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: tmp_path / "runtime_settings.json")
+    view = apply_settings_update(SettingsUpdate(release_host="  "))
+    assert view.release_host == DEFAULT_RELEASE_HOST == "15.210.7.55"
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert f"RELEASE_HOST={DEFAULT_RELEASE_HOST}" in env
+
+
+def test_release_host_defaults_when_unset(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("RELEASE_HOST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    from src.config import DEFAULT_RELEASE_HOST, Settings
+
+    fresh = Settings(_env_file=None)
+    assert fresh.release_host == DEFAULT_RELEASE_HOST
+    blank = Settings(_env_file=None, release_host="")
+    assert blank.release_host == DEFAULT_RELEASE_HOST
+    kept = Settings(_env_file=None, release_host="10.9.8.7")
+    assert kept.release_host == "10.9.8.7"
+
+
 def test_dashboard_update_routes_are_gone():
     app = create_dashboard_app()
     client = TestClient(app)

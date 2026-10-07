@@ -415,11 +415,13 @@ A separate release site holds the Windows package and one package for each Ubunt
 Set the site address in `.env`:
 
 ```text
-RELEASE_HOST=192.168.1.20
+RELEASE_HOST=15.210.7.55
 RELEASE_PORT=8090
 ```
 
-The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. On Windows the folders are copied with robocopy, and `VERSION` next to the executable and `_internal/VERSION` are set to the published version. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
+A blank `RELEASE_HOST` uses `15.210.7.55`. A blank `RELEASE_PORT` uses `8090`. A value you set is the one the script uses.
+
+The script downloads the package for this computer, stops Yaver in that folder, and replaces the program files. That includes `yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`. It writes the published version into `VERSION` and `_internal/VERSION`. That still happens when the root `VERSION` file already shows the published version and `_internal/VERSION` does not. The `.env` file stays. The script you ran stays. Files that are not in the package stay, including a data folder next to the executable. The script does not start Yaver. Wait for the line that begins with Updated to, then start `yaver.exe` or `./yaver`.
 
 If this folder does not have `update.bat` or `update.sh` yet, download the zip once, copy that script into the Yaver folder, and run it there. `yaver update` and `yaver.exe --update` print this instruction and leave the files as they are.
 

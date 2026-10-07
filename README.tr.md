@@ -413,11 +413,13 @@ Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paket
 Site adresini `.env` içine yazın:
 
 ```text
-RELEASE_HOST=192.168.1.20
+RELEASE_HOST=15.210.7.55
 RELEASE_PORT=8090
 ```
 
-Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Windows’ta klasörler robocopy ile kopyalanır. Çalıştırılabilirin yanındaki `VERSION` ve `_internal/VERSION` yayınlanan sürüme yazılır. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
+`RELEASE_HOST` boşsa betik `15.210.7.55` kullanır. `RELEASE_PORT` boşsa `8090` kullanır. Yazılmış bir değer olduğu gibi kullanılır.
+
+Betik bu bilgisayara uyan paketi indirir, bu klasördeki Yaver sürecini durdurur ve program dosyalarını değiştirir. Buna `yaver.exe` veya `yaver`, `_internal`, `.env.example`, `opencoderman` ve `install-agents.bat` veya `install-agents.sh` dahildir. Yayınlanan sürümü `VERSION` ve `_internal/VERSION` dosyalarına yazar. Kök `VERSION` yayınlanan sürümü gösterirken `_internal/VERSION` eskiyse bu yazma yine yapılır. Kurulumdaki `.env` yerinde kalır. Çalıştırdığınız betik yerinde kalır. Pakette olmayan dosyalar, çalıştırılabilirin yanındaki veri klasörü dahil, yerinde kalır. Betik Yaver’i başlatmaz. Updated to ile başlayan satırı bekleyin, sonra `yaver.exe` veya `./yaver` çalıştırın.
 
 Bu klasörde `update.bat` veya `update.sh` yoksa zip’i bir kez indirin, betiği Yaver klasörüne kopyalayın ve orada çalıştırın. `yaver update` ve `yaver.exe --update` bu yönergeyi yazar ve dosyaları olduğu gibi bırakır.
 

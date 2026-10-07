@@ -935,7 +935,9 @@ files. `--host` and `--port` are accepted so an old command line still
 exits, and they do not rewrite `.env`.
 
 The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env` (the last
-value wins). It calls `GET /api/latest?platform=…` and
+value wins). A blank or missing host uses `15.210.7.55`. A blank or
+missing port uses `8090`. An explicit value still wins. An invalid
+non-empty value fails closed. It calls `GET /api/latest?platform=…` and
 `GET /download/{platform}` on `http://{host}:{port}` only. It does not
 follow redirects. `curl --noproxy` keeps a corporate proxy off that LAN
 host. The sha256 must match before anything is stopped or replaced.
@@ -952,8 +954,10 @@ Ubuntu comes from `/etc/os-release` (`ID=ubuntu` and `VERSION_ID`
 18.04, 20.04, 22.04, or 24.04). `YAVER_UPDATE_PLATFORM` overrides that
 with one of those four ids.
 
-When `VERSION` in the folder already matches the published version
-(text before `+`), the script exits 0 and does not stop Yaver.
+When `VERSION` and `_internal/VERSION` both exist and both match the
+published version (text before `+`), the script exits 0 and does not
+stop Yaver. If either file is missing or still has another version,
+the update runs. The frozen executable reads `_internal/VERSION` first.
 
 Otherwise it stops `yaver.exe` (Windows) or `yaver` (Linux) whose
 executable path is this folder, waits until that process is gone, then
@@ -963,15 +967,20 @@ upstream do not stay behind. `install-agents.bat` or `install-agents.sh`,
 `.env.example`, `VERSION`, and the executable are replaced. A name that
 is not in the package stays, including a data folder kept beside the exe.
 
-Windows `update.bat` copies each directory with `robocopy` (exit 0-7
-is success). The previous tree is renamed in a `.yaver-hold-*` folder
-on the same drive, then removed after the new files are in place. Do
-not copy that tree with `Copy-Item -Recurse`, and do not park the hold
-copy on another drive. After the replace, the script writes the
-published version into `VERSION` and `_internal/VERSION`, including
-when the package omitted those files or still had the previous text.
-Leave a nested third-party file such as `_internal/atlassian/VERSION`
-as the package shipped it.
+Windows `update.bat` copies each directory with `robocopy /IS /IT`
+(exit 0-7 is success). `/IS` and `/IT` copy a file whose size and
+time already match, so a same-length `VERSION` is replaced. The
+previous tree is renamed in a `.yaver-hold-*` folder on the same
+drive, then removed after the new files are in place. Do not copy
+that tree with `Copy-Item -Recurse`, and do not park the hold copy
+on another drive. After the replace, the script copies `VERSION`
+and `_internal/VERSION` from the package with a file copy, then
+writes the published version into both files and logs `copied VERSION`.
+A top-level name that fails the safe-character check is skipped.
+The name `VERSION` is always written. This includes a package that
+omitted those files or still had the previous text. Leave a nested
+third-party file such as `_internal/atlassian/VERSION` as the
+package shipped it. `update.sh` writes the same two product files.
 
 These stay:
 

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Update Yaver in this folder. Run this file yourself.
 # It stops yaver, then replaces the program files.
+# VERSION and _internal/VERSION are set to the published version.
+# A blank RELEASE_HOST uses 15.210.7.55. A blank RELEASE_PORT uses 8090.
 # .env and this file stay as they are. Start ./yaver when this script finishes.
 set -eu
 
@@ -112,7 +114,8 @@ fetch_url() {
   message=$3
   status=0
   out=$(output_path "$dest")
-  code=$(curl --silent --show-error --connect-timeout 15 --max-time 600 --max-redirs 0 --noproxy '*' -o "$out" -w '%{http_code}' "$url") || status=$?
+  curl_bin=${YAVER_UPDATE_CURL:-curl}
+  code=$("$curl_bin" --silent --show-error --connect-timeout 15 --max-time 600 --max-redirs 0 --noproxy '*' -o "$out" -w '%{http_code}' "$url") || status=$?
   if [ "$status" -ne 0 ] || [ "$code" != "200" ]; then
     fail "$message"
   fi
@@ -167,6 +170,38 @@ archive.extractall(dest)
   fi
 }
 
+copy_staged_version() {
+  src=$1
+  dest=$2
+  if [ ! -f "$src" ]; then
+    return 0
+  fi
+  parent=$(dirname "$dest")
+  if [ ! -d "$parent" ]; then
+    return 0
+  fi
+  if [ -L "$dest" ] || [ -d "$dest" ]; then
+    rm -rf "$dest"
+  fi
+  cp -a "$src" "$dest" || return 1
+  say "copied VERSION"
+}
+
+write_release_version() {
+  text=$1
+  for path in "$ROOT/VERSION" "$ROOT/_internal/VERSION"; do
+    parent=$(dirname "$path")
+    if [ ! -d "$parent" ]; then
+      continue
+    fi
+    if [ -L "$path" ] || [ -d "$path" ]; then
+      rm -rf "$path"
+    fi
+    printf '%s\n' "$text" > "$path" || return 1
+    say "copied VERSION"
+  done
+}
+
 if [ -z "$ROOT" ] || [ "$ROOT" = "/" ]; then
   fail "Refusing to update a drive root."
 fi
@@ -182,6 +217,12 @@ fi
 
 rel_host=$(env_value RELEASE_HOST "$ROOT/.env")
 rel_port=$(env_value RELEASE_PORT "$ROOT/.env")
+if [ -z "$rel_host" ]; then
+  rel_host=15.210.7.55
+fi
+if [ -z "$rel_port" ]; then
+  rel_port=8090
+fi
 case "$rel_host" in
   [A-Za-z0-9]*) ;;
   *) fail "Set RELEASE_HOST in .env to an IP or a hostname." ;;
@@ -252,13 +293,18 @@ esac
 if [ "${#sha}" -ne 64 ]; then
   fail "The release server returned an unexpected checksum."
 fi
+remote_id=$(version_id "$version")
+root_id=
+internal_id=
 if [ -f "$ROOT/VERSION" ]; then
-  local_id=$(version_id "$(tr -d '\r' < "$ROOT/VERSION")")
-  remote_id=$(version_id "$version")
-  if [ -n "$local_id" ] && [ "$local_id" = "$remote_id" ]; then
-    say "This install is already $version."
-    exit 0
-  fi
+  root_id=$(version_id "$(tr -d '\r' < "$ROOT/VERSION")")
+fi
+if [ -f "$ROOT/_internal/VERSION" ]; then
+  internal_id=$(version_id "$(tr -d '\r' < "$ROOT/_internal/VERSION")")
+fi
+if [ -n "$root_id" ] && [ -n "$internal_id" ] && [ "$root_id" = "$remote_id" ] && [ "$internal_id" = "$remote_id" ]; then
+  say "This install is already $version."
+  exit 0
 fi
 say "Downloading $version."
 fetch_url "http://${rel_host}:${rel_port}/download/${plat}" "$zip" "Could not download the package."
@@ -327,6 +373,7 @@ for child in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
   fi
   name=$(basename "$child")
   case "$name" in
+    VERSION|version) ;;
     *[!A-Za-z0-9._-]*)
       say "skipped $name"
       continue
@@ -373,6 +420,12 @@ status=$?
 set -e
 if [ "$status" -ne 0 ]; then
   exit "$status"
+fi
+if ! copy_staged_version "$stage/VERSION" "$ROOT/VERSION" \
+  || ! copy_staged_version "$stage/_internal/VERSION" "$ROOT/_internal/VERSION" \
+  || ! write_release_version "$version"; then
+  restore_moved "$WORK/moved.txt"
+  fail "Could not copy VERSION."
 fi
 say "Updated to ${version}. Start ./yaver when you want."
 exit 0

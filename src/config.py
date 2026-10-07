@@ -12,6 +12,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.logger import logger
 
+# Office LAN release site. update.bat and update.sh use the same address
+# when RELEASE_HOST is blank. An explicit .env value still wins.
+DEFAULT_RELEASE_HOST = "15.210.7.55"
+
 
 def _gitlab_host_key(raw: str) -> str:
     """Bare hostname[:port] for a host or a pasted GitLab URL."""
@@ -603,15 +607,26 @@ class Settings(BaseSettings):
         ),
     )
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
-    # LAN release site read by update.bat and update.sh. Empty host or port 0 leaves it unset.
+    # LAN release site read by update.bat and update.sh.
+    # A blank host uses 15.210.7.55. Port 0 leaves the port unset here;
+    # the update scripts use 8090 when RELEASE_PORT is blank.
     release_host: str = Field(
-        default="",
-        description="Release server IP or hostname. No scheme or path.",
+        default=DEFAULT_RELEASE_HOST,
+        description="Release server IP or hostname. No scheme or path. Blank uses 15.210.7.55.",
     )
     release_port: int = Field(
         default=0,
         description="Release server port. 0 means unset.",
     )
+
+    @field_validator("release_host", mode="before")
+    @classmethod
+    def _default_release_host(cls, value: Any) -> str:
+        """A blank env value uses the office release server."""
+        text = "" if value is None else str(value).strip()
+        if not text:
+            return DEFAULT_RELEASE_HOST
+        return text
 
     @field_validator("release_port", mode="before")
     @classmethod
