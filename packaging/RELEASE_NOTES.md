@@ -1,3 +1,13 @@
+# Yaver 0.9.75
+
+A finished GitLab `/review`, `/ask`, or `/yaver` reply is marked reviewed, so the merge request shows Re-request review. `/ask` posts the overview and leaves approval to `/review`. When a `/review` findings JSON is empty, Yaver approves the merge request and still posts the overview note.
+
+Update an executable install from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`. The script reads `RELEASE_HOST` and `RELEASE_PORT` from `.env`, checks the package, stops Yaver in that folder, and replaces the program files (`yaver.exe` or `yaver`, `_internal`, `.env.example`, `opencoderman`, and `install-agents.bat` or `install-agents.sh`). `.env` and the script you ran stay. Start Yaver after the line that begins with Updated to. An install that does not have `update.bat` or `update.sh` yet can take the script from the published zip: download the zip once, copy that script into the Yaver folder, and run it there. `yaver update` and `yaver --update` print that instruction and leave the install unchanged.
+
+OpenCode, Claude Code, and Codex release zips are named with that tool's version. A Windows OpenCode 1.18.10 package is `yaver-opencode-windows-x64-1.18.10.zip`. Claude Code and Codex use the same pattern, and the Linux names do too. The Codex zip packs the file named `codex.exe`.
+
+Settings Sync copies agent files into the OpenCode and Claude homes and reloads OpenCode when no job is running. Saving or creating an agent writes the catalog and leaves OpenCode running. The separate Reload OpenCode button is gone.
+
 # Yaver 0.9.74
 
 A review that already printed its answer is no longer run again just because one todo stayed in progress. The turn is complete when OpenCode stops and no todo is still pending. A todo that is still pending keeps the job incomplete, and a build is asked to finish that work.
