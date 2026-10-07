@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.76] — 2026-10-07
+
+The Windows offline package and the OpenCode, Claude Code, and Codex zips are built again.
+
+### Fixed
+
+- The Windows dist deleted the downloaded OpenCode, Claude Code, and Codex binaries, then tried to pack those CLI zips from the missing files. The zips are packed first, and the download cache is removed after that.
+
+[0.9.76]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.76
+
 ## [0.9.75] — 2026-10-07
 
 A finished GitLab review shows Re-request review. Update an install by running `update.bat` or `./update.sh` in the Yaver folder.
