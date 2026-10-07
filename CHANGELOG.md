@@ -8,6 +8,21 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.80] — 2026-10-07
+
+A tagged release attaches one zip of the Windows and Ubuntu executables, and that zip carries the release note. Analytics status filters show every count.
+
+### Changed
+
+- A tagged release attaches `yaver-executables-X.Y.Z.zip`. That file contains `yaver-windows-x64-X.Y.Z.zip` and `yaver-linux-x64-ubuntu-18.04-X.Y.Z.zip` through `24.04`. Those Ubuntu zips are no longer separate files on the release page. The office site takes this one zip and still offers each system as its own download.
+- That same zip contains `RELEASE_NOTES.txt`, the `# Yaver X.Y.Z` section from `packaging/RELEASE_NOTES.md`. The office site reads that file and shows it as the release note for the version.
+
+### Fixed
+
+- Analytics status filters show the job count beside Completed, Error, and Cancelled, the same way Executing already does.
+
+[0.9.80]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.80
+
 ## [0.9.79] — 2026-10-07
 
 `update.bat` and `update.sh` write the published version into `VERSION` and `_internal/VERSION` when either file is still older.

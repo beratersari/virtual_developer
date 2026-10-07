@@ -326,7 +326,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Attach to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+        # Ubuntu zips stay in the Actions artifacts. The release page gets
+        # them only inside yaver-executables-<version>.zip, from the bundle job.
+        if: startsWith(github.ref, 'refs/tags/') && matrix.platform == 'windows'
         uses: softprops/action-gh-release@v2
         with:
           name: Yaver ${{ steps.meta.outputs.base_version }}
@@ -338,5 +340,41 @@ jobs:
             dist/opencoderman-*.zip
           body_path: dist/RELEASE_NOTES.md
           fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  bundle-executables:
+    name: Bundle executable zips
+    needs: freeze
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download versioned executable zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: yaver-*-zip
+          path: bundle-in
+          merge-multiple: true
+
+      - name: Pack one zip for the release page
+        run: python3 packaging/pyinstaller/executable_bundle.py --from bundle-in --out dist
+
+      - name: Upload the bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yaver-executables
+          path: dist/yaver-executables-*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach the bundle to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/yaver-executables-*.zip
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -56,23 +56,18 @@ function isoFromLocal(local: string) {
   return local.length === 16 ? `${local}:00` : local
 }
 
-/** Statuses that already have a count card under the filters. */
-const STATUS_ON_CARDS = new Set(['completed', 'error', 'cancelled'])
-
 function FacetGroup({
   title,
   items,
   selected,
   onChange,
   className = '',
-  hideCountIds,
 }: {
   title: string
   items: AnalyticsFacet[]
   selected: Set<string>
   onChange: (next: Set<string>) => void
   className?: string
-  hideCountIds?: Set<string>
 }) {
   if (!items.length) return null
   return (
@@ -110,9 +105,7 @@ function FacetGroup({
               <span className="min-w-0 flex-1 truncate" title={item.label}>
                 {item.label}
               </span>
-              {!(hideCountIds && hideCountIds.has(item.id)) && (
-                <span className="font-mono text-text-muted">{item.jobs}</span>
-              )}
+              <span className="shrink-0 font-mono text-text-muted">{item.jobs}</span>
             </label>
           )
         })}
@@ -489,7 +482,6 @@ export function AnalyticsPage() {
           items={facets.status || []}
           selected={status}
           onChange={setStatus}
-          hideCountIds={STATUS_ON_CARDS}
         />
         <FacetGroup
           className="min-w-52 flex-1 basis-56"
