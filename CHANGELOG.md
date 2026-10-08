@@ -11,6 +11,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Fixed
 
 - Opening a scheduled ticket shows its prompt, repositories, branches, mode, model, and time. The jobs list says the run has not started yet.
+- Settings Test, Remove host, Remove collection, Add host, Add collection, and Reload from tokens use the same buttons as the rest of the dashboard.
 
 ## [0.9.80] — 2026-10-07
 

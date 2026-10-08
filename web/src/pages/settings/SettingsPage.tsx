@@ -541,7 +541,12 @@ function ProjectRepoList({
       </div>
       {status}
       <p className="actions">
-        <button type="button" disabled={reloadDisabled} onClick={onReload}>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={reloadDisabled}
+          onClick={onReload}
+        >
           Reload from tokens
         </button>
       </p>
@@ -1141,6 +1146,7 @@ export function SettingsPage() {
       <p className="actions">
         <button
           type="button"
+          className="vd-btn vd-btn-secondary"
           disabled={jiraTesting}
           onClick={() => {
             setJiraTesting(true)
@@ -1306,6 +1312,7 @@ export function SettingsPage() {
           <p className="actions">
             <button
               type="button"
+              className="vd-btn vd-btn-secondary"
               disabled={gitlabTestingIdx === idx}
               onClick={() => {
                 setGitlabTestingIdx(idx)
@@ -1334,7 +1341,7 @@ export function SettingsPage() {
             </button>
             <button
               type="button"
-              className="bad"
+              className="vd-btn vd-btn-danger"
               onClick={() => {
                 touch('gitlab_cred_rows')
                 setDraft((d) =>
@@ -1362,6 +1369,7 @@ export function SettingsPage() {
       <p className="actions">
         <button
           type="button"
+          className="vd-btn vd-btn-secondary"
           onClick={() => {
             touch('gitlab_cred_rows')
             setDraft((d) =>
@@ -1500,6 +1508,7 @@ export function SettingsPage() {
           <p className="actions">
             <button
               type="button"
+              className="vd-btn vd-btn-secondary"
               disabled={azureTestingIdx === idx}
               onClick={() => {
                 setAzureTestingIdx(idx)
@@ -1528,7 +1537,7 @@ export function SettingsPage() {
             </button>
             <button
               type="button"
-              className="bad"
+              className="vd-btn vd-btn-danger"
               onClick={() => {
                 touch('azure_cred_rows')
                 setDraft((d) =>
@@ -1556,6 +1565,7 @@ export function SettingsPage() {
       <p className="actions">
         <button
           type="button"
+          className="vd-btn vd-btn-secondary"
           onClick={() => {
             touch('azure_cred_rows')
             setDraft((d) =>
