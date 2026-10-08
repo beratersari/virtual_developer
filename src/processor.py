@@ -174,6 +174,16 @@ def _remember_review_id(delivery: Dict[str, Any], url: Optional[str]) -> None:
         delivery["azure_pr_id"] = int(azure[2])
 
 
+def _opened_mr_summary(raw: str) -> str:
+    """Agent writeup for an opened review. Empty when there is nothing to post."""
+    from src.backends.codex import format_agent_answer_for_comment
+
+    text = format_agent_answer_for_comment(raw or "", limit=8000).strip()
+    if not text or text == "(no output)":
+        return ""
+    return text
+
+
 # Written by older builds on SIGTERM. A later start still has to resume
 # those rows. Do not retarget this sentence; saved issue errors use it.
 PROCESS_STOP_MARK = "Agent process was stopped; local status is no longer"
@@ -7271,6 +7281,7 @@ class JobProcessor:
                     state,
                     existing_mr_url=event.mr_url or None,
                     open_mr=has_unique,
+                    agent_summary=answer,
                 )
                 if self._is_aborted(state.issue_key):
                     logger.info(
@@ -7376,6 +7387,7 @@ class JobProcessor:
                     state,
                     existing_mr_url=event.mr_url or None,
                     require_new_sha=True,
+                    agent_summary=str(result.get("stdout") or ""),
                 )
                 if outcome == "aborted":
                     self._release_context(state.issue_key, success=False)
@@ -8050,6 +8062,7 @@ class JobProcessor:
                     state,
                     existing_mr_url=event.pr_url or None,
                     open_mr=has_unique,
+                    agent_summary=answer,
                 )
                 if self._is_aborted(state.issue_key):
                     logger.info(
@@ -8170,6 +8183,7 @@ class JobProcessor:
                     state,
                     existing_mr_url=event.pr_url or None,
                     require_new_sha=True,
+                    agent_summary=str(result.get("stdout") or ""),
                 )
                 azure_info(
                     f"workflow salvage outcome={outcome} issue={state.issue_key}"
@@ -8817,7 +8831,11 @@ class JobProcessor:
             has_unique = not (
                 delivery_err and self._is_noop_delivery_message(delivery_err)
             )
-            push_ok = await self._push_and_create_mr(state, open_mr=has_unique)
+            push_ok = await self._push_and_create_mr(
+                state,
+                open_mr=has_unique,
+                agent_summary=str(result.get("stdout") or ""),
+            )
             # Abort wins over delivery bookkeeping even if push already ran
             if self._is_aborted(state.issue_key):
                 logger.info(
@@ -8896,7 +8914,9 @@ class JobProcessor:
                 execution_duration_seconds=duration,
             )
             outcome = await self._deliver_if_new_commits(
-                state, require_new_sha=True
+                state,
+                require_new_sha=True,
+                agent_summary=str(result.get("stdout") or ""),
             )
             if outcome == "aborted":
                 self._release_context(state.issue_key, success=False)
@@ -9340,6 +9360,7 @@ class JobProcessor:
         *,
         existing_mr_url: Optional[str] = None,
         require_new_sha: bool = False,
+        agent_summary: str = "",
     ) -> str:
         """Always try to push and open/reuse an MR after an agent result.
 
@@ -9381,6 +9402,7 @@ class JobProcessor:
                 existing_mr_url=existing_mr_url,
                 open_mr=False,
                 notify_on_fail=False,
+                agent_summary=agent_summary,
             )
             return "none"
         has_work = self._assert_build_delivery(state.issue_key) is None
@@ -9393,12 +9415,111 @@ class JobProcessor:
             existing_mr_url=existing_mr_url,
             open_mr=has_work,
             notify_on_fail=has_work,
+            agent_summary=agent_summary,
         )
         if self._is_aborted(state.issue_key):
             return "aborted"
         if has_work:
             return "delivered" if push_ok else "push_failed"
         return "none"
+
+    def _post_opened_mr_summary(
+        self,
+        state: JiraAgentState,
+        review_url: str,
+        summary_text: str,
+    ) -> None:
+        """Post the agent summary on a review this run opened or reused.
+
+        GitLab MR and Azure PR comment jobs already reply on that review.
+        A failed note does not fail delivery.
+        """
+        text = (summary_text or "").strip()
+        url = (review_url or "").strip()
+        if not text or not url:
+            return
+        # The in-memory state can be a snapshot from job start. The store
+        # is what the GitLab/Azure comment path actually marked.
+        if self._is_git_comment_triggered(
+            state.issue_key, state
+        ) or self._is_git_comment_triggered(state.issue_key):
+            return
+        try:
+            from src.brand import wrap_operator_reply
+
+            body = wrap_operator_reply(
+                "Answer",
+                text,
+                state=state,
+                model=self._model_for_issue(state),
+                job_id=self._job_id_for_reply(state),
+            )
+            self._post_review_note(state.issue_key, url, body)
+        except Exception as exc:
+            logger.warning(
+                f"{state.issue_key}: summary note on {url} failed: {exc}"
+            )
+
+    def _post_review_note(self, issue_key: str, url: str, body: str) -> bool:
+        """Post *body* on a GitLab MR or Azure PR identified by its web URL."""
+        from src.azure.webhook import parse_azure_git_url, parse_pull_request_url
+        from src.gitlab.client import GitlabClient, parse_merge_request_url
+
+        gitlab = parse_merge_request_url(url)
+        if gitlab:
+            host, project, iid = gitlab
+            posted = GitlabClient(host=host).post_mr_note(
+                project=project,
+                mr_iid=iid,
+                body=body,
+                allow_new_thread=True,
+            )
+            if not posted:
+                logger.warning(
+                    f"{issue_key}: summary note was not posted on {url}"
+                )
+                return False
+            logger.info(f"{issue_key}: posted summary on {url}")
+            return True
+
+        azure = parse_pull_request_url(url)
+        if not azure:
+            logger.warning(
+                f"{issue_key}: summary note skipped; unrecognized review URL"
+            )
+            return False
+        host, _project_path, pr_id = azure
+        git_url = re.sub(
+            r"/(?:pullrequest|pullRequest)/\d+/?$",
+            "",
+            url,
+            flags=re.IGNORECASE,
+        )
+        parsed = parse_azure_git_url(git_url) or {}
+        project = str(parsed.get("project") or "").strip()
+        repository = str(parsed.get("repository") or "").strip()
+        collection = str(parsed.get("collection_url") or "").strip()
+        if not project or not repository:
+            logger.warning(
+                f"{issue_key}: summary note skipped; Azure project missing"
+            )
+            return False
+        from src.azure.client import AzureDevOpsClient
+
+        posted = AzureDevOpsClient(
+            host=host, collection_url=collection
+        ).post_pr_comment(
+            project=project,
+            repository=repository,
+            pr_id=pr_id,
+            body=body,
+            allow_new_thread=True,
+        )
+        if not posted:
+            logger.warning(f"{issue_key}: summary note was not posted on {url}")
+            return False
+        logger.info(f"{issue_key}: posted summary on {url}")
+        return True
 
     def _review_context_for_event(
         self, event: Any, workdir: Optional[str] = None
@@ -9832,6 +9953,7 @@ class JobProcessor:
         open_mr: bool = True,
         notify_on_fail: bool = True,
         git_manager: Optional["GitManager"] = None,
+        agent_summary: str = "",
     ) -> bool:
         """Push prepared work_branch and open MR.
 
@@ -9857,6 +9979,13 @@ class JobProcessor:
         whose remote is that review. The other clones are left untouched.
 
         ``open_mr=False`` stops after push (or already-on-remote).
+
+        ``agent_summary`` is the agent writeup. A new merge request uses
+        it as the description when it has text. Jira issues and Azure
+        Boards work items also post that text on the review, including
+        when an existing review is reused. GitLab MR and Azure PR comment
+        jobs already post their own reply, so this method does not add a
+        second note for them.
 
         ``notify_on_fail=False`` skips Jira push-failure comments.
 
@@ -9913,6 +10042,7 @@ class JobProcessor:
                         open_mr=open_mr,
                         notify_on_fail=notify_on_fail,
                         git_manager=child,
+                        agent_summary=agent_summary,
                     )
                     ok_all = ok_all and bool(ok)
                 return ok_all
@@ -10090,12 +10220,15 @@ class JobProcessor:
             commit_sha = None
             commit_url = None
 
+        summary_text = _opened_mr_summary(agent_summary)
         if commit_subject:
             mr_title = commit_subject
-            mr_body = commit_body if commit_body else commit_subject
+            mr_body = summary_text or (commit_body if commit_body else commit_subject)
         else:
             mr_title = f"[{state.issue_key}] {state.issue_summary}"
-            mr_body = state.description or f"Implemented solution for {state.issue_key}"
+            mr_body = summary_text or (
+                state.description or f"Implemented solution for {state.issue_key}"
+            )
 
         target_branch = (
             (getattr(git, "target_branch", None) or getattr(git, "source_branch", None) or "")
@@ -10140,6 +10273,8 @@ class JobProcessor:
             repository_url=str(getattr(git, "remote_url", "") or "").strip() or None,
             target_branch=target_branch,
         )
+        if mr_url and summary_text:
+            self._post_opened_mr_summary(state, str(mr_url), summary_text)
 
         if reuse_mr:
             logger.info(
