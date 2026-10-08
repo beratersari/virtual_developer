@@ -3832,6 +3832,26 @@ class JobProcessor:
         except Exception:
             pass
 
+    def _notify_scheduled_plan_ready(self, issue_key: str) -> None:
+        """Tell Jira a scheduled run did not start because a plan is waiting.
+
+        Does not change local status. The poller does not call this: only a
+        schedule event (``scheduled_job``) reaches it.
+        """
+        from src.operator_copy import PLAN_READY_SCHEDULE_WAIT
+
+        try:
+            comment_id = self.reporter.post_comment_response(
+                issue_key, PLAN_READY_SCHEDULE_WAIT
+            )
+        except Exception as e:
+            logger.warning(f"{issue_key}: plan_ready schedule notice failed: {e}")
+            return
+        if not comment_id:
+            logger.warning(
+                f"{issue_key}: plan_ready schedule notice was not posted"
+            )
+
     def _notify_plan_execute_without_plan(
         self, issue_key: str, state: Optional[JiraAgentState]
     ) -> None:
@@ -4615,6 +4635,10 @@ class JobProcessor:
             logger.info(
                 f"Issue {issue_key} has plan ready; waiting for plan_execute"
             )
+            # Poller never enqueues a waiting plan. A schedule does, then
+            # stops here. Say so on the issue; do not start plan or build.
+            if scheduled_job:
+                self._notify_scheduled_plan_ready(issue_key)
             return False, "plan_ready; waiting for plan_execute"
         if (
             existing

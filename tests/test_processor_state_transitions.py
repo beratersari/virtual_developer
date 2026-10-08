@@ -141,6 +141,45 @@ async def test_plan_ready_not_restarted_on_create(processor, state_manager):
 
 
 @pytest.mark.asyncio
+async def test_scheduled_plan_ready_posts_why_it_did_not_run(
+    processor, state_manager, fake_jira
+):
+    """A scheduled fire on plan_ready must say so on the Jira issue.
+
+    The run still does not start. A plain create event must stay quiet so
+    the poller does not comment on every sighting of a waiting plan.
+    """
+    state_manager.create_state("PROJ-14B", "Plan ready", "Mode: plan")
+    state_manager.update_state("PROJ-14B", status=TaskStatus.PLAN_READY)
+
+    quiet = make_issue_event(key="PROJ-14B", event_type="jira:issue_created")
+    scheduled = make_issue_event(key="PROJ-14B", event_type="jira:issue_created")
+    scheduled["scheduled_job"] = True
+
+    with patch.object(
+        processor, "_start_planning_workflow", new_callable=AsyncMock
+    ) as plan:
+        with patch.object(
+            processor, "_start_execution_workflow", new_callable=AsyncMock
+        ) as direct:
+            quiet_result = await processor._handle_issue_created(quiet)
+            assert quiet_result == (False, "plan_ready; waiting for plan_execute")
+            assert fake_jira.comments == []
+            started, reason = await processor._handle_issue_created(scheduled)
+            plan.assert_not_called()
+            direct.assert_not_called()
+
+    assert started is False
+    assert reason == "plan_ready; waiting for plan_execute"
+    assert state_manager.get_state("PROJ-14B").status == TaskStatus.PLAN_READY
+    assert len(fake_jira.comments) == 1
+    body = fake_jira.comments[0]["body"]
+    assert fake_jira.comments[0]["issue_key"] == "PROJ-14B"
+    assert "plan_execute" in body
+    assert "plan_refactor" in body
+
+
+@pytest.mark.asyncio
 async def test_cancel_without_agent_runner_still_notifies(processor, state_manager, fake_jira):
     """ /cancel must always set CANCELLED and comment, even without live runner."""
     state_manager.create_state("PROJ-15", "Cancel me", "x")
