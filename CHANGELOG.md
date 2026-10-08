@@ -10,6 +10,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 A fresh install that leaves `YAVER_BASE_DIR` unset keeps data in `C:\yaver_data` on Windows and `~/yaver_data` on Linux. Data is `{base}/yaver` and clones are `{base}/t`. A path already written in `.env` stays, including `YAVER_DATA_DIR` and `TEMP_DIR_BASE`. Packages already published, through 0.9.81, keep the default they shipped with.
 
+### Added
+
+- The version check is a GET and does not send Analytics. `GET /api/analytics/install` returns this install’s jobs, merge requests, and the other Analytics counts to the release site when an admin selects this address. That path checks a built-in token. It is not a setting. `GET /api/analytics` stays behind the dashboard password.
+
 ### Changed
 
 - When `YAVER_BASE_DIR` is unset, the data folder is `C:\yaver_data` on Windows and `~/yaver_data` on Linux. The Linux release package leaves that key commented. It no longer writes `YAVER_BASE_DIR=/var/tmp/yaver`.

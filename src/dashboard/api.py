@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
@@ -1789,6 +1789,29 @@ def create_dashboard_app(
         finally:
             cancel.set()
             watcher.cancel()
+
+    @app.get("/api/analytics/install")
+    def analytics_install(request: Request) -> JSONResponse:
+        """All-time Analytics for the release site.
+
+        The dashboard password does not apply to this path. The built-in
+        bearer does. ``/api/analytics`` stays on the dashboard login.
+        The version check does not call this and does not send these counts.
+        """
+        from src.dashboard.install_analytics import install_analytics_authorized
+        from src.dashboard.usage_report import release_usage_report
+
+        allowed = install_analytics_authorized(request.headers.get("authorization") or "")
+        if not allowed:
+            return JSONResponse(
+                {"detail": "Forbidden"},
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            release_usage_report(),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/analytics/reviews")
     async def analytics_reviews(

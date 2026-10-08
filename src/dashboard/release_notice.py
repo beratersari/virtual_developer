@@ -104,7 +104,7 @@ def _safe_host(value: str) -> str:
     return host
 
 
-def _release_endpoint(platform: str) -> str:
+def _release_endpoint(platform: str, current: str = "") -> str:
     raw = str(getattr(settings, "release_host", "") or "").strip()
     if not raw:
         raw = DEFAULT_RELEASE_HOST
@@ -119,7 +119,11 @@ def _release_endpoint(platform: str) -> str:
         port = _DEFAULT_RELEASE_PORT
     if port < 1 or port > 65535 or not platform:
         return ""
-    query = urlencode({"platform": platform})
+    params = {"platform": platform}
+    installed = (current or "").strip()
+    if installed and _VERSION_RE.fullmatch(installed):
+        params["current"] = installed
+    query = urlencode(params)
     return f"http://{host}:{port}/api/latest?{query}"
 
 
@@ -222,7 +226,7 @@ def refresh_release_notice(
         platform=plat,
         checked_at=checked,
     )
-    url = _release_endpoint(plat)
+    url = _release_endpoint(plat, installed)
     if not url or not plat:
         with _LOCK:
             _cache = notice
@@ -235,6 +239,8 @@ def refresh_release_notice(
         pass
     timeout = httpx.Timeout(5.0, connect=3.0)
     # INTENTIONAL: verify=False. http only, and redirects are not followed.
+    # The version check does not send Analytics. The release admin loads
+    # those counts with a separate GET when an address is selected.
     client_factory = opener or httpx.Client
     try:
         with client_factory(
