@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.81] — 2026-10-08
+
+Opening a scheduled ticket shows its prompt and repositories before a run exists. Settings action rows use the shared buttons. A banner names a newer published package and explains the update script.
+
 ### Added
 
 - The dashboard checks the release site about every 15 minutes. When a newer package is published, a banner at the top names that version. The info button explains how to run `update.bat` or `./update.sh` in the Yaver folder. The dashboard does not download the package.
@@ -16,6 +20,8 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 - Opening a scheduled ticket shows its prompt, repositories, branches, mode, model, and time. The jobs list says the run has not started yet.
 - Settings Test, Remove host, Remove collection, Add host, Add collection, and Reload from tokens use the same buttons as the rest of the dashboard.
+
+[0.9.81]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.81
 
 ## [0.9.80] — 2026-10-07
 

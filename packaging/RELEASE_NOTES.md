@@ -1,3 +1,11 @@
+# Yaver 0.9.81
+
+Opening a scheduled ticket shows the prompt, the repositories and branches, the mode, the model, and the scheduled time before any run exists. The jobs list says the run has not started yet.
+
+Settings Test, Remove host, Remove collection, Add host, Add collection, and Reload from tokens use the same buttons as the rest of the dashboard.
+
+The dashboard checks the release site about every 15 minutes. When a newer package is published, a banner at the top names that version. The info button explains how to run `update.bat` or `./update.sh` in the Yaver folder. The dashboard does not download the package and does not replace files.
+
 # Yaver 0.9.80
 
 A tagged release attaches `yaver-executables-X.Y.Z.zip`. That file contains `yaver-windows-x64-X.Y.Z.zip` and `yaver-linux-x64-ubuntu-18.04-X.Y.Z.zip` through `24.04`. Those Ubuntu zips are no longer separate files on the release page. `yaver-windows-x64-X.Y.Z.zip` and `yaver-windows-latest.zip` stay on the release page. The office site takes this one zip and still offers each system as its own download. That same zip contains `RELEASE_NOTES.txt`, the `# Yaver X.Y.Z` section from these notes. The office site reads that file and shows it as the release note for the version.
