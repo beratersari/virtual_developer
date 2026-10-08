@@ -422,7 +422,7 @@ normal review. Proof: `tests/test_gitlab_review_complete.py`.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Jobs, schedules, session binds, issue state, and the queue live in ``{YAVER_DATA_DIR}/yaver.sqlite`` (indexed columns plus a JSON document, including deliveries). A first start imports leftover ``job_*.json``, ``sched_*.json``, ``osb_*.json``, ``q_*.json``, and issue-state JSON once, then deletes those files. Later starts do not scan them. Do not put plans, session logs, or clones in SQL.
 - Saved projects and repo sets live in ``{YAVER_DATA_DIR}/saved_catalog.json``. That file is the copy the dashboard reads and returns on ``GET /api/settings``, ``PATCH /api/settings``, and ``GET /api/dashboard``. A save of any other setting does not rewrite it. ``runtime_settings.json`` still receives a backup copy of the same two keys. Opening Settings, Scheduled, or the dashboard does not call GitLab or Azure. **Reload from tokens** is the import. Do not hide the stored list until that button. Do not put the catalog in SQLite.
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not show or run Update). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not download or replace files). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Scheduled → MR and Scheduled → PR accept mode `build` (default follow-up, command `yaver`) or `review`. `review` enqueues the same GitLab or Azure review as `@bot /review` (derman-reviewer, no push). The section picks the host. Do not add `review` to issue work modes or the existing/new issue Mode list. An empty model uses `default_review_model`. Proof: `tests/test_schedule_mr_followup.py`, `tests/test_schedule_pr_followup.py`, `tests/test_schedule_review_mode_ui.py`.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
@@ -922,7 +922,12 @@ Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists
 Operators publish Windows and Ubuntu zips on a separate release site
 (its own repository). The install `.env` stores that site as `RELEASE_HOST`
 and `RELEASE_PORT`. The dashboard can save those two keys into `.env`.
-The dashboard has no Update control.
+About every 15 minutes the daemon asks `GET /api/latest?platform=…` on
+`http://{host}:{port}` and does not follow redirects. When the published
+version is newer, the dashboard shows a banner at the top of every page.
+The info button on that banner explains how to run `update.bat` or
+`update.sh`. The dashboard does not download the package and does not
+replace files. There is no Check button and no Update button.
 
 The operator updates an executable install by running the script in that
 folder:
@@ -1011,7 +1016,7 @@ them. Do not call `update_stopped_install` from `cli.py`.
 **Do not “fix”** any of these:
 
 - Putting the download or the file swap back inside `yaver.exe` / `yaver update`.
-- Putting Check or Update back on the dashboard.
+- Putting a Check or Update button on the dashboard, or making the banner download or replace files. The banner and its info button stay.
 - Starting Yaver at the end of `update.bat` or `update.sh`.
 - Overwriting the operator's `.env`.
 - Overwriting the running `update.bat` or `update.sh`.

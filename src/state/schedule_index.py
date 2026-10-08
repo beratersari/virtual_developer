@@ -224,6 +224,20 @@ class ScheduleIndex:
                 ).fetchone()
         return int(row["n"] if row else 0)
 
+    def list_for_issue(self, issue_key: str, *, limit: int = 20) -> List[Dict[str, Any]]:
+        """Schedules for one issue, newest scheduled time first."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return []
+        cap = max(1, int(limit))
+        with self._lock:
+            assert self._conn is not None
+            rows = self._conn.execute(
+                f"SELECT * FROM schedules WHERE issue_key = ? ORDER BY {_ORDER} LIMIT ?",
+                (key, cap),
+            ).fetchall()
+        return [row_to_schedule(row) for row in rows]
+
     def has_issue_status(self, issue_key: str, statuses: Set[str]) -> bool:
         key = (issue_key or "").strip().upper()
         want = sorted({s.strip().lower() for s in statuses if s and s.strip()})

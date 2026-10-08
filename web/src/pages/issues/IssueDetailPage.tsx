@@ -17,6 +17,11 @@ import { usePageTitle, useRecordTitle } from '../../app/pageTitleContext'
 import { issuePageName } from '../../util/pageTitle'
 import { issueTabFromSection, issueTabPath, type IssueTab } from './issueTabUrl'
 import { groupDeliveries } from '../jobs/repoDeliveries'
+import {
+  ScheduleOnIssue,
+  issueDescriptionLabel,
+  jobsEmptyLabel,
+} from './scheduledTicket'
 
 function collectDeliveries(detail: TaskDetail): GitDelivery[] {
   if (detail.git_deliveries && detail.git_deliveries.length > 0) return detail.git_deliveries
@@ -320,13 +325,25 @@ export function IssueDetailPage() {
       {detail?.description?.trim() ? (
         <div className="vd-card px-4 py-3">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-            {detail.jira_live ? 'Live issue description' : 'Issue description'}
+            {issueDescriptionLabel({
+              jiraLive: detail.jira_live,
+              description: detail.description,
+              schedules: detail.schedules,
+            })}
           </div>
           <p className="whitespace-pre-wrap text-sm text-text-secondary">
             <JiraLinkedText text={detail.description} jiraHost={live.settings?.jira_host || ''} />
           </p>
         </div>
       ) : null}
+
+      {detail && (detail.schedules || []).length > 0 && (
+        <ScheduleOnIssue
+          schedules={detail.schedules || []}
+          shownDescription={detail.description || ''}
+          jiraHost={live.settings?.jira_host || ''}
+        />
+      )}
 
       <Tabs
         tabs={[
@@ -427,6 +444,7 @@ export function IssueDetailPage() {
               <JobsTable
                 jobs={detail.jobs ?? []}
                 compact
+                empty={jobsEmptyLabel((detail.schedules || []).length)}
                 fallbackWorker={live.settings?.agent_backend || ''}
                 onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
               />

@@ -41,6 +41,21 @@ def test_edit_agents_sits_beside_create_agent():
     assert text.count("onClick={() => syncAgents()}") == 1
 
 
+def test_settings_action_rows_use_app_buttons():
+    """Credential Test / Remove / Add rows use the shared buttons, not underlined text."""
+    text = SETTINGS.read_text(encoding="utf-8")
+    parts = text.split('className="actions"')[1:]
+    assert len(parts) >= 6
+    for part in parts:
+        block = part.split("</p>", 1)[0]
+        buttons = block.split("<button")[1:]
+        assert buttons
+        for button in buttons:
+            opening = button.split(">", 1)[0]
+            assert "vd-btn" in opening
+            assert "bad" not in opening.split("className=", 1)[-1]
+
+
 def test_settings_save_error_opens_a_popup():
     text = SETTINGS.read_text(encoding="utf-8")
     assert 'title="Could not save"' in text

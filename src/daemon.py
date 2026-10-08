@@ -205,6 +205,9 @@ class JiraAgentDaemon:
         logger.info("Starting unused-clone age policy...")
         tasks.append(asyncio.create_task(self._run_stale_clone_purge()))
 
+        logger.info("Starting release check...")
+        tasks.append(asyncio.create_task(self._watch_published_release()))
+
         self._attach_opencode_serve()
         tasks.append(asyncio.create_task(self._watch_opencode_serve()))
 
@@ -509,6 +512,23 @@ class JiraAgentDaemon:
             self.processor._release_context(issue_key, success=False)
         except Exception as e:
             logger.warning(f"Could not release context for stuck {issue_key}: {e}")
+
+    async def _watch_published_release(self) -> None:
+        """Ask the release site on a timer. The dashboard only shows the result."""
+        from src.dashboard.release_notice import (
+            RELEASE_CHECK_INTERVAL_SECONDS,
+            refresh_release_notice,
+        )
+
+        while self._running:
+            try:
+                await asyncio.to_thread(refresh_release_notice)
+            except Exception as exc:
+                logger.info(f"Release check failed: {exc}")
+            waited = 0
+            while self._running and waited < RELEASE_CHECK_INTERVAL_SECONDS:
+                await asyncio.sleep(5)
+                waited += 5
 
     async def _run_stale_clone_purge(self) -> None:
         """Hourly: delete temp clones unused longer than temp_clone_max_age_days."""

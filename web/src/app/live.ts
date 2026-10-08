@@ -1,11 +1,12 @@
 import { createContext, useContext } from 'react'
-import type { Meta, PollPayload, SettingsPayload } from '../api/types'
+import type { Meta, PollPayload, ReleaseNotice, SettingsPayload } from '../api/types'
 
 export type LiveValue = {
   connected: boolean
   meta: Meta | null
   poll: PollPayload | null
   settings: SettingsPayload | null
+  release: ReleaseNotice | null
   generation: number
   pollCountdown: number | null
   error: string | null

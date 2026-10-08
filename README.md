@@ -412,6 +412,8 @@ CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: dow
 
 A separate release site holds the Windows package and one package for each Ubuntu version. Update from the Yaver folder. On Windows run `update.bat`. On Ubuntu run `./update.sh`.
 
+The dashboard checks that site about every 15 minutes. When a newer package is published, a banner at the top names the version. The info button on the banner explains these steps. The dashboard does not download the package.
+
 Set the site address in `.env`:
 
 ```text

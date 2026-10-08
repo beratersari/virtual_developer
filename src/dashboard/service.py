@@ -1815,12 +1815,15 @@ def build_live_envelope(
     except Exception:
         queued = 0
         epoch = 0
+    from src.dashboard.release_notice import peek_release_notice
+
     return {
         "type": "live",
         "meta": build_meta().model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "queue": {"queued_count": queued, "epoch": epoch},
         "live_issue_keys": live_keys,
+        "release": peek_release_notice(),
     }
 
 
@@ -2811,10 +2814,135 @@ def _collect_git_deliveries(
     return items
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _schedule_repository_refs(rec: Dict[str, Any]) -> List[Dict[str, str]]:
+    """One row per repository. A single-repo schedule has no refs list."""
+    out: List[Dict[str, str]] = []
+    rows = rec.get("repository_refs")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url = str(row.get("url") or row.get("repository_url") or "").strip()
+            if not url:
+                continue
+            out.append(
+                {
+                    "url": url,
+                    "source_branch": str(row.get("source_branch") or "").strip(),
+                    "target_branch": str(row.get("target_branch") or "").strip(),
+                }
+            )
+    if out:
+        return out[:12]
+    primary = str(rec.get("repository_url") or "").strip()
+    source = str(rec.get("source_branch") or "").strip()
+    target = str(rec.get("target_branch") or "").strip()
+    urls: List[str] = []
+    raw_urls = rec.get("repository_urls")
+    if isinstance(raw_urls, list):
+        for raw in raw_urls:
+            url = str(raw or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+    if primary and primary not in urls:
+        urls.insert(0, primary)
+    return [
+        {"url": url, "source_branch": source, "target_branch": target}
+        for url in urls[:12]
+    ]
+
+
+def _public_schedule(rec: Dict[str, Any]) -> Dict[str, Any]:
+    refs = _schedule_repository_refs(rec)
+    primary = refs[0] if refs else {}
+    return {
+        "schedule_id": str(rec.get("schedule_id") or ""),
+        "title": str(rec.get("title") or ""),
+        "description": str(rec.get("description") or ""),
+        "issue_description": str(rec.get("issue_description") or ""),
+        "repository_url": str(rec.get("repository_url") or primary.get("url") or ""),
+        "source_branch": str(
+            rec.get("source_branch") or primary.get("source_branch") or ""
+        ),
+        "target_branch": str(
+            rec.get("target_branch") or primary.get("target_branch") or ""
+        ),
+        "repository_refs": refs,
+        "mode": str(rec.get("mode") or ""),
+        "model": str(rec.get("model") or ""),
+        "backend": str(rec.get("backend") or ""),
+        "issue_type": str(rec.get("issue_type") or ""),
+        "scheduled_at": str(rec.get("scheduled_at") or ""),
+        "status": str(rec.get("status") or ""),
+        "issue_key": str(rec.get("issue_key") or "").strip().upper(),
+        "project_key": str(rec.get("project_key") or ""),
+        "source": str(rec.get("source") or ""),
+        "mr_iid": _as_int(rec.get("mr_iid")),
+        "gitlab_project": str(rec.get("gitlab_project") or ""),
+        "merge_request_url": str(rec.get("merge_request_url") or ""),
+        "pr_id": _as_int(rec.get("pr_id")),
+        "azure_project": str(rec.get("azure_project") or ""),
+        "error_message": rec.get("error_message"),
+        "dispatched_at": rec.get("dispatched_at"),
+        "created_at": rec.get("created_at"),
+    }
+
+
+def task_schedules_for_issue(
+    issue_key: str,
+    *,
+    store: Any = None,
+) -> List[Dict[str, Any]]:
+    """Schedule rows for the issue page. Empty when the lookup cannot be read."""
+    key = (issue_key or "").strip().upper()
+    if not key:
+        return []
+    ss = store
+    if ss is None:
+        from src.state.schedule_store import schedule_store as ss
+    list_for = getattr(ss, "list_for_issue", None)
+    if not callable(list_for):
+        return []
+    try:
+        rows = list_for(key, limit=20) or []
+    except Exception as exc:
+        logger.warning(f"{key}: schedule lookup for task detail failed: {exc}")
+        return []
+    return [_public_schedule(rec) for rec in rows if isinstance(rec, dict)]
+
+
+def _with_task_schedules(
+    detail: Dict[str, Any],
+    issue_key: str,
+    store: Any = None,
+) -> Dict[str, Any]:
+    """Attach schedules. A ticket with no local run still has a prompt to show."""
+    schedules = task_schedules_for_issue(issue_key, store=store)
+    detail["schedules"] = schedules
+    if not schedules:
+        return detail
+    newest = schedules[0]
+    if not str(detail.get("summary") or "").strip():
+        detail["summary"] = str(newest.get("title") or "")
+    if not str(detail.get("description") or "").strip():
+        detail["description"] = str(
+            newest.get("issue_description") or newest.get("description") or ""
+        )
+    return detail
+
+
 def _build_task_detail_without_state(
     issue_key: str,
     *,
     processor: Optional["JobProcessor"] = None,
+    schedule_store: Any = None,
 ) -> Dict[str, Any]:
     """Detail for board issues that have never been processed (no local state).
 
@@ -2851,7 +2979,7 @@ def _build_task_detail_without_state(
     )
     local_status = poll_row.get("local_status") or "pending"
 
-    return {
+    detail = {
         "issue_key": key,
         "summary": summary,
         "description": description,
@@ -2886,6 +3014,7 @@ def _build_task_detail_without_state(
         "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
+    return _with_task_schedules(detail, key, schedule_store)
 
 
 def build_task_detail(
@@ -2896,6 +3025,7 @@ def build_task_detail(
     include_artifacts: bool = True,
     include_live_jira: bool = True,
     jobs: Optional[List[Any]] = None,
+    schedule_store: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility).
 
@@ -2927,7 +3057,9 @@ def build_task_detail(
         except Exception:
             on_board = False
         return _build_task_detail_without_state(
-            key, processor=processor if (on_board and include_live_jira) else None
+            key,
+            processor=processor if (on_board and include_live_jira) else None,
+            schedule_store=schedule_store,
         )
 
     live = False
@@ -3005,7 +3137,7 @@ def build_task_detail(
     if not current_sid and session_ids:
         current_sid = session_ids[-1]
 
-    return {
+    detail = {
         "issue_key": state.issue_key,
         "summary": live_summary,
         "description": live_description,
@@ -3042,6 +3174,7 @@ def build_task_detail(
         "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
+    return _with_task_schedules(detail, key, schedule_store)
 
 
 def _job_time_key(job: Dict[str, Any]) -> tuple:
