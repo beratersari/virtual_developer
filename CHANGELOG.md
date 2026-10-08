@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening a scheduled ticket shows its prompt, repositories, branches, mode, model, and time. The jobs list says the run has not started yet.
+
 ## [0.9.80] — 2026-10-07
 
 A tagged release attaches one zip of the Windows and Ubuntu executables, and that zip carries the release note. Analytics status filters show every count.

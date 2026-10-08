@@ -664,6 +664,29 @@ export type SystemLogLine = {
   issue_key?: string
 }
 
+export type TaskSchedule = {
+  schedule_id: string
+  title?: string
+  description?: string | null
+  issue_description?: string | null
+  repository_url?: string
+  source_branch?: string
+  target_branch?: string
+  repository_refs?: { url: string; source_branch?: string; target_branch?: string }[]
+  mode?: string
+  model?: string
+  backend?: string
+  scheduled_at?: string
+  status?: string
+  source?: string
+  mr_iid?: number
+  gitlab_project?: string
+  merge_request_url?: string
+  pr_id?: number
+  azure_project?: string
+  error_message?: string | null
+}
+
 export type TaskDetail = {
   issue_key: string
   summary: string
@@ -699,6 +722,7 @@ export type TaskDetail = {
   session_logs: TextArtifact[]
   system_logs: SystemLogLine[]
   jobs?: JobItem[]
+  schedules?: TaskSchedule[]
   server_time: string
 }
 

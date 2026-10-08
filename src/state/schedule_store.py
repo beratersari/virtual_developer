@@ -341,6 +341,18 @@ class ScheduleStore:
                     )
         return recovered
 
+    def list_for_issue(self, issue_key: str, *, limit: int = 20) -> List[Dict[str, Any]]:
+        """Schedules whose issue key matches, newest first."""
+        key = (issue_key or "").strip().upper()
+        if not key or self._index is None:
+            return []
+        self.ensure_index()
+        try:
+            return self._index.list_for_issue(key, limit=limit)
+        except Exception as e:
+            logger.warning(f"Schedule issue list failed: {e}")
+            return []
+
     def list_schedules(
         self,
         *,
