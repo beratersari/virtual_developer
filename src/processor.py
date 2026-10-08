@@ -934,7 +934,10 @@ class JobProcessor:
         posted = False
         try:
             if (
-                getattr(settings, "jira_enabled", True)
+                (
+                    getattr(settings, "jira_enabled", True)
+                    or settings.is_configured()
+                )
                 and self.jira_client is not None
                 and hasattr(self.jira_client, "add_comment")
             ):

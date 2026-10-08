@@ -17,6 +17,13 @@ SAVED_PROJECTS_TEST = (
 )
 
 
+def test_jira_off_still_describes_comments_when_configured():
+    text = SETTINGS.read_text(encoding="utf-8")
+    assert "the board poller stays idle" in text
+    assert "Comments still post when a" in text
+    assert "skip the board poller and Jira comments" not in text
+
+
 def test_mode_rows_do_not_edit_the_agent():
     text = MODES.read_text(encoding="utf-8")
     card = text.split("{modes.map", 1)[1].split(

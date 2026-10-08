@@ -57,7 +57,9 @@ class JiraReporter:
         tracker = azure_tracker_for(issue_key, state)
         if tracker is not None:
             return tracker
-        if not getattr(settings, "jira_enabled", True):
+        # JIRA_ENABLED only stops the board poller. A saved host and token
+        # still receive plan, progress, error, and completion comments.
+        if not getattr(settings, "jira_enabled", True) and not settings.is_configured():
             return None
         return self.client
 

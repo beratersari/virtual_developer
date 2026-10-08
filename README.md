@@ -466,6 +466,7 @@ Copy [`.env.example`](.env.example) → `.env`. Never commit secrets.
 |----------|-------------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | On-prem PAT or Cloud API token |
+| `JIRA_ENABLED` | `false` stops the board poller. Comments still post when host and token are set |
 | `JIRA_EMAIL` | Cloud/dev only → HTTP Basic. Empty = Bearer PAT (prod) |
 | `JIRA_PROJECTS` | Project keys: default create + parse keys from GitLab/Azure titles (`feat(KAN-12):`) |
 | `JIRA_BOARD_ID` | Agile boards to poll, comma-separated (**required** for Jira discovery). Each Scrum board uses its first active sprint |

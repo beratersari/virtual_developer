@@ -13,6 +13,7 @@ A fresh install that leaves `YAVER_BASE_DIR` unset keeps data in `C:\yaver_data`
 ### Changed
 
 - When `YAVER_BASE_DIR` is unset, the data folder is `C:\yaver_data` on Windows and `~/yaver_data` on Linux. The Linux release package leaves that key commented. It no longer writes `YAVER_BASE_DIR=/var/tmp/yaver`.
+- `JIRA_ENABLED=false` stops the board poller. Plan, progress, error, and completion comments still post when `JIRA_HOST` and `JIRA_API_TOKEN` are set, including a scheduled issue and a newly created issue. With no host or token, those comments stay off.
 
 ## [0.9.81] — 2026-10-08
 

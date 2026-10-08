@@ -458,6 +458,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 |----------|----------|
 | `JIRA_HOST` | Temel URL |
 | `JIRA_API_TOKEN` | Yerinde PAT veya Cloud API jetonu |
+| `JIRA_ENABLED` | `false` pano taramasını durdurur. Adres ve jeton kayıtlıysa yorumlar yine yazılır |
 | `JIRA_EMAIL` | Yalnız Cloud/dev → HTTP Basic. Boş = Bearer PAT |
 | `JIRA_PROJECTS` | Proje anahtarları; GitLab/Azure başlığından `KAN-12` okumak için de kullanılır |
 | `JIRA_BOARD_ID` | Taranacak Agile panoları, virgülle (**zorunlu**). Her Scrum panosu ilk aktif sprinti kullanır |

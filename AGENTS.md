@@ -373,6 +373,7 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
+| `JIRA_ENABLED` | `false` stops the board poller only. Plan, progress, error, and completion comments still post when `JIRA_HOST` and `JIRA_API_TOKEN` are set (scheduled issues and newly created issues included). Do not skip those comments because the poller is off. Missing host or token skips the writes. |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller. Comma-separated Agile board ids (e.g. `2,5`). Each Scrum board uses its first active sprint only. Kanban loads that whole board. A sprint error on one board does not drop the others. An issue on two boards is taken once. |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. On job start the issue is assigned to the first of these names that Jira accepts. The PAT user is the fallback when the list is empty or every assign fails. The hardcoded intake names are not assignees. |
