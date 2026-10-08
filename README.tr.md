@@ -366,7 +366,7 @@ Yaver ile OpenCode serve aynı kullanıcı olmalıdır. Daemon git klonunu oluş
 
 Daemon, `OPENCODE_SERVE_URL` ayakta değilse `opencode serve` sürecini her zaman aynı kullanıcı olarak başlatır ve bu çocuk süreç kapanırsa yeniden başlatır. Sağlık kontrolü geçen bir serve’e dokunmaz. Kaçırılan bir sağlık yoklaması, oturumu açılmış bir iş varken hâlâ dinleyen süreci durdurmaz. OpenCode’a henüz ulaşmamış bir iş, serve cevap vermezse birkaç saniyede biter ve executing durumundan çıkar; sessiz süreç bundan sonra değiştirilebilir. Bu açılış kontrolü ajan süre bütçesini kullanmaz. Serve yeniden yüklenirken gelen iş, o yüklemenin bitmesini bekler. Sync, kataloğu OpenCode ve Claude ev dizinlerine kopyalar ve çalışan iş yoksa serve’i yeniden yükler. Bir ajanı kaydetmek veya oluşturmak kataloğu yazar ve çalışan süreci olduğu gibi bırakır. Kuyrukta bekleyen işler, yeniden yükleme beklerken, sürerken veya hata verince kuyrukta kalır. Yeniden yükleme başarılı olduktan sonra başlarlar. Hata, kayıtlı ajanların henüz yüklenmediği anlamına gelir.
 
-`User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/.local/share/yaver/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
+`User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/yaver_data/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
 
 Klonların sahibi olacak oturumu Yaver birimine yazın:
 
@@ -382,7 +382,7 @@ Root ile oluşmuş ağaçlar varsa bir kez o kullanıcıya verin, sonra iki sür
 
 ```bash
 sudo chown -R yaver:yaver \
-  /home/yaver/.local/share/yaver \
+  /home/yaver/yaver_data \
   /home/yaver/.local/share/opencode
 sudo systemctl restart yaver
 ```
@@ -487,7 +487,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 | `POLL_INTERVAL_SECONDS` | `30` | Jira pano taraması |
 | `MAX_CONCURRENT_JOBS` | `6` | Paralel ajan işi |
 | `DEFAULT_MODEL` | (`.env.example`) | OpenCode ve Codex ortak |
-| `YAVER_BASE_DIR` | Windows `%LOCALAPPDATA%\Yaver`; Linux `~/.local/share/yaver` | Kullanıcının yazabildiği tek klasör. Veriler `{base}/yaver`. Klonlar `{base}/t`. |
+| `YAVER_BASE_DIR` | Windows `C:\yaver_data`; Linux `~/yaver_data` | Tek klasör. Veriler `{base}/yaver`. Klonlar `{base}/t`. Boş bırakılırsa bu varsayılan kullanılır. `.env` içindeki değer durur. |
 
 ---
 

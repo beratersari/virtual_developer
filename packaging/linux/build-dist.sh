@@ -119,7 +119,7 @@ for item in "${copy_items[@]}"; do
   echo "  + $item"
 done
 python3 "$ROOT/packaging/linux/env_example.py" "$PAYLOAD/.env.example"
-echo "  .env.example YAVER_BASE_DIR=/var/tmp/yaver"
+echo "  .env.example leaves YAVER_BASE_DIR unset (~/yaver_data)"
 chmod +x "$PAYLOAD"/install*.sh "$PAYLOAD"/start*.sh "$PAYLOAD"/stop.sh \
   "$PAYLOAD/packaging/linux/"*.sh 2>/dev/null || true
 if [[ ! -f "$PAYLOAD/opencoderman/install.py" ]]; then

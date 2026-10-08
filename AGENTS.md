@@ -378,7 +378,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. On job start the issue is assigned to the first of these names that Jira accepts. The PAT user is the fallback when the list is empty or every assign fails. The hardcoded intake names are not assignees. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |
-| `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. Windows default `%LOCALAPPDATA%\Yaver`. Linux default `$XDG_DATA_HOME/yaver` or `~/.local/share/yaver`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. |
+| `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. When this is unset, Windows uses `C:\yaver_data` and Linux uses `~/yaver_data`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. Published packages through 0.9.81 keep the default they shipped with. |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |

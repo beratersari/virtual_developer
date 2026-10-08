@@ -120,7 +120,15 @@ def test_wsl_integration_probe_has_thirty_named_requests():
     assert len(names) >= 30, names
 
 
-def test_linux_release_env_example_uses_shared_base():
+def test_linux_install_default_base_is_home_yaver_data():
+    lib = (LINUX / "lib.sh").read_text(encoding="utf-8")
+    ensure = (LINUX / "ensure-opencode-serve.sh").read_text(encoding="utf-8")
+    assert 'local base="${HOME}/yaver_data"' in lib
+    assert ".local/share}/yaver" not in lib
+    assert 'LOG_DIR="${HOME}/yaver_data/yaver/logs"' in ensure
+
+
+def test_linux_release_env_example_leaves_yaver_data_unset():
     spec = importlib.util.spec_from_file_location(
         "linux_env_example", LINUX / "env_example.py"
     )
@@ -132,14 +140,17 @@ def test_linux_release_env_example_uses_shared_base():
     source = (root / ".env.example").read_text(encoding="utf-8")
     assert "# YAVER_BASE_DIR=" in source
     assert "YAVER_BASE_DIR=/var/tmp/yaver" not in source
+    assert "~/yaver_data" in source
     rewritten = mod.linux_release_env_example(source)
-    assert "YAVER_BASE_DIR=/var/tmp/yaver\n" in rewritten
-    assert "# YAVER_BASE_DIR=" not in rewritten
-    assert "/var/tmp/yaver" in rewritten
+    assert rewritten == source
+    assert "# YAVER_BASE_DIR=" in rewritten
+    assert "/var/tmp/yaver" not in rewritten
     build = (LINUX / "build-dist.sh").read_text(encoding="utf-8")
     assert "packaging/linux/env_example.py" in build
+    assert "leaves YAVER_BASE_DIR unset" in build
     assert_sh = (LINUX / "assert-payload.sh").read_text(encoding="utf-8")
-    assert "YAVER_BASE_DIR=/var/tmp/yaver" in assert_sh
+    assert "must leave YAVER_BASE_DIR unset" in assert_sh
+    assert "YAVER_BASE_DIR=/var/tmp/yaver" not in assert_sh
     freeze = (root / "packaging" / "pyinstaller" / "build.py").read_text(
         encoding="utf-8"
     )

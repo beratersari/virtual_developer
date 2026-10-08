@@ -122,7 +122,8 @@ def test_windows_base_without_localappdata(monkeypatch: pytest.MonkeyPatch):
     from src.paths import default_windows_base_dir
 
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
-    assert default_windows_base_dir() == Path.home() / "AppData" / "Local" / "Yaver"
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
+    assert default_windows_base_dir() == Path("C:/yaver_data")
 
 
 def test_ensure_migrates_legacy_jira_agent(
@@ -155,23 +156,25 @@ def test_under_agent_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert under_agent_data(tmp_path / "secret.txt") is False
 
 
-def test_linux_default_is_xdg_data_home(monkeypatch: pytest.MonkeyPatch):
+def test_linux_default_is_home_yaver_data(monkeypatch: pytest.MonkeyPatch):
     from src import paths as paths_mod
 
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert paths_mod.default_linux_base_dir() == Path.home() / ".local" / "share" / "yaver"
-    assert paths_mod.default_linux_data_dir() == Path.home() / ".local" / "share" / "yaver" / "yaver"
-    assert paths_mod.default_linux_temp_dir() == Path.home() / ".local" / "share" / "yaver" / "t"
-    custom = Path.home() / "custom-xdg"
-    monkeypatch.setenv("XDG_DATA_HOME", str(custom))
-    assert paths_mod.default_linux_base_dir() == custom / "yaver"
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
+    home = Path.home() / "yaver_data"
+    assert paths_mod.default_linux_base_dir() == home
+    assert paths_mod.default_linux_data_dir() == home / "yaver"
+    assert paths_mod.default_linux_temp_dir() == home / "t"
+    monkeypatch.setenv("XDG_DATA_HOME", str(Path.home() / "custom-xdg"))
+    assert paths_mod.default_linux_base_dir() == home
 
 
-def test_windows_default_is_local_appdata(monkeypatch: pytest.MonkeyPatch):
+def test_windows_default_ignores_localappdata(monkeypatch: pytest.MonkeyPatch):
     from src import paths as paths_mod
 
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\dev\AppData\Local")
-    assert paths_mod.default_windows_base_dir() == Path(r"C:\Users\dev\AppData\Local\Yaver")
+    assert paths_mod.default_windows_base_dir() == Path("C:/yaver_data")
 
 
 def test_coerce_win_path_native_linux_without_mnt(monkeypatch: pytest.MonkeyPatch):
@@ -179,9 +182,9 @@ def test_coerce_win_path_native_linux_without_mnt(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     got = paths_mod._linux_path_from_win_rest("vd/yaver")
-    assert got == Path.home() / ".local" / "share" / "yaver" / "yaver"
+    assert got == Path.home() / "yaver_data" / "yaver"
     got_t = paths_mod._linux_path_from_win_rest("vd/t")
-    assert got_t == Path.home() / ".local" / "share" / "yaver" / "t"
+    assert got_t == Path.home() / "yaver_data" / "t"
 
 
 def test_pytest_stays_on_local_defaults(monkeypatch: pytest.MonkeyPatch):
@@ -191,7 +194,28 @@ def test_pytest_stays_on_local_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
     assert default_data_dir() == Path.cwd() / ".jira-agent"
     assert default_temp_dir() == Path(".temp")
-    assert default_base_dir().name in {"Yaver", "yaver"}
+    assert default_base_dir().name == "yaver_data"
+
+
+def test_unset_env_uses_platform_yaver_data(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import os
+
+    from src import paths as paths_mod
+
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
+    monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
+    monkeypatch.delenv("VD_DATA_DIR", raising=False)
+    monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.setattr(paths_mod, "_under_pytest", lambda: False)
+    base = paths_mod.default_base_dir()
+    assert paths_mod.agent_data_dir() == base / "yaver"
+    assert paths_mod.agent_temp_dir() == base / "t"
+    if os.name == "nt":
+        assert base == Path("C:/yaver_data")
+    else:
+        assert base == Path.home() / "yaver_data"
 
 
 def test_plans_dir_is_under_yaver_data(

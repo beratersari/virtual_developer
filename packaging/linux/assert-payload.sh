@@ -42,8 +42,20 @@ do
   fi
   echo "OK $rel"
 done
-if ! grep -q '^YAVER_BASE_DIR=/var/tmp/yaver$' "$p/.env.example"; then
-  echo ".env.example must set YAVER_BASE_DIR=/var/tmp/yaver" >&2
+if grep -q '^YAVER_BASE_DIR=' "$p/.env.example"; then
+  echo ".env.example must leave YAVER_BASE_DIR unset" >&2
+  exit 1
+fi
+if ! grep -q '^# YAVER_BASE_DIR=$' "$p/.env.example"; then
+  echo ".env.example must keep # YAVER_BASE_DIR=" >&2
+  exit 1
+fi
+if ! grep -Fq 'Linux:   ~/yaver_data' "$p/.env.example"; then
+  echo ".env.example must document ~/yaver_data" >&2
+  exit 1
+fi
+if ! grep -Fq 'Windows: C:\yaver_data' "$p/.env.example"; then
+  echo ".env.example must document C:\\yaver_data" >&2
   exit 1
 fi
 if [[ -d "$p/web/node_modules" ]]; then

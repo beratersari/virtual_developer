@@ -56,8 +56,8 @@ Without that zip, OpenCode falls back to `opencoderman/packaging/build_artifact.
 OpenCode is configured with `"plugin": []` and `autoupdate: false` (stock
 `build` / `plan` agents). Do not install `oh-my-openagent`.
 
-Durable data (not next to the git checkout). The default base is
-`~/.local/share/yaver` (or `$XDG_DATA_HOME/yaver`):
+Durable data (not next to the git checkout). When `YAVER_BASE_DIR` is
+unset, the base is `~/yaver_data`:
 
 - `{base}/yaver` — jobs, sessions, plans
 - `{base}/t` — temp clones
@@ -79,7 +79,7 @@ Never run `opencode` from `$HOME` — it treats the profile as the project.
 
 ## Same user
 
-Yaver and `opencode serve` have to be the same user. The daemon creates the clone under `~/.local/share/yaver/t`. Serve writes and commits there, and the Transcript tab reads serve's chat database (`~/.local/share/opencode`). Port 8080 does not need root.
+Yaver and `opencode serve` have to be the same user. The daemon creates the clone under `~/yaver_data/t`. Serve writes and commits there, and the Transcript tab reads serve's chat database (`~/.local/share/opencode`). Port 8080 does not need root.
 
 A unit with no `User=` runs as root. `sudo nohup opencode serve` is root too, and `sudo` sets `HOME` to `/root`. The login user's serve then cannot write the clone, so the agent commits in `~/.tmp/opencode`. The job can show completed with no merge request, and Transcript stays empty because the dashboard is looking in `/root/.local/share/opencode`.
 
@@ -93,7 +93,7 @@ Start serve as that same user. After a root run, give the trees to that account 
 
 ```bash
 sudo chown -R yaver:yaver \
-  /home/yaver/.local/share/yaver \
+  /home/yaver/yaver_data \
   /home/yaver/.local/share/opencode
 sudo systemctl restart yaver
 ```

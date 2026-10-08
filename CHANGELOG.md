@@ -8,6 +8,12 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+A fresh install that leaves `YAVER_BASE_DIR` unset keeps data in `C:\yaver_data` on Windows and `~/yaver_data` on Linux. Data is `{base}/yaver` and clones are `{base}/t`. A path already written in `.env` stays, including `YAVER_DATA_DIR` and `TEMP_DIR_BASE`. Packages already published, through 0.9.81, keep the default they shipped with.
+
+### Changed
+
+- When `YAVER_BASE_DIR` is unset, the data folder is `C:\yaver_data` on Windows and `~/yaver_data` on Linux. The Linux release package leaves that key commented. It no longer writes `YAVER_BASE_DIR=/var/tmp/yaver`.
+
 ## [0.9.81] — 2026-10-08
 
 Opening a scheduled ticket shows its prompt and repositories before a run exists. Settings action rows use the shared buttons. A banner names a newer published package and explains the update script.
