@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard checks the release site about every 15 minutes. When a newer package is published, a banner at the top names that version. The info button explains how to run `update.bat` or `./update.sh` in the Yaver folder. The dashboard does not download the package.
+
 ### Fixed
 
 - Opening a scheduled ticket shows its prompt, repositories, branches, mode, model, and time. The jobs list says the run has not started yet.

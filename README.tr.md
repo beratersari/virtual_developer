@@ -410,6 +410,8 @@ CI **Standalone Executables** `yaver` / `yaver.exe` üretir. Linux’ta ev sahib
 
 Ayrı bir yayın sitesi Windows paketini ve her Ubuntu sürümü için bir paketi tutar. Güncellemeyi Yaver klasöründeki betik yapar. Windows’ta `update.bat`, Ubuntu’da `./update.sh` çalıştırın.
 
+Pano bu siteyi yaklaşık 15 dakikada bir yoklar. Daha yeni bir paket yayınlandığında sayfanın üstünde bir şerit sürümü gösterir. Şeritteki bilgi düğmesi bu adımları anlatır. Pano paketi indirmaz.
+
 Site adresini `.env` içine yazın:
 
 ```text

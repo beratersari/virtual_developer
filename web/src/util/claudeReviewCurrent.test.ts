@@ -91,6 +91,7 @@ const live: LiveValue = {
   meta: null,
   poll: null,
   settings: null,
+  release: null,
   generation: 0,
   pollCountdown: null,
   error: null,

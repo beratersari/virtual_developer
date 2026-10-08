@@ -8,6 +8,16 @@ export type Meta = {
   authenticated?: boolean
 }
 
+export type ReleaseNotice = {
+  available: boolean
+  current?: string
+  latest?: string
+  platform?: string
+  message?: string
+  steps?: string[]
+  checked_at?: string
+}
+
 export type PolledIssue = {
   key: string
   summary: string

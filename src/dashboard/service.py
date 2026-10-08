@@ -1815,12 +1815,15 @@ def build_live_envelope(
     except Exception:
         queued = 0
         epoch = 0
+    from src.dashboard.release_notice import peek_release_notice
+
     return {
         "type": "live",
         "meta": build_meta().model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "queue": {"queued_count": queued, "epoch": epoch},
         "live_issue_keys": live_keys,
+        "release": peek_release_notice(),
     }
 
 

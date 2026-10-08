@@ -7,6 +7,7 @@ import { ThemeSwitch } from '../ui/ThemeSwitch'
 import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
 import { PageTitleRoot, useRecordTitle } from './pageTitleContext'
+import { UpdateBanner } from './UpdateBanner'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
@@ -190,6 +191,7 @@ export function Shell() {
               : 'vd-main-inner space-y-5'
           }
         >
+          <UpdateBanner notice={live.release} />
           <RecordBar />
           {live.error && <Alert>{live.error}</Alert>}
           {live.poll?.error &&

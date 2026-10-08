@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { dashboardWsUrl, fetchMeta, fetchPoll, fetchQueue, fetchSettings } from '../api/client'
-import type { Meta, PollPayload, SettingsPayload } from '../api/types'
+import type { Meta, PollPayload, ReleaseNotice, SettingsPayload } from '../api/types'
 import { rememberQueuePayload } from './entityCache'
 import { shouldBumpLiveGeneration } from '../util/liveTick'
 import { useNow } from '../util/time'
@@ -14,6 +14,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [generation, setGeneration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [queueQueued, setQueueQueued] = useState(0)
+  const [release, setRelease] = useState<ReleaseNotice | null>(null)
   const countdownRef = useRef<{ secs: number; atMs: number } | null>(null)
   const lastServerMs = useRef<number | null>(null)
   const lastLiveSig = useRef<string>('')
@@ -25,6 +26,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     settings?: SettingsPayload
     queue?: { queued_count?: number }
     live_issue_keys?: string[]
+    release?: ReleaseNotice
     jobs?: unknown
     tasks?: unknown
   }) => {
@@ -53,6 +55,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     if (payload.queue && typeof payload.queue.queued_count === 'number') {
       setQueueQueued(payload.queue.queued_count)
     }
+    if (payload.release) setRelease(payload.release)
     const tick = shouldBumpLiveGeneration(payload, lastLiveSig.current)
     if (tick.bump) {
       if (tick.sig) lastLiveSig.current = tick.sig
@@ -133,6 +136,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
               settings?: SettingsPayload
               queue?: { queued_count?: number }
               live_issue_keys?: string[]
+              release?: ReleaseNotice
               jobs?: unknown
               tasks?: unknown
             })
@@ -172,13 +176,14 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       meta,
       poll,
       settings,
+      release,
       generation,
       pollCountdown,
       error,
       queueQueued,
       setSettings,
     }),
-    [connected, meta, poll, settings, generation, pollCountdown, error, queueQueued],
+    [connected, meta, poll, settings, release, generation, pollCountdown, error, queueQueued],
   )
 
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>
