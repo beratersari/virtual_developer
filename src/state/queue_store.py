@@ -650,6 +650,49 @@ class WorkQueueStore:
             self._notify()
         return n
 
+    def list_for_issue(self, issue_key: str) -> List[Dict[str, Any]]:
+        """Every row for one issue, oldest first."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return []
+        rows = [
+            rec
+            for rec in self._iter_records()
+            if (rec.get("issue_key") or "").strip().upper() == key
+        ]
+        rows.sort(
+            key=lambda rec: (
+                str(rec.get("updated_at") or rec.get("created_at") or ""),
+                str(rec.get("queue_id") or ""),
+            )
+        )
+        return rows
+
+    def reopen(self, queue_id: str, *, reason: str = "") -> Optional[Dict[str, Any]]:
+        """Put a cancelled or error row back to queued.
+
+        Running, queued, completed, and skipped rows stay as they are.
+        """
+        updated: Optional[Dict[str, Any]] = None
+        with self._lock:
+            rec = self.get(queue_id)
+            if not rec:
+                return None
+            status = str(rec.get("status") or "").strip().lower()
+            if status not in {"cancelled", "canceled", "error"}:
+                return None
+            rec["status"] = "queued"
+            rec["started_at"] = None
+            rec["finished_at"] = None
+            rec["error_message"] = (reason or "")[:500] or None
+            rec["updated_at"] = _now_iso()
+            self._write(rec)
+            updated = rec
+        if updated is not None:
+            logger.info(f"Queue reopen {queue_id}: {reason or 'resume'}")
+            self._notify()
+        return updated
+
     def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
         """Re-queue durable ``running`` rows after a crash (no live worker)."""
         n = 0

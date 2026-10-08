@@ -105,6 +105,17 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Startup orphan recovery failed: {e}", e)
 
+        # Older SIGTERM builds marked the issue cancelled and closed the
+        # queue row. Put that payload back before the running-row pass.
+        try:
+            n = self.processor.recover_process_stop_interrupted()
+            if n:
+                logger.info(
+                    f"Startup recovery re-queued {n} process-stop job(s)"
+                )
+        except Exception as e:
+            logger.exception(f"Startup process-stop recovery failed: {e}", e)
+
         # Schedules left in "dispatching" after crash never become due again
         try:
             from src.scheduler.service import recover_stuck_schedules
@@ -236,12 +247,17 @@ class JiraAgentDaemon:
         loop.call_soon_threadsafe(_kick)
 
     async def stop(self, *, reason: str = "Daemon stopped (interrupt or shutdown)"):
-        """Stop the daemon gracefully: kill children, finalise in-flight, exit."""
+        """Stop the daemon: kill children, keep in-flight work resumable, exit."""
         if self._stopping:
             return
         self._stopping = True
         logger.info(f"Stopping daemon: {reason}")
         self._running = False
+        # Set this before any await. A worker that wakes during session
+        # abort must not stamp ERROR or close the queue row.
+        proc = getattr(self, "processor", None)
+        if proc is not None:
+            proc._shutting_down = True
 
         if self._poller:
             try:
@@ -259,7 +275,8 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"OpenCode abort before shutdown failed: {e}", e)
 
-        # Kill agent subprocesses and write CANCELLED before tearing down asyncio
+        # Kill agent subprocesses. Leave disk status and the queue row so the
+        # next start resumes the work.
         try:
             self.processor.shutdown_processing(reason=reason)
         except Exception as e:

@@ -174,6 +174,11 @@ def _remember_review_id(delivery: Dict[str, Any], url: Optional[str]) -> None:
         delivery["azure_pr_id"] = int(azure[2])
 
 
+# Written by older builds on SIGTERM. A later start still has to resume
+# those rows. Do not retarget this sentence; saved issue errors use it.
+PROCESS_STOP_MARK = "Agent process was stopped; local status is no longer"
+
+
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
 
@@ -211,6 +216,9 @@ class JobProcessor:
         self._jira_seen_events: set[str] = set()
         # Keys whose dashboard Stop is in flight (clone may still return None)
         self._cancelling: set[str] = set()
+        # Process exit (SIGTERM / console close handler). In-flight work stays
+        # on disk so the next start can resume it. Dashboard Stop does not set this.
+        self._shutting_down = False
         
         logger.info("Initializing JobProcessor")
         
@@ -715,6 +723,13 @@ class JobProcessor:
         the ticket never left To Do.
         """
         error_text = (error_message or "Unknown error")[:8000]
+        if self._shutting_down:
+            logger.error(
+                f"{issue_key}: not recording failure while the process is "
+                f"stopping; this run stays in flight and resumes on the next "
+                f"start. {(error_message or '')[:500]}"
+            )
+            return
         logger.error(
             f"{issue_key} failed ({category}) exit_message:\n{error_text}"
             + (f"\nSuggestion: {suggestion}" if suggestion else "")
@@ -4450,12 +4465,117 @@ class JobProcessor:
             logger.info(f"Recovered {recovered} orphaned in-flight issue(s) on startup")
         return recovered
 
-    def shutdown_processing(self, *, reason: str = "Daemon stopped") -> int:
-        """Stop all child agents and finalise every live/in-flight job.
+    def recover_process_stop_interrupted(self) -> int:
+        """Re-queue work an older process exit already marked stopped.
 
-        Uses the in-memory processing cache (``_contexts``) plus disk in-flight
-        statuses so nothing is left as planning/executing after a clean quit.
+        A current stop leaves the queue row ``running``, and
+        ``recover_stuck_running`` resumes that. Rows written before this
+        stay cancelled, with ``PROCESS_STOP_MARK`` on the issue. Put that
+        payload back on the queue. Dashboard Stop uses a different message
+        and is left cancelled.
         """
+        try:
+            states = self.state_manager.get_all_states()
+        except Exception as exc:
+            logger.warning(f"Process-stop resume scan failed: {exc}")
+            return 0
+        resumed = 0
+        for state in states:
+            if state.status not in (TaskStatus.CANCELLED, TaskStatus.ERROR):
+                continue
+            if PROCESS_STOP_MARK not in (state.error_message or ""):
+                continue
+            if not self._reopen_interrupted_queue(state.issue_key):
+                continue
+            resumed += 1
+            logger.info(f"{state.issue_key}: queued again after process stop")
+        if resumed:
+            logger.info(
+                f"Startup recovery re-queued {resumed} process-stop job(s)"
+            )
+        return resumed
+
+    def _reopen_interrupted_queue(self, issue_key: str) -> bool:
+        rows = self.queue_store.list_for_issue(issue_key)
+        if not rows:
+            return self._enqueue_resume_from_state(issue_key)
+        newest = rows[-1]
+        status = str(newest.get("status") or "").strip().lower()
+        if status in {"queued", "running"}:
+            return False
+        if status not in {"cancelled", "canceled", "error"}:
+            return False
+        payload = newest.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            return self._enqueue_resume_from_state(issue_key)
+        qid = str(newest.get("queue_id") or "")
+        if not qid:
+            return False
+        return (
+            self.queue_store.reopen(
+                qid,
+                reason="startup: resume after process stop",
+            )
+            is not None
+        )
+
+    def _enqueue_resume_from_state(self, issue_key: str) -> bool:
+        """Queue a Jira create when a process stop left no review payload."""
+        state = self.state_manager.get_state(issue_key)
+        if state is None:
+            return False
+        meta = state.metadata or {}
+        source = str(meta.get("source") or "").strip().lower()
+        if source in {"gitlab", "azure", "azure_workitem"}:
+            logger.info(
+                f"{issue_key}: process stop left no review payload to resume"
+            )
+            return False
+        key = (issue_key or "").strip()
+        from src.azure.keys import is_azure_issue_key, is_azure_work_item_key
+        from src.gitlab.keys import is_gitlab_issue_key
+
+        if (
+            is_gitlab_issue_key(key)
+            or is_azure_issue_key(key)
+            or is_azure_work_item_key(key)
+        ):
+            logger.info(
+                f"{issue_key}: process stop left no review payload to resume"
+            )
+            return False
+        event = {
+            "webhookEvent": "jira:issue_created",
+            "issue": {
+                "key": key,
+                "fields": {
+                    "summary": state.issue_summary or key,
+                    "description": state.description or "",
+                    "status": {
+                        "name": "To Do",
+                        "statusCategory": {"key": "new"},
+                    },
+                },
+            },
+            "resume_after_stop": True,
+        }
+        self.queue_store.enqueue(
+            source="jira",
+            issue_key=key,
+            summary=state.issue_summary or key,
+            message=state.description or "",
+            payload=event,
+        )
+        return True
+
+    def shutdown_processing(self, *, reason: str = "Daemon stopped") -> int:
+        """Stop child agents and drop in-memory slots.
+
+        Disk status and the queue row stay in flight. The next start resumes
+        them the same way closing the Windows executable does. Operator Stop
+        still cancels; this is only process exit.
+        """
+        self._shutting_down = True
         logger.info(f"Shutting down processing: {reason}")
         keys: set[str] = set(self._contexts.keys())
         for state in self.state_manager.get_active_issues():
@@ -4475,17 +4595,13 @@ class JobProcessor:
                 self._kill_children_for_issue(issue_key)
                 state = self.state_manager.get_state(issue_key)
                 if state and state.status in self.IN_FLIGHT_STATUSES:
-                    self._cancel_issue_state(
-                        issue_key,
-                        message=(
-                            f"{reason}. Agent process was stopped; local status is "
-                            f"no longer '{state.status.value}'."
-                        ),
-                        status=TaskStatus.CANCELLED,
+                    logger.info(
+                        f"{issue_key}: process stop left status "
+                        f"{state.status.value} so the next start can resume"
                     )
                     finalised += 1
                 elif issue_key in self._contexts:
-                    # Context without in-flight status — still drop context/children
+                    # Context without in-flight status — still drop the slot.
                     finalised += 1
             finally:
                 try:
@@ -4495,8 +4611,22 @@ class JobProcessor:
 
         self.git_manager = None
         self.agent_runner = None
-        logger.info(f"Shutdown processing complete: {finalised} issue(s) finalised")
+        logger.info(
+            f"Shutdown processing complete: {finalised} issue(s) left resumable"
+        )
         return finalised
+
+    def _leave_open_for_restart(self, issue_key: str) -> bool:
+        """True when a dying worker must not close this queue row."""
+        if not self._shutting_down:
+            return False
+        key = (issue_key or "").strip()
+        if not key:
+            return True
+        state = self.state_manager.get_state(key)
+        if state is None:
+            return True
+        return state.status in self.ORPHAN_RECOVER_STATUSES
 
     @staticmethod
     def _unpack_handler_result(result: Any) -> tuple[bool, Optional[str]]:
@@ -5309,6 +5439,8 @@ class JobProcessor:
 
     def _kick_queue(self) -> None:
         """Schedule a queue dispatch on the running loop (safe from sync code)."""
+        if self._shutting_down:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -5930,7 +6062,12 @@ class JobProcessor:
         issue is CANCELLED and ``_contexts`` is empty. A leftover running
         row then blocks ``claim_next`` for that issue (and can fill
         ``max_running``). Reap those orphans before claiming.
+
+        A process exit must not close the row it was running. The next
+        start resumes that row.
         """
+        if self._shutting_down:
+            return 0
         n = 0
         live = {
             (k or "").strip().upper()
@@ -6058,6 +6195,8 @@ class JobProcessor:
 
     async def dispatch_queue(self) -> int:
         """Claim and start every currently runnable queue item."""
+        if self._shutting_down:
+            return 0
         started = 0
         if self._queue_dispatch_lock is None:
             self._queue_dispatch_lock = asyncio.Lock()
@@ -6182,6 +6321,11 @@ class JobProcessor:
             else:
                 outcome = await self.process_event(rec.get("payload") or {})
                 if not outcome.get("work_started"):
+                    if self._leave_open_for_restart(rec.get("issue_key") or ""):
+                        logger.info(
+                            f"Queue item {qid} left open; the process is stopping"
+                        )
+                        return
                     self.queue_store.finish(
                         qid,
                         status="skipped",
@@ -6201,17 +6345,35 @@ class JobProcessor:
                 status = "error"
             elif st and st.status == TaskStatus.CANCELLED:
                 status = "cancelled"
+            if self._leave_open_for_restart(rec.get("issue_key") or ""):
+                logger.info(
+                    f"Queue item {qid} left open; the process is stopping"
+                )
+                return
             self.queue_store.finish(
                 qid,
                 status=status,
                 error_message=(st.error_message if st else None),
                 job_id=job_id if isinstance(job_id, str) else None,
             )
+        except asyncio.CancelledError:
+            if self._shutting_down:
+                logger.info(
+                    f"Queue item {qid} stays open; the process is stopping"
+                )
+            raise
         except Exception as e:
-            logger.exception(f"Queue item {qid} failed: {e}", e)
-            self.queue_store.finish(qid, status="error", error_message=str(e))
+            if self._leave_open_for_restart(rec.get("issue_key") or ""):
+                logger.error(
+                    f"Queue item {qid} left open while the process is "
+                    f"stopping: {e}"
+                )
+            else:
+                logger.exception(f"Queue item {qid} failed: {e}", e)
+                self.queue_store.finish(qid, status="error", error_message=str(e))
         finally:
-            await self.dispatch_queue()
+            if not self._shutting_down:
+                await self.dispatch_queue()
 
     def _post_gitlab_plan_ready_wait(self, event: Any, state: JiraAgentState) -> bool:
         """Tell the MR thread we will not implement until plan_execute.
