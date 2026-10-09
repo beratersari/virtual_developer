@@ -57,7 +57,6 @@ import {
 } from './MoreRepositories'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
-const CUSTOM_REPO = '__custom__'
 const PAGE_SIZE = 25
 const BUILTIN_MODES = ['build', 'plan', 'test']
 
@@ -412,7 +411,6 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
     live.settings?.project_repositories || [],
   )
   const [repo, setRepo] = useState('')
-  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
   const [iid, setIid] = useState('')
   const [preview, setPreview] = useState<ScheduleMrPreview | null>(null)
   const [prompt, setPrompt] = useState('')
@@ -444,10 +442,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
       }
     })()
     const preferred = rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
-    if (preferred) {
-      setRepoPick(preferred.url)
-      setRepo(preferred.url)
-    }
+    if (preferred) setRepo(preferred.url)
   }, [live.settings])
 
   const get = async () => {
@@ -518,43 +513,21 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
-
   return (
     <form onSubmit={(e) => void submit(e)}>
-      {projects.length > 0 && (
-        <SavedRepoSearch
-          label="Project"
-          projects={projects}
-          selectedUrl={repoPick === CUSTOM_REPO ? '' : repoPick}
-          onPick={(v) => {
-            setRepoPick(v)
-            setPreview(null)
-            if (v === CUSTOM_REPO) {
-              setRepo('')
-              return
-            }
-            const hit = projects.find((p) => p.url === v)
-            if (hit) setRepo(hit.url)
-          }}
-          trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
-        />
-      )}
-      {(isCustom || projects.length === 0) && (
-        <label className="field">
-          <span>Repository</span>
-          <input
-            value={repo}
-            onChange={(e) => {
-              setRepo(e.target.value)
-              setPreview(null)
-            }}
-            placeholder="https://gitlab.com/group/repo.git"
-            required
-          />
-        </label>
-      )}
-      {!isCustom && repo ? <p className="quiet font-mono text-xs">{repo}</p> : null}
+      <SavedRepoSearch
+        label="Repository"
+        projects={projects}
+        selectedUrl={repo}
+        onPick={(url) => {
+          setPreview(null)
+          setRepo(url)
+        }}
+        onDirectUrl={(url) => {
+          setPreview(null)
+          setRepo(url)
+        }}
+      />
       <label className="field">
         <span>MR iid</span>
         <input
@@ -659,7 +632,6 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
     [live.settings],
   )
   const [repo, setRepo] = useState('')
-  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
   const [iid, setIid] = useState('')
   const [preview, setPreview] = useState<SchedulePrPreview | null>(null)
   const [prompt, setPrompt] = useState('')
@@ -685,10 +657,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
       }
     })()
     const preferred = projects.find((p) => p.url === last) || (projects.length === 1 ? projects[0] : null)
-    if (preferred) {
-      setRepoPick(preferred.url)
-      setRepo(preferred.url)
-    }
+    if (preferred) setRepo(preferred.url)
   }, [projects])
 
   const get = async () => {
@@ -759,43 +728,21 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
-
   return (
     <form onSubmit={(e) => void submit(e)}>
-      {projects.length > 0 && (
-        <SavedRepoSearch
-          label="Project"
-          projects={projects}
-          selectedUrl={repoPick === CUSTOM_REPO ? '' : repoPick}
-          onPick={(v) => {
-            setRepoPick(v)
-            setPreview(null)
-            if (v === CUSTOM_REPO) {
-              setRepo('')
-              return
-            }
-            const hit = projects.find((p) => p.url === v)
-            if (hit) setRepo(hit.url)
-          }}
-          trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
-        />
-      )}
-      {(isCustom || projects.length === 0) && (
-        <label className="field">
-          <span>Repository</span>
-          <input
-            value={repo}
-            onChange={(e) => {
-              setRepo(e.target.value)
-              setPreview(null)
-            }}
-            placeholder="https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
-            required
-          />
-        </label>
-      )}
-      {!isCustom && repo ? <p className="quiet font-mono text-xs">{repo}</p> : null}
+      <SavedRepoSearch
+        label="Repository"
+        projects={projects}
+        selectedUrl={repo}
+        onPick={(url) => {
+          setPreview(null)
+          setRepo(url)
+        }}
+        onDirectUrl={(url) => {
+          setPreview(null)
+          setRepo(url)
+        }}
+      />
       <label className="field">
         <span>PR id</span>
         <input

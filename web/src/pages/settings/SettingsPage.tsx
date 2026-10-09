@@ -219,7 +219,7 @@ function RepoSetList({
   onChangeEditor: (
     next: { index: number | null; name: string; repositories: string[] } | null,
   ) => void
-  onSave: () => void
+  onSave: (repositories: string[]) => void
   onRemoveAt: (index: number) => void
 }) {
   const addRef = useRef<HTMLButtonElement>(null)
@@ -238,6 +238,11 @@ function RepoSetList({
   const canSave = Boolean(
     editor && editor.name.trim() && editor.repositories.filter(Boolean).length >= 2,
   )
+  const addRepository = (url: string) => {
+    const clean = url.trim()
+    if (!clean || !editor || editor.repositories.includes(clean)) return
+    onChangeEditor({ ...editor, repositories: [...editor.repositories, clean] })
+  }
   return (
     <div className="rounded-xl border border-border p-3">
       <div className="flex items-center justify-between gap-3">
@@ -296,7 +301,8 @@ function RepoSetList({
             aria-labelledby={titleId}
             onSubmit={(e) => {
               e.preventDefault()
-              if (canSave) onSave()
+              if (!editor || !canSave) return
+              onSave(editor.repositories)
             }}
           >
             <h3 id={titleId} className="vd-modal-title">
@@ -315,7 +321,7 @@ function RepoSetList({
             {editor.repositories.filter(Boolean).length === 0 ? (
               <p className="text-xs text-text-muted">No repositories in this set yet.</p>
             ) : (
-              <ul className="divide-y divide-border" aria-label="Repositories in this set">
+              <ul className="max-h-40 divide-y divide-border overflow-y-auto" aria-label="Repositories in this set">
                 {editor.repositories.filter(Boolean).map((url) => {
                   const row = choices.find((choice) => choice.url === url)
                   return (
@@ -339,20 +345,21 @@ function RepoSetList({
                 })}
               </ul>
             )}
-            {saved.length > 0 ? (
-              <SavedRepoSearch
-                key={editorToken}
-                label="Add a repository"
-                projects={saved}
-                exclude={editor.repositories}
-                onPick={(url) => {
-                  if (editor.repositories.includes(url)) return
-                  onChangeEditor({ ...editor, repositories: [...editor.repositories, url] })
-                }}
-              />
-            ) : (
-              <p className="mt-3 text-xs text-text-muted">Add a project first.</p>
-            )}
+            <SavedRepoSearch
+              key={editorToken}
+              label="Repository"
+              projects={saved}
+              exclude={editor.repositories}
+              onPick={addRepository}
+              onDirectUrl={addRepository}
+              onSelectAll={(urls) => {
+                const next = editor.repositories.slice()
+                for (const url of urls) {
+                  if (!next.includes(url)) next.push(url)
+                }
+                onChangeEditor({ ...editor, repositories: next })
+              }}
+            />
             <p className="mt-2 text-xs text-text-muted">Select at least two projects.</p>
             <div className="vd-modal-actions">
               <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
@@ -1764,10 +1771,10 @@ export function SettingsPage() {
           }}
           onClose={() => setRepoSetEditor(null)}
           onChangeEditor={setRepoSetEditor}
-          onSave={() => {
+          onSave={(urls) => {
             if (!repoSetEditor) return
             const name = repoSetEditor.name.trim()
-            const repositories = repoSetEditor.repositories.filter(Boolean)
+            const repositories = urls.map((url) => url.trim()).filter(Boolean)
             if (!name || repositories.length < 2) return
             touch('repository_sets')
             setDraft((d) => {

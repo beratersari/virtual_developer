@@ -3,11 +3,20 @@ import {
   emptyRepoRow,
   repoDraftProblem,
   repoRowBranches,
+  repoRowForUrl,
   repoRowTitle,
+  rowsForSelectedUrls,
   rowsFromRepositorySet,
   scheduleRepositoryFields,
 } from './MoreRepositories'
-import { projectMatchesQuery, searchSavedRepos } from '../../ui/ProjectSelect'
+import {
+  directRepoUrl,
+  projectMatchesQuery,
+  repoSearchListPlacement,
+  repoSearchValue,
+  searchSavedRepos,
+  selectAllMatching,
+} from '../../ui/ProjectSelect'
 
 const projects = [
   {
@@ -132,4 +141,89 @@ const one = scheduleRepositoryFields([
   { url: 'https://gitlab.com/acme/orders-api.git', source: 'develop', target: 'develop', sourceMode: 'issue_key' },
 ])
 if (one.repository_refs) throw new Error('one repository was sent as a set')
+
+const nearBottom = repoSearchListPlacement(
+  { top: 700, bottom: 732, left: 40, width: 280 },
+  { width: 1000, height: 760 },
+)
+if (nearBottom.top < 8 || nearBottom.top + nearBottom.maxHeight > 700) {
+  throw new Error('menu near the bottom left the screen or covered the field')
+}
+if (nearBottom.maxHeight <= 0 || nearBottom.maxHeight > 240) {
+  throw new Error('upward menu had no scrollable height')
+}
+
+const nearTop = repoSearchListPlacement(
+  { top: 24, bottom: 56, left: 40, width: 280 },
+  { width: 1000, height: 800 },
+)
+if (nearTop.top !== 60) throw new Error('menu under a top field did not open below it')
+if (nearTop.top + nearTop.maxHeight > 800 - 8) {
+  throw new Error('downward menu left the screen')
+}
+if (nearTop.maxHeight !== 240) throw new Error('short list was not capped at the preferred height')
+
+const narrow = repoSearchListPlacement(
+  { top: 100, bottom: 132, left: 0, width: 400 },
+  { width: 220, height: 800 },
+)
+if (narrow.left < 8 || narrow.left + narrow.width > 220 - 8) {
+  throw new Error('menu wider than the screen')
+}
+
+const matched = selectAllMatching(projects, 'orders-web', [])
+if (matched.length !== 1 || matched[0] !== projects[1].url) {
+  throw new Error('select all ignored the search')
+}
+const every = selectAllMatching(projects, '', [projects[0].url])
+if (every.length !== 1 || every[0] !== projects[1].url) {
+  throw new Error('select all included a repository that is already added')
+}
+if (selectAllMatching(projects, 'missing', []).length !== 0) {
+  throw new Error('select all returned a repository that does not match')
+}
+const chosen = appendRepoRows(
+  [{ ...emptyRepoRow(), url: projects[0].url }],
+  rowsForSelectedUrls(selectAllMatching(projects, 'orders', [projects[0].url]), projects),
+)
+if (chosen.added !== 1 || chosen.rows.length !== 2 || chosen.rows[1].url !== projects[1].url) {
+  throw new Error('select all did not add the remaining match')
+}
+if (chosen.rows[1].source !== 'release' || chosen.rows[1].target !== 'develop' || chosen.rows[1].sourceMode !== 'custom') {
+  throw new Error('select all dropped the saved branches')
+}
+
+const pasted = 'https://gitlab.com/acme/new.git'
+if (directRepoUrl(pasted, projects) !== pasted) {
+  throw new Error('a pasted url that is not saved was dropped')
+}
+if (directRepoUrl(`  ${projects[1].url}  `, projects) !== projects[1].url) {
+  throw new Error('a pasted url that is saved was not kept')
+}
+if (directRepoUrl('orders-web', projects) !== '') {
+  throw new Error('a name was used as a url')
+}
+if (repoSearchValue('typed', true, projects[0], projects[0].url) !== 'typed') {
+  throw new Error('an open field hid what was typed')
+}
+if (repoSearchValue('', false, projects[0], projects[0].url) !== 'orders-api') {
+  throw new Error('a saved repository showed its url beside the name')
+}
+if (repoSearchValue('', false, undefined, pasted) !== pasted) {
+  throw new Error('a pasted url that is not saved disappeared')
+}
+if (directRepoUrl('  git@gitlab.com:acme/new.git ', projects) !== 'git@gitlab.com:acme/new.git') {
+  throw new Error('a pasted git@ url was dropped')
+}
+if (directRepoUrl('ssh://git@gitlab.com/acme/new.git', projects) !== 'ssh://git@gitlab.com/acme/new.git') {
+  throw new Error('a pasted ssh url was dropped')
+}
+const unknownRow = repoRowForUrl(pasted, projects, emptyRepoRow())
+if (unknownRow.url !== pasted || unknownRow.target !== 'develop' || unknownRow.sourceMode !== 'issue_key') {
+  throw new Error('a pasted url that is not saved was not used')
+}
+const knownRow = repoRowForUrl(` ${projects[1].url} `, projects, emptyRepoRow())
+if (knownRow.url !== projects[1].url || knownRow.source !== 'release' || knownRow.target !== 'develop' || knownRow.sourceMode !== 'custom') {
+  throw new Error('a pasted url that is saved did not use that project')
+}
 console.log('repo rows ok')

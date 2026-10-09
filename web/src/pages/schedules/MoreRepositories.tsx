@@ -24,6 +24,29 @@ export function rowFromProject(project: ProjectRepository): RepoRow {
   }
 }
 
+export function repoRowForUrl(
+  url: string,
+  projects: ProjectRepository[],
+  current: RepoRow,
+): RepoRow {
+  const clean = url.trim()
+  const saved = projects.find((project) => project.url === clean)
+  if (saved) return rowFromProject(saved)
+  return { ...current, url: clean }
+}
+
+export function rowsForSelectedUrls(
+  urls: string[],
+  projects: ProjectRepository[],
+): RepoRow[] {
+  const rows: RepoRow[] = []
+  for (const url of urls) {
+    const saved = projects.find((project) => project.url === url)
+    if (saved) rows.push(rowFromProject(saved))
+  }
+  return rows
+}
+
 export function rowsFromRepositorySet(
   repositories: string[],
   projects: ProjectRepository[],
@@ -269,6 +292,12 @@ export function RepositoryList({
             showRemember && (dialog.mode === 'add' ? listed.length === 0 : dialog.index === 0)
           }
           rememberRepo={rememberRepo}
+          onAddMatching={(urls) => {
+            const result = appendRepoRows(rows, rowsForSelectedUrls(urls, projects))
+            setRows(result.rows)
+            setNotice(result.added === 0 ? 'Those repositories are already in the list.' : '')
+            closeDialog()
+          }}
           onClose={closeDialog}
           onSave={(draft, remember) => {
             const committed = {
@@ -300,6 +329,7 @@ function RepositoryDialog({
   taken,
   showRemember,
   rememberRepo,
+  onAddMatching,
   onClose,
   onSave,
 }: {
@@ -309,26 +339,28 @@ function RepositoryDialog({
   taken: string[]
   showRemember: boolean
   rememberRepo: boolean
+  onAddMatching: (urls: string[]) => void
   onClose: () => void
   onSave: (draft: RepoRow, remember: boolean) => void
 }) {
   const [draft, setDraft] = useState(state.draft)
   const [remember, setRemember] = useState(rememberRepo)
-  const urlRef = useRef<HTMLInputElement>(null)
   const sourceRef = useRef<HTMLSelectElement>(null)
   const problem = repoDraftProblem(draft, taken)
   const known = projects.some((project) => project.url === draft.url.trim())
   const title = state.mode === 'add' ? 'Add repository' : 'Edit repository'
 
   useEffect(() => {
-    if (state.mode === 'add' && projects.length > 0) return
-    const node = state.mode === 'edit' ? sourceRef.current : urlRef.current
-    node?.focus()
-  }, [projects.length, state.mode])
+    if (state.mode !== 'edit') return
+    sourceRef.current?.focus()
+  }, [state.mode])
 
   const save = () => {
     if (problem) return
     onSave(draft, remember)
+  }
+  const applyUrl = (url: string) => {
+    setDraft((current) => repoRowForUrl(url, projects, current))
   }
 
   return (
@@ -358,31 +390,15 @@ function RepositoryDialog({
         <h3 id={titleId} className="vd-modal-title">
           {title}
         </h3>
-        {projects.length > 0 ? (
-          <SavedRepoSearch
-            label="Saved repository"
-            projects={projects}
-            exclude={taken}
-            selectedUrl={known ? draft.url.trim() : ''}
-            autoFocus={state.mode === 'add'}
-            onPick={(url) => {
-              const saved = projects.find((project) => project.url === url)
-              if (!saved) return
-              setDraft(rowFromProject(saved))
-            }}
-          />
-        ) : null}
-        <label className="field">
-          <span>Repository URL</span>
-          <input
-            ref={urlRef}
-            value={draft.url}
-            spellCheck={false}
-            placeholder="https://gitlab.com/group/repo.git"
-            aria-invalid={problem === 'That repository is already in the list'}
-            onChange={(event) => setDraft({ ...draft, url: event.target.value })}
-          />
-        </label>
+        <SavedRepoSearch
+          label="Repository"
+          projects={projects}
+          exclude={taken}
+          selectedUrl={draft.url.trim()}
+          onPick={applyUrl}
+          onDirectUrl={applyUrl}
+          onSelectAll={state.mode === 'add' ? onAddMatching : undefined}
+        />
         <label className="field">
           <span>Source branch</span>
           <select

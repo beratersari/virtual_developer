@@ -598,6 +598,8 @@ html[data-theme="light"] .vd-mark {
 .vd-modal {
   width: 100%;
   max-width: 26rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   border: 1px solid var(--border-strong);
   border-radius: 2px;
   background: var(--bg-elevated);
