@@ -52,6 +52,24 @@ Same `Repository` + `Source branch` + `Target branch` + kind (`plan` vs `build`)
         └──────────────────────────────────────────────────────┘
 ```
 
+### OpenCode serve and the SDK
+
+Jobs talk to a running `opencode serve` process over HTTP. `@opencode-ai/sdk` is a TypeScript client generated from that server's OpenAPI spec. `createOpencode()` starts the server and returns a client. `createOpencodeClient({ baseUrl })` attaches to a server that is already running, which is what Yaver does at `http://127.0.0.1:4096`. `session.prompt()` posts to `/session/{id}/message` and returns the assistant message the server produced. `session.status()` reads `/session/status`, which is only `idle`, `busy`, or `retry`. The SDK runs the same agent loop as any other client of that server.
+
+Yaver keeps its own post-processing because serve still leaves some turns unfinished. Those cases are open bugs in the server session loop, so every client of serve hits them, including the SDK:
+
+- A compact recap can come back with `summary=true` and `finish` unset. The server auto-resumes later, after the HTTP call has already returned.
+- Auto-compaction can inject another Continue and spin. See [anomalyco/opencode#27924](https://github.com/anomalyco/opencode/issues/27924). The same loop shows up on an empty repository and on several models.
+- An empty provider response with `finish=unknown` and 0 tokens is either retried forever or treated as a normal stop. See [anomalyco/opencode#41469](https://github.com/anomalyco/opencode/issues/41469).
+- A tool can finish in serve mode while no next assistant turn is produced.
+- A clarifying question, or a pending `question` tool, leaves the session idle. Idle means the server is not running a turn. It does not mean the job is waiting for a person, and it does not mean the job succeeded.
+
+After the HTTP call returns, Yaver waits through auto-compact and does not post a fake Continue while that compact is running. It leaves that wait when the last turn is a real question, sends one unattended nudge, and then judges only the last assistant turn. A compact summary that quotes an earlier "Shall I…?" stays mid-work. A second compact loop is aborted and continued on the same session once, then reported as `compact_loop`. The control loop lives in `src/opencode_serve.py`.
+
+Some third-party wrappers add a nearby policy, and it is a different one. `opencode-agent-sdk` can wait until the session is idle. Yaver already treats that idle state as incomplete. `ai-sdk-provider-opencode-sdk` can reject a question so the call does not hang. That is an automatic reject. Yaver sends one nudge and then records a `question` failure when the last turn is still a real ask.
+
+A TypeScript app, such as an editor plugin or a web UI, should use the SDK. Yaver stays on `opencode serve` and the Python client. Moving Yaver onto the SDK would keep the same serve defects and drop this recovery.
+
 ---
 
 ## How work starts (all intakes)
