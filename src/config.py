@@ -323,6 +323,38 @@ def compute_stuck_limit_seconds(
     return timeout * (max(0, retries) + max(0, extra) + 1) * 1.5
 
 
+def clone_phase_limit_seconds(
+    repo_count: int,
+    clone_timeout_seconds: int,
+    *,
+    submodule_timeout_seconds: int = 0,
+) -> float:
+    """Seconds a multi-repo job may spend cloning before the agent starts.
+
+    Each repository gets ``GIT_CLONE_TIMEOUT_SECONDS``. When submodule
+    update is on, each one also gets ``GIT_SUBMODULE_TIMEOUT_SECONDS``.
+    Both values come from settings. The ``+ 60`` is the same slack the
+    single-repo clone floor uses.
+    """
+    try:
+        count = int(repo_count or 1)
+    except (TypeError, ValueError):
+        count = 1
+    count = max(1, count)
+    try:
+        one = int(clone_timeout_seconds or 1800)
+    except (TypeError, ValueError):
+        one = 1800
+    one = max(60, one)
+    extra = 0
+    if submodule_timeout_seconds:
+        try:
+            extra = max(60, int(submodule_timeout_seconds))
+        except (TypeError, ValueError):
+            extra = 0
+    return float(count * (one + extra) + 60)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     

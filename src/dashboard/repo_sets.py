@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from src.issue_git_spec import _looks_like_git_url, _normalize_repo_url
 
-MAX_REPOS_IN_JOB = 12
 MAX_REPOSITORY_SETS = 20
 
 
@@ -54,8 +53,6 @@ def normalize_repository_urls(primary: str, extras: Any = None) -> List[str]:
             continue
         seen.add(key)
         out.append(url)
-        if len(out) >= MAX_REPOS_IN_JOB:
-            break
     return out
 
 
@@ -160,11 +157,31 @@ def normalize_repository_refs(
                 "target_branch": row_target[:255],
             }
         )
-        if len(out) >= MAX_REPOS_IN_JOB:
-            break
     if len(out) < 2:
         return []
     return out
+
+
+def repository_count(meta: Any) -> int:
+    """How many repositories a job will clone. One when the list is empty."""
+    if not isinstance(meta, dict):
+        return 1
+    count = 0
+    refs = meta.get("repository_refs")
+    if isinstance(refs, list):
+        refs_n = 0
+        for row in refs:
+            if isinstance(row, dict) and str(
+                row.get("url") or row.get("repository_url") or ""
+            ).strip():
+                refs_n += 1
+            elif isinstance(row, str) and row.strip():
+                refs_n += 1
+        count = max(count, refs_n)
+    urls = meta.get("repository_urls")
+    if isinstance(urls, list):
+        count = max(count, sum(1 for url in urls if str(url or "").strip()))
+    return max(1, count)
 
 
 def same_repository(left: str, right: str) -> bool:

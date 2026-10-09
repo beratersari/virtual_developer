@@ -163,12 +163,12 @@ class ScheduleStore:
                 str(u).strip()
                 for u in (repository_urls or [])
                 if str(u).strip()
-            ][:12],
+            ],
             "repository_refs": [
                 row
                 for row in (repository_refs or [])
                 if isinstance(row, dict) and str(row.get("url") or "").strip()
-            ][:12],
+            ],
             "created_at": now,
             "updated_at": now,
             "dispatched_at": None,

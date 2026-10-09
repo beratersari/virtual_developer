@@ -597,7 +597,7 @@ class JiraAgentDaemon:
         is not used. Instead we enforce a wall-clock stuck timeout based on
         started_at + timeout_seconds * retries, then ERROR + Jira post_error.
         """
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         from src.config import settings
         from src.state.models import TaskStatus
@@ -639,20 +639,76 @@ class JiraAgentDaemon:
                     limit_seconds = compute_stuck_limit_seconds(
                         timeout, retries, extra_attempts=extra
                     )
-                    # Accepted: clone budget applies only before current_task_id is set.
-                    live = False
+                    from src.config import clone_phase_limit_seconds
+                    from src.dashboard.repo_sets import repository_count
+
+                    repo_count = 1
                     try:
-                        live = self.processor._is_live_processing(state.issue_key)
+                        repo_count = repository_count(meta)
                     except Exception:
-                        live = False
-                    if live and not getattr(state, "current_task_id", None):
-                        clone_budget = int(
-                            getattr(settings, "git_clone_timeout_seconds", 1800) or 1800
+                        repo_count = 1
+                    ready_at = None
+                    ready_raw = str(meta.get("clone_ready_at") or "").strip()
+                    if ready_raw:
+                        try:
+                            ready_at = datetime.fromisoformat(
+                                ready_raw.replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            ready_at = None
+                        if ready_at is not None and ready_at.tzinfo is not None:
+                            ready_at = ready_at.astimezone().replace(tzinfo=None)
+                    now = datetime.now()
+                    if ready_at is not None and ready_at > now + timedelta(seconds=5):
+                        ready_at = None
+                    # Each repository clones with GIT_CLONE_TIMEOUT_SECONDS.
+                    # A multi-repo job may use that full timeout once per
+                    # repository before clone_ready_at. One repository still
+                    # gets the clone floor only before a task id exists.
+                    if ready_at is None and repo_count > 1:
+                        clone_one = int(
+                            getattr(settings, "git_clone_timeout_seconds", 1800)
+                            or 1800
                         )
-                        limit_seconds = max(limit_seconds, clone_budget + 60)
+                        submodule_one = 0
+                        if getattr(settings, "git_update_submodules", True):
+                            submodule_one = int(
+                                getattr(
+                                    settings, "git_submodule_timeout_seconds", 1800
+                                )
+                                or 1800
+                            )
+                        limit_seconds = max(
+                            limit_seconds,
+                            clone_phase_limit_seconds(
+                                repo_count,
+                                clone_one,
+                                submodule_timeout_seconds=submodule_one,
+                            ),
+                        )
+                    elif ready_at is None:
+                        live = False
+                        try:
+                            live = self.processor._is_live_processing(state.issue_key)
+                        except Exception:
+                            live = False
+                        if live and not getattr(state, "current_task_id", None):
+                            clone_budget = int(
+                                getattr(settings, "git_clone_timeout_seconds", 1800)
+                                or 1800
+                            )
+                            limit_seconds = max(
+                                limit_seconds, max(60, clone_budget) + 60
+                            )
+
+                    clock = state.started_at
+                    if ready_at is not None and (
+                        clock is None or ready_at >= clock
+                    ):
+                        clock = ready_at
 
                     # Missing started_at must not leave jobs stuck forever.
-                    if not state.started_at:
+                    if clock is None:
                         logger.error(
                             f"Issue {state.issue_key} in-flight with no started_at; "
                             f"marking ERROR"
@@ -666,7 +722,7 @@ class JiraAgentDaemon:
                         )
                         continue
 
-                    age = (datetime.now() - state.started_at).total_seconds()
+                    age = (now - clock).total_seconds()
 
                     if age <= limit_seconds:
                         continue

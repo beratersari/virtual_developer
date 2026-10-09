@@ -158,10 +158,10 @@ class ScheduleCreateRequest(BaseModel):
         description="Azure team project for the new work item",
     )
     # Extra clones for this dashboard job only. The Jira description stays one repo.
-    repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    repository_urls: List[str] = Field(default_factory=list)
     # Per-repository source and target. Omitted branches copy the job branches.
     # source_branch_mode "issue_key" on a row is stored as feature/{KEY}.
-    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ScheduleMrRequest(BaseModel):
@@ -208,9 +208,9 @@ class ScheduleExistingRequest(BaseModel):
     target_branch: str = ""
     mode: str = ""
     source_branch_mode: str = ""
-    repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    repository_urls: List[str] = Field(default_factory=list)
     # source_branch_mode "issue_key" on a row is stored as feature/{KEY}.
-    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ScheduleItem(BaseModel):
@@ -662,7 +662,7 @@ class RepositorySetItem(BaseModel):
     """Named group of repositories for one dashboard multi-repo job."""
 
     name: str = Field(..., min_length=1, max_length=80)
-    repositories: List[str] = Field(default_factory=list, max_length=12)
+    repositories: List[str] = Field(default_factory=list)
 
 
 class ImportProjectsRequest(BaseModel):

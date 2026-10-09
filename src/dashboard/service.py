@@ -2840,7 +2840,7 @@ def _schedule_repository_refs(rec: Dict[str, Any]) -> List[Dict[str, str]]:
                 }
             )
     if out:
-        return out[:12]
+        return out
     primary = str(rec.get("repository_url") or "").strip()
     source = str(rec.get("source_branch") or "").strip()
     target = str(rec.get("target_branch") or "").strip()
@@ -2855,7 +2855,7 @@ def _schedule_repository_refs(rec: Dict[str, Any]) -> List[Dict[str, str]]:
         urls.insert(0, primary)
     return [
         {"url": url, "source_branch": source, "target_branch": target}
-        for url in urls[:12]
+        for url in urls
     ]
 
 

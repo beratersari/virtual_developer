@@ -400,7 +400,7 @@ class JobProcessor:
         if isinstance(raw, list) and len(urls) < 2:
             return {"repository_urls": [], "repository_refs": []}
         if len(urls) >= 2:
-            out: Dict[str, Any] = {"repository_urls": urls[:12]}
+            out: Dict[str, Any] = {"repository_urls": urls}
             refs = (event or {}).get("repository_refs")
             if isinstance(refs, list) and refs:
                 from src.dashboard.repo_sets import normalize_repository_refs
@@ -2164,6 +2164,23 @@ class JobProcessor:
         )
         self._record_job_working_directory(issue_key, wd)
 
+    def _note_clones_ready(self, issue_key: str) -> None:
+        """Start the agent clock after every repository has been cloned.
+
+        Each clone uses ``GIT_CLONE_TIMEOUT_SECONDS`` on its own. The
+        stuck monitor reads this stamp so that time is not taken out of
+        the agent budget.
+        """
+        try:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={
+                    "clone_ready_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"{issue_key}: could not record clone finish: {exc}")
+
     def _record_job_working_directory(
         self, issue_key: str, working_dir: Any
     ) -> None:
@@ -2598,6 +2615,9 @@ class JobProcessor:
         """
         archive = self._archive_run_identifiers(state.issue_key)
         archive["requeue_eligible"] = False
+        # A new run clones again. The previous finish must not start the
+        # agent clock before this run's clones are done.
+        archive["clone_ready_at"] = None
         if workflow_type:
             archive["workflow_type"] = workflow_type
         # Reject terminal statuses: cancel/fail can land between accept and begin
@@ -5387,6 +5407,7 @@ class JobProcessor:
                 wd, model=self._model_for_issue(state)
             )
             self._clear_stale_omo_continuations(wd)
+            self._note_clones_ready(state.issue_key)
             return git
         except IssueGitConfigError as e:
             logger.warning(
@@ -7130,6 +7151,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
+            self._note_clones_ready(state.issue_key)
             self._record_job_working_directory(
                 state.issue_key, git.get_working_directory()
             )
@@ -7901,6 +7923,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
+            self._note_clones_ready(state.issue_key)
             self._record_job_working_directory(
                 state.issue_key, git.get_working_directory()
             )
