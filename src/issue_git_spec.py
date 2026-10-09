@@ -305,7 +305,9 @@ def _looks_like_branch(name: str) -> bool:
     # Leading '-' is a git option (e.g. --mirror), not a ref
     if name.startswith("-"):
         return False
-    return bool(re.match(r"^[A-Za-z0-9._/\-]+$", name))
+    # Turkish letters (ç ğ ı İ ö ş ü and capitals). Git stores refs as UTF-8.
+    # Stay on this list so the check does not become Unicode \w.
+    return bool(re.match(r"^[A-Za-z0-9._/\-çÇğĞıİöÖşŞüÜ]+$", name))
 
 
 def _extract_params_block(text: str) -> Optional[str]:

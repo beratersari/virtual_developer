@@ -110,6 +110,39 @@ def test_looks_like_branch_edges():
     assert _looks_like_branch("feature/ok-1.2") is True
 
 
+def test_turkish_letters_are_valid_branch_names():
+    """Source and target branches may use the Turkish alphabet."""
+    for letter in "çÇğĞıİöÖşŞüÜ":
+        assert _looks_like_branch(f"feature/{letter}") is True, letter
+    assert _looks_like_branch("feature/geliştirme") is True
+    assert _looks_like_branch("özellik/şube") is True
+    assert _looks_like_branch("feature/geliş tirme") is False
+    assert _looks_like_branch("-geliştirme") is False
+    assert _looks_like_branch("geliştirme..x") is False
+    assert _looks_like_branch("feature/café") is False
+
+
+def test_params_keep_turkish_source_and_target():
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/g/r.git\n"
+        "Source branch: feature/geliştirme\n"
+        "Target branch: geliştirme\n"
+        "Mode: plan\n"
+        "Repository: https://gitlab.example.com/g/other.git\n"
+        "Source branch: özellik/şube\n"
+        "Target branch: ana\n"
+        "{params}"
+    )
+    spec, err = parse_issue_git_spec("s", desc)
+    assert err is None, err
+    assert spec is not None
+    assert spec.source_branch == "feature/geliştirme"
+    assert spec.target_branch == "geliştirme"
+    assert spec.repository_refs[1][1] == "özellik/şube"
+    assert spec.repository_refs[1][2] == "ana"
+
+
 def test_looks_like_git_url_edges():
     assert _looks_like_git_url("") is False
     assert _looks_like_git_url("git@host:group/repo.git") is True
