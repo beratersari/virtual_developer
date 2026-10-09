@@ -12,6 +12,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 - A Jira `{params}` Source branch or Target branch may include the Turkish letters ç, ğ, ı, ö, ş, ü and their capitals.
 
+### Changed
+
+- The update banner tells you to close Yaver, run `update.bat` or `update.sh`, and start Yaver when the script prints Updated to.
+
 ## [0.9.82] — 2026-10-09
 
 A fresh install that leaves `YAVER_BASE_DIR` unset keeps data in `C:\yaver_data` on Windows and `~/yaver_data` on Linux. Stopping Yaver resumes in-flight work on the next start. Opening a review posts the agent's writeup on that review. Jira comments still post when the board poller is off.

@@ -14,6 +14,7 @@ import pytest
 from src.config import settings
 from src.dashboard.release_notice import (
     _release_endpoint,
+    _update_steps,
     clear_release_notice_cache,
     detect_update_platform,
     peek_release_notice,
@@ -82,8 +83,23 @@ def test_newer_package_is_announced_without_a_download(monkeypatch):
     assert notice["latest"] == "0.9.81"
     assert notice["current"] == "0.9.80"
     assert "Yaver 0.9.81 is available" in notice["message"]
-    assert any("update.bat" in step for step in notice["steps"])
+    assert notice["steps"] == [
+        "Close Yaver.",
+        "In the Yaver folder, run update.bat.",
+        "When the script prints a line that begins with Updated to, start yaver.exe.",
+        "If this folder has no update.bat yet, download the zip once, copy update.bat into the folder, and run it there.",
+    ]
+    joined = " ".join(notice["steps"])
+    assert "RELEASE_HOST" not in joined
+    assert "Your .env stays" not in joined
+    assert "git checkout" not in joined
     assert all("download" not in step.lower() or "download the zip once" in step.lower() for step in notice["steps"])
+    assert _update_steps("ubuntu-22.04") == [
+        "Close Yaver.",
+        "In the Yaver folder, run chmod 755 update.sh if needed, then ./update.sh.",
+        "When the script prints a line that begins with Updated to, start ./yaver.",
+        "If this folder has no update.sh yet, download the zip once, copy update.sh into the folder, and run it there.",
+    ]
     assert seen[0].method == "GET"
     assert seen[0].content == b""
     assert not seen[0].headers.get("authorization")

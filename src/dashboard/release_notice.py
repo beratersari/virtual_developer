@@ -132,20 +132,14 @@ def _update_steps(platform: str) -> List[str]:
         return [
             "Close Yaver.",
             "In the Yaver folder, run update.bat.",
-            "The script reads RELEASE_HOST and RELEASE_PORT from .env. A blank host uses 15.210.7.55 and a blank port uses 8090.",
-            "It checks the package, stops yaver.exe in that folder, and replaces the program files. Your .env stays. The script you ran stays.",
             "When the script prints a line that begins with Updated to, start yaver.exe.",
             "If this folder has no update.bat yet, download the zip once, copy update.bat into the folder, and run it there.",
-            "The script updates an installed copy. A git checkout is left unchanged.",
         ]
     return [
         "Close Yaver.",
         "In the Yaver folder, run chmod 755 update.sh if needed, then ./update.sh.",
-        "The script reads RELEASE_HOST and RELEASE_PORT from .env. A blank host uses 15.210.7.55 and a blank port uses 8090.",
-        "It checks the package, stops yaver in that folder, and replaces the program files. Your .env stays. The script you ran stays.",
         "When the script prints a line that begins with Updated to, start ./yaver.",
         "If this folder has no update.sh yet, download the zip once, copy update.sh into the folder, and run it there.",
-        "The script updates an installed copy. A git checkout is left unchanged.",
     ]
 
 
