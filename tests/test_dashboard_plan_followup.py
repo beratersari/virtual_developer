@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -116,6 +119,36 @@ def test_jobs_list_shows_plan_ready_only_on_the_latest_job(tmp_path):
     assert listed[latest["job_id"]] == "plan_ready"
     assert listed[other["job_id"]] == "plan_ready"
 
+
+def test_completed_page_skips_an_older_plan_shown_as_superseded(tmp_path):
+    """A finished plan stays on Completed. An older plan does not fill that page."""
+    sm, store = _stores(tmp_path)
+    older = _job(store, "KAN-1", status="plan_ready", started="2026-09-22T10:00:00")
+    latest = _job(store, "KAN-1", status="plan_ready", started="2026-09-22T11:00:00")
+    done = _job(store, "KAN-2", status="completed", started="2026-09-22T12:00:00")
+
+    finished = build_jobs(
+        status="completed", page=1, page_size=25, store=store, state_manager=sm
+    )
+    finished_ids = {item.job_id for item in finished.jobs}
+    assert older["job_id"] not in finished_ids
+    assert latest["job_id"] in finished_ids
+    assert done["job_id"] in finished_ids
+    assert finished.total == len(finished.jobs) == 2
+    assert {item.status for item in finished.jobs} <= {"completed", "plan_ready"}
+
+    ready = build_jobs(
+        status="plan-ready", page=1, page_size=25, store=store, state_manager=sm
+    )
+    assert ready.total == len(ready.jobs) == 1
+    assert ready.jobs[0].job_id == latest["job_id"]
+    assert ready.jobs[0].status == "plan_ready"
+
+    cancelled = build_jobs(
+        status="cancelled", page=1, page_size=25, store=store, state_manager=sm
+    )
+    assert older["job_id"] not in {item.job_id for item in cancelled.jobs}
+
     opened = build_one_job(older["job_id"], store=store, state_manager=sm)
     assert opened is not None
     assert opened.status == "superseded"
@@ -209,3 +242,17 @@ def test_job_detail_includes_plan_followup(tmp_path):
     assert body["plan_followup"]["actions"] is True
     assert body["plan_followup"]["kind"] == "current"
     assert body["issue"]["status"] == "plan_ready"
+
+
+def test_completed_list_keeps_a_visible_plan():
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        ["npx", "tsx", "src/util/status.test.ts"],
+        cwd=root / "web",
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=sys.platform == "win32",
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "ok" in completed.stdout

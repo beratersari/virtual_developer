@@ -27,5 +27,19 @@ assert(
   jobMatchesFilter('executing', false, 'live') === jobMatchesFilter('executing', false, 'active'),
   'live filter matches active (one In flight tab)',
 )
+assert(jobMatchesFilter('completed', false, 'completed') === true, 'completed row stays')
+assert(
+  jobMatchesFilter('plan_ready', false, 'completed') === true,
+  'a finished plan stays on the completed list',
+)
+assert(
+  jobMatchesFilter('superseded', false, 'completed') === false,
+  'a superseded plan is not a completed row',
+)
+assert(jobMatchesFilter('plan_ready', false, 'plan_ready') === true, 'current plan stays')
+assert(
+  jobMatchesFilter('superseded', false, 'plan_ready') === false,
+  'a superseded plan is not on plan ready',
+)
 
 console.log('status.test.ts: ok')

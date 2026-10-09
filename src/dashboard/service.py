@@ -1529,12 +1529,24 @@ def _job_matches_exact_key(job: Dict[str, Any], issue_key: Optional[str]) -> boo
     return str(job.get("issue_key") or "").strip().upper() == want
 
 
-def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) -> bool:
-    """Same buckets as the Jobs page pills. Empty and ``all`` keep every row."""
+def _job_matches_status(
+    job: Dict[str, Any],
+    live: bool,
+    status: Optional[str],
+    *,
+    visible_status: Optional[str] = None,
+) -> bool:
+    """Same buckets as the Jobs page pills. Empty and ``all`` keep every row.
+
+    Completed and Plan ready use the badge status. An older plan that shows
+    as Superseded does not take a slot on those pages. Cancelled stays on
+    the stored status, so that older plan is not moved onto Cancelled.
+    """
     want = (status or "").strip().lower().replace("_", "-")
     if not want or want == "all":
         return True
     st = str(job.get("status") or "").lower()
+    shown = st if visible_status is None else str(visible_status or "").lower()
     if want in {"active", "live", "in-flight"}:
         # Accepted: a live issue keeps its older jobs on this pill.
         return live or st in {"pending", "planning", "executing", "running"}
@@ -1542,11 +1554,11 @@ def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) 
         return st in {"error", "unknown"}
     if want == "completed":
         # Same bucket as Analytics: a plan that reached plan_ready is finished.
-        return st in {"completed", "plan_ready"}
+        return shown in {"completed", "plan_ready"}
     if want == "cancelled":
         return st in {"cancelled", "canceled", "superseded"}
     if want == "plan-ready":
-        return st == "plan_ready"
+        return shown == "plan_ready"
     return True
 
 
@@ -1588,6 +1600,7 @@ def build_jobs(
     size = max(1, min(size, 100))
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
+    latest_job_ids: Dict[str, str] = {}
 
     # Jobs are documents in yaver.sqlite. Do not scan a jobs folder for the list.
     # Retries live under the parent job (session_log_paths / retry_attempts).
@@ -1610,7 +1623,8 @@ def build_jobs(
             or j.get("job_id") in active_job_ids
             or st in {"executing", "planning", "running", "pending"}
         )
-        if not _job_matches_status(j, live, status):
+        shown = _visible_job_status(j, store=js, latest_job_ids=latest_job_ids)
+        if not _job_matches_status(j, live, status, visible_status=shown):
             continue
         (inflight if live else rest).append(j)
     inflight.sort(key=job_created_stamp, reverse=True)
@@ -1634,7 +1648,6 @@ def build_jobs(
             full = {**full, "job_id": jid}
         page_jobs.append(full or j)
 
-    latest_job_ids: Dict[str, str] = {}
     items: List[JobItem] = []
     for j in page_jobs:
         items.append(

@@ -70,7 +70,7 @@ export function jobMatchesFilter(
     case 'error':
       return s === 'error' || s === 'unknown'
     case 'completed':
-      return s === 'completed'
+      return s === 'completed' || s === 'plan_ready'
     case 'cancelled':
       return s === 'cancelled' || s === 'superseded'
     case 'plan_ready':
