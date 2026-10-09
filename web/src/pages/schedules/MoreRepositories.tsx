@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProjectRepository, RepositorySet } from '../../api/types'
+import { settingsSectionPath } from '../settings/settingsSectionUrl'
 import { SavedRepoSearch } from '../../ui/ProjectSelect'
 
 export type RepoRow = {
@@ -275,7 +276,7 @@ export function RepositoryList({
       )}
       <p className="quiet text-xs">
         Saved remotes live in{' '}
-        <Link to="/settings/jira" className="text-accent-text hover:underline">
+        <Link to={settingsSectionPath('projects')} className="text-accent-text hover:underline">
           Settings → Projects
         </Link>
         .

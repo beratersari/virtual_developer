@@ -90,6 +90,12 @@ def test_saved_repo_search_stays_closed_until_click():
     assert "autoFocus" not in dialog
 
 
+def test_repository_list_opens_saved_projects():
+    text = LIST.read_text(encoding="utf-8")
+    assert "settingsSectionPath('projects')" in text
+    assert 'to="/settings/jira"' not in text
+
+
 def test_select_all_adds_the_matching_repositories():
     search = (ROOT / "web" / "src" / "ui" / "ProjectSelect.tsx").read_text(encoding="utf-8")
     assert "Select all" in search
