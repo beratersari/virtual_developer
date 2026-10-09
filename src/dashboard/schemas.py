@@ -787,7 +787,10 @@ class SettingsUpdate(BaseModel):
 
     jira_enabled: Optional[bool] = Field(
         default=None,
-        description="When false, skip the board poller and Jira comments. GitLab/Azure still run.",
+        description=(
+            "When false, skip the board poller. Comments still post when "
+            "a Jira host and token are saved. GitLab/Azure still run."
+        ),
     )
     jira_host: Optional[str] = Field(default=None, max_length=500)
     jira_email: Optional[str] = Field(

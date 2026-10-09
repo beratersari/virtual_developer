@@ -231,6 +231,32 @@ def test_post_comment_response():
     assert "Yapay zekâ —" not in body
 
 
+def test_completion_posts_when_poller_off_and_jira_configured(state, monkeypatch):
+    """JIRA_ENABLED=false skips the board poller. A saved host and token still get the result."""
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_enabled", False)
+    monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "jira_api_token", "token")
+    client = FakeJiraClient()
+    reporter = JiraReporter(client=client)
+    comment_id = reporter.post_completion(state, "shipped the change")
+    assert comment_id == "1"
+    assert "shipped the change" in client.comments[0]["body"]
+
+
+def test_completion_skips_when_poller_off_and_jira_unconfigured(state, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_enabled", False)
+    monkeypatch.setattr(settings, "jira_host", "")
+    monkeypatch.setattr(settings, "jira_api_token", "")
+    client = FakeJiraClient()
+    reporter = JiraReporter(client=client)
+    assert reporter.post_completion(state, "shipped the change") is None
+    assert client.comments == []
+
+
 def test_answer_header_names_the_backend(monkeypatch):
     state = type(
         "S",

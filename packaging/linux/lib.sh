@@ -489,7 +489,7 @@ vd_parse_serve_url() {
 }
 
 vd_ensure_durable_dirs() {
-  local base="${XDG_DATA_HOME:-${HOME}/.local/share}/yaver"
+  local base="${HOME}/yaver_data"
   mkdir -p "${base}/yaver" "${base}/t"
   echo "[OK] durable dirs ${base}/yaver and ${base}/t"
 }

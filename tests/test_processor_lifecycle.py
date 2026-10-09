@@ -3,7 +3,8 @@
 Covers the lifecycle rules:
 - Live jobs live in in-memory ``_contexts``; poll/create must not double-start them.
 - Disk ``planning``/``executing`` without a live process is orphaned on cold start → ERROR.
-- Graceful stop kills child processes and writes CANCELLED + Jira notify.
+- Graceful stop kills child processes and leaves planning/executing on disk
+  so the next start resumes the work.
 - Non-processing + To Do can still start (not blocked by recovery/shutdown).
 """
 
@@ -691,10 +692,10 @@ def test_not_processing_pending_todo_can_start(processor, state_manager):
 
 
 # ---------------------------------------------------------------------------
-# Graceful shutdown — kill children + CANCELLED
+# Graceful shutdown — kill children, leave the issue resumable
 # ---------------------------------------------------------------------------
 
-def test_shutdown_kills_children_and_cancels_state(processor, state_manager, fake_jira):
+def test_shutdown_kills_children_and_leaves_work(processor, state_manager, fake_jira):
     state_manager.create_state("SH-1", "s", "d")
     state_manager.update_state(
         "SH-1",
@@ -712,17 +713,17 @@ def test_shutdown_kills_children_and_cancels_state(processor, state_manager, fak
     n = processor.shutdown_processing(reason="Daemon stopped")
     assert n >= 1
     st = state_manager.get_state("SH-1")
-    assert st.status == TaskStatus.CANCELLED
-    assert st.current_task_id is None
+    assert st.status == TaskStatus.PLANNING
+    assert st.current_task_id == "task-1"
     runner.cancel_task.assert_called()
     runner.cancel_all_tasks.assert_called()
     git.cleanup.assert_called()
     assert "SH-1" not in processor._contexts
-    assert fake_jira.comments, "Jira comment required on shutdown cancel"
+    assert not fake_jira.comments
 
 
-def test_shutdown_finalises_disk_inflight_without_context(processor, state_manager, fake_jira):
-    """In-flight on disk but missing from cache still becomes CANCELLED."""
+def test_shutdown_leaves_disk_inflight_without_context(processor, state_manager, fake_jira):
+    """In-flight on disk but missing from cache stays in flight."""
     state_manager.create_state("SH-2", "s", "d")
     state_manager.update_state(
         "SH-2",
@@ -735,9 +736,9 @@ def test_shutdown_finalises_disk_inflight_without_context(processor, state_manag
     n = processor.shutdown_processing(reason="Daemon stopped")
     assert n >= 1
     st = state_manager.get_state("SH-2")
-    assert st.status == TaskStatus.CANCELLED
-    assert st.current_task_id is None
-    assert fake_jira.comments
+    assert st.status == TaskStatus.EXECUTING
+    assert st.current_task_id == "t2"
+    assert not fake_jira.comments
 
 
 def test_shutdown_multiple_live_jobs(processor, state_manager, fake_jira):
@@ -759,10 +760,10 @@ def test_shutdown_multiple_live_jobs(processor, state_manager, fake_jira):
 
     n = processor.shutdown_processing(reason="stop")
     assert n == 2
-    assert state_manager.get_state("J-1").status == TaskStatus.CANCELLED
-    assert state_manager.get_state("J-2").status == TaskStatus.CANCELLED
+    assert state_manager.get_state("J-1").status == TaskStatus.EXECUTING
+    assert state_manager.get_state("J-2").status == TaskStatus.EXECUTING
     assert processor._contexts == {}
-    assert len(fake_jira.comments) >= 2
+    assert not fake_jira.comments
 
 
 def test_shutdown_clears_legacy_agent_runner(processor, state_manager):
@@ -830,6 +831,7 @@ async def test_daemon_start_runs_orphan_recovery():
                             await daemon.start()
 
         daemon.processor.recover_orphaned_in_flight.assert_called_once()
+        daemon.processor.recover_process_stop_interrupted.assert_called_once()
 
 
 @pytest.mark.asyncio

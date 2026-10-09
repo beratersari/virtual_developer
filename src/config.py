@@ -337,7 +337,10 @@ class Settings(BaseSettings):
     # - Cloud (dev): also set JIRA_EMAIL → HTTP Basic (email + API token)
     jira_enabled: bool = Field(
         default=True,
-        description="When false, skip the board poller and all Jira writes. GitLab/Azure jobs still run.",
+        description=(
+            "When false, skip the board poller. Comments still post when "
+            "JIRA_HOST and JIRA_API_TOKEN are set. GitLab/Azure jobs still run."
+        ),
     )
     jira_host: str = Field(default="", description="JIRA instance URL")
     jira_email: str = Field(

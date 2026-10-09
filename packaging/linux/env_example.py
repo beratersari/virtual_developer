@@ -1,31 +1,28 @@
-"""Linux release ``.env.example`` uses a directory every account can write."""
+"""Linux release ``.env.example`` leaves the data folder unset.
+
+The app then uses ``~/yaver_data``. A value already in the operator ``.env``
+still wins. Packages through 0.9.81 wrote ``/var/tmp/yaver`` instead.
+"""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-LINUX_BASE_DIR = "/var/tmp/yaver"
 _PLACEHOLDER = "# YAVER_BASE_DIR="
-_LINUX_COMMENT = (
-    "#   Linux:   ~/.local/share/yaver   (or $XDG_DATA_HOME/yaver)\n"
-)
-_LINUX_RELEASE_COMMENT = (
-    "#   Linux:   /var/tmp/yaver   (shared by every account, no sudo)\n"
-)
+_LINUX_COMMENT = "#   Linux:   ~/yaver_data\n"
+_WINDOWS_COMMENT = "#   Windows: C:\\yaver_data\n"
 
 
 def linux_release_env_example(text: str) -> str:
-    """Set ``YAVER_BASE_DIR=/var/tmp/yaver`` in the shipped example."""
+    """Keep ``YAVER_BASE_DIR`` commented so the app default applies."""
     if _PLACEHOLDER not in text:
         raise ValueError("YAVER_BASE_DIR placeholder missing from .env.example")
-    if _LINUX_COMMENT in text:
-        text = text.replace(_LINUX_COMMENT, _LINUX_RELEASE_COMMENT, 1)
-    return text.replace(
-        _PLACEHOLDER + "\n",
-        f"YAVER_BASE_DIR={LINUX_BASE_DIR}\n",
-        1,
-    )
+    if _LINUX_COMMENT not in text or _WINDOWS_COMMENT not in text:
+        raise ValueError("yaver_data default missing from .env.example")
+    if "\nYAVER_BASE_DIR=" in "\n" + text:
+        raise ValueError("YAVER_BASE_DIR must stay unset in the release example")
+    return text
 
 
 def apply_linux_env_example(path: Path) -> None:

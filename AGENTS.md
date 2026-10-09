@@ -373,12 +373,13 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
+| `JIRA_ENABLED` | `false` stops the board poller only. Plan, progress, error, and completion comments still post when `JIRA_HOST` and `JIRA_API_TOKEN` are set (scheduled issues and newly created issues included). Do not skip those comments because the poller is off. Missing host or token skips the writes. |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller. Comma-separated Agile board ids (e.g. `2,5`). Each Scrum board uses its first active sprint only. Kanban loads that whole board. A sprint error on one board does not drop the others. An issue on two boards is taken once. |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. On job start the issue is assigned to the first of these names that Jira accepts. The PAT user is the fallback when the list is empty or every assign fails. The hardcoded intake names are not assignees. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |
-| `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. Windows default `%LOCALAPPDATA%\Yaver`. Linux default `$XDG_DATA_HOME/yaver` or `~/.local/share/yaver`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. |
+| `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. When this is unset, Windows uses `C:\yaver_data` and Linux uses `~/yaver_data`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. Published packages through 0.9.81 keep the default they shipped with. |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
@@ -425,6 +426,7 @@ normal review. Proof: `tests/test_gitlab_review_complete.py`.
 - Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker), release_host and release_port (written to `.env` for `update.bat` and `update.sh`; the dashboard does not download or replace files). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Scheduled → MR and Scheduled → PR accept mode `build` (default follow-up, command `yaver`) or `review`. `review` enqueues the same GitLab or Azure review as `@bot /review` (derman-reviewer, no push). The section picks the host. Do not add `review` to issue work modes or the existing/new issue Mode list. An empty model uses `default_review_model`. Proof: `tests/test_schedule_mr_followup.py`, `tests/test_schedule_pr_followup.py`, `tests/test_schedule_review_mode_ui.py`.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
+- `GET /api/analytics/install` is the release site's read of this install's Analytics. It is exempt from the dashboard password and requires the built-in bearer in `src/dashboard/install_analytics.py`. `GET /api/analytics` is not exempt. The version check does not send those counts. See §12.
 - Version is read from repo root `VERSION`.
 
 ### Layout
@@ -446,6 +448,7 @@ Open: `http://127.0.0.1:8080` after daemon start.
 | GET | `/api/poll` | Last poll snapshot + countdown |
 | GET/PATCH | `/api/settings` | Safe settings |
 | GET | `/api/dashboard` | Full envelope |
+| GET | `/api/analytics/install` | All-time Analytics for the release site. Built-in bearer. Dashboard password still protects `/api/analytics` |
 | POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
 | POST | `/yaver/webhook/azure` | Azure PR comment + lifecycle, and work-item created/updated/commented (`/webhooks/azure` still works) |
 | POST | `/api/azure/work-item` | Settings lookup: one work item by host + project + id |
@@ -929,6 +932,18 @@ The info button on that banner explains how to run `update.bat` or
 `update.sh`. The dashboard does not download the package and does not
 replace files. There is no Check button and no Update button.
 
+The version check does not carry Analytics. Do not add a usage body to
+that GET. When a release admin selects an address that has already
+checked in, the release site GETs `http://{that-ip}:8080/api/analytics/install`.
+The bearer is the hardcoded constant in `src/dashboard/install_analytics.py`,
+the same value in the release site. It is not an `.env` key, not a query
+parameter, and it is not logged. `verify=False`, no redirects, and the
+client does not use an environment proxy. Only an IP from that check-in
+list is requested. A hostname or a link-local address is not requested.
+`GET /api/analytics` and `GET /api/analytics/reviews` stay behind the
+dashboard password. Do not exempt those paths. Proof:
+`tests/test_install_analytics.py`.
+
 The operator updates an executable install by running the script in that
 folder:
 
@@ -1022,6 +1037,7 @@ them. Do not call `update_stopped_install` from `cli.py`.
 - Overwriting the running `update.bat` or `update.sh`.
 - Killing every `yaver.exe` on the machine. Stop only the process whose path is this install folder.
 - Following redirects, or using a scheme other than `http` for the release site.
+- Sending Analytics on the version check, or exempting `GET /api/analytics` from the dashboard password. The install path is `GET /api/analytics/install` only.
 - Updating a folder that contains `.git`, or a drive root.
 - Replacing files when the checksum does not match.
 

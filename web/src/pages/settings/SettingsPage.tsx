@@ -1121,9 +1121,10 @@ export function SettingsPage() {
         <span>Enabled</span>
       </label>
       <p className="mt-2 text-xs text-text-muted">
-        Off: skip the board poller and Jira comments. GitLab and Azure
-        jobs still run. Test Jira still works so you can check the
-        token before turning this on.
+        Off: the board poller stays idle. Comments still post when a
+        host and API token are saved. GitLab and Azure jobs still run.
+        Test Jira still works so you can check the token before turning
+        this on.
       </p>
       </div>
       <div className="grid items-start gap-5 lg:grid-cols-2">

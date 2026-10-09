@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -11,6 +13,7 @@ import pytest
 
 from src.config import settings
 from src.dashboard.release_notice import (
+    _release_endpoint,
     clear_release_notice_cache,
     detect_update_platform,
     peek_release_notice,
@@ -36,6 +39,16 @@ def test_version_order_matches_release_numbers():
     assert not version_is_newer("0.9.80+g1", "0.9.80")
     assert not version_is_newer("0.9.80-dev", "0.9.80")
     assert not version_is_newer("0.9.79", "0.9.80")
+
+
+def test_version_check_names_the_installed_version(monkeypatch):
+    monkeypatch.setattr(settings, "release_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "release_port", 9)
+    assert (
+        _release_endpoint("windows", "0.9.81")
+        == "http://127.0.0.1:9/api/latest?platform=windows&current=0.9.81"
+    )
+    assert "current=" not in _release_endpoint("windows", "<script>")
 
 
 def test_platform_follows_the_update_script(monkeypatch):
@@ -71,10 +84,14 @@ def test_newer_package_is_announced_without_a_download(monkeypatch):
     assert "Yaver 0.9.81 is available" in notice["message"]
     assert any("update.bat" in step for step in notice["steps"])
     assert all("download" not in step.lower() or "download the zip once" in step.lower() for step in notice["steps"])
+    assert seen[0].method == "GET"
+    assert seen[0].content == b""
+    assert not seen[0].headers.get("authorization")
     assert seen[0].url.scheme == "http"
     assert seen[0].url.host == "10.1.2.3"
     assert seen[0].url.port == 8090
     assert seen[0].url.params["platform"] == "windows"
+    assert b"usage" not in seen[0].content
     assert peek_release_notice()["available"] is True
 
 
@@ -134,6 +151,75 @@ def test_live_feed_includes_the_cached_notice(monkeypatch, tmp_path):
     assert env["release"]["available"] is True
     assert env["release"]["latest"] == "1.2.3"
     assert "tasks" not in env
+
+
+class _ReleaseServer(ThreadingHTTPServer):
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
+        super().__init__(address, handler)
+        self.hits: list[tuple[str, str, bytes, str]] = []
+
+
+class _ReleaseHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self._record()
+        self._json()
+
+    def do_POST(self) -> None:
+        self._record()
+        self.send_error(405)
+
+    def _record(self) -> None:
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length) if length else b""
+        server = self.server
+        if isinstance(server, _ReleaseServer):
+            server.hits.append(
+                (
+                    self.command,
+                    self.path,
+                    raw,
+                    self.headers.get("Authorization") or "",
+                )
+            )
+
+    def _json(self) -> None:
+        raw = b'{"version":"9.9.9"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
+def test_version_check_gets_a_local_server_without_analytics(monkeypatch):
+    server = _ReleaseServer(("127.0.0.1", 0), _ReleaseHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    monkeypatch.setenv("YAVER_UPDATE_PLATFORM", "windows")
+    monkeypatch.setattr(settings, "release_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "release_port", port)
+    try:
+        notice = refresh_release_notice(current="0.9.80")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert notice["available"] is True
+    assert notice["latest"] == "9.9.9"
+    assert len(server.hits) == 1
+    method, path, raw, authorization = server.hits[0]
+    assert method == "GET"
+    assert path.startswith("/api/latest?")
+    assert "platform=windows" in path
+    assert "current=0.9.80" in path
+    assert raw == b""
+    assert authorization == ""
+    assert b"usage" not in raw
 
 
 def test_update_banner_renders():

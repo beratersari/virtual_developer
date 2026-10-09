@@ -5,13 +5,10 @@ One operator setting, ``YAVER_BASE_DIR``. Yaver creates two folders under it:
 * ``{base}/yaver`` — sessions, jobs, state, plans, logs
 * ``{base}/t`` — temp git clones (short name for Windows MAX_PATH)
 
-Defaults follow other local tools, in a folder the user can write without
-administrator rights:
+When ``YAVER_BASE_DIR`` is not set:
 
-* Windows: ``%LOCALAPPDATA%\\Yaver`` (same place as Docker and other
-  per-user app data; not the roaming profile)
-* Linux and WSL: ``$XDG_DATA_HOME/yaver`` or ``~/.local/share/yaver``
-  (same place as OpenCode's ``~/.local/share/opencode``)
+* Windows: ``C:\\yaver_data``
+* Linux and WSL: ``~/yaver_data``
 
 Plans are ``{base}/yaver/plans/{ISSUE_KEY}.md`` (not inside the clone).
 
@@ -84,19 +81,13 @@ def _dir_usable(path: Path) -> bool:
 
 
 def default_windows_base_dir() -> Path:
-    """``%LOCALAPPDATA%\\Yaver``. Falls back to the profile AppData path."""
-    local = (os.environ.get("LOCALAPPDATA") or "").strip()
-    if local:
-        return Path(local) / "Yaver"
-    return Path.home() / "AppData" / "Local" / "Yaver"
+    """``C:\\yaver_data`` when ``YAVER_BASE_DIR`` is not set."""
+    return Path("C:/yaver_data")
 
 
 def default_linux_base_dir() -> Path:
-    """``$XDG_DATA_HOME/yaver`` or ``~/.local/share/yaver``."""
-    xdg = (os.environ.get("XDG_DATA_HOME") or "").strip()
-    if xdg:
-        return Path(xdg).expanduser() / "yaver"
-    return Path.home() / ".local" / "share" / "yaver"
+    """``~/yaver_data`` when ``YAVER_BASE_DIR`` is not set."""
+    return Path.home() / "yaver_data"
 
 
 def linux_home_data_dir() -> Path:
@@ -108,12 +99,12 @@ def linux_home_temp_dir() -> Path:
 
 
 def default_linux_data_dir() -> Path:
-    """``~/.local/share/yaver/yaver`` unless ``XDG_DATA_HOME`` is set."""
+    """``~/yaver_data/yaver``."""
     return default_linux_base_dir() / _DATA_FOLDER
 
 
 def default_linux_temp_dir() -> Path:
-    """``~/.local/share/yaver/t`` unless ``XDG_DATA_HOME`` is set."""
+    """``~/yaver_data/t``."""
     return default_linux_base_dir() / _TEMP_FOLDER
 
 

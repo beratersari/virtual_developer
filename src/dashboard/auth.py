@@ -102,6 +102,11 @@ def is_exempt_path(method: str, path: str) -> bool:
     # retries Authorization: Basic without our cookie / X-Yaver-Login.
     if verb == "GET" and raw.rstrip("/") == "/api/meta":
         return True
+    # Release-site read of this install's counts. The handler still requires
+    # the built-in bearer. /api/analytics and /api/analytics/reviews stay here
+    # so the dashboard password keeps covering the Analytics page.
+    if verb == "GET" and raw.split("?", 1)[0].rstrip("/") == "/api/analytics/install":
+        return True
     if raw.rstrip("/") in ALL_WEBHOOK_PATHS:
         return True
     if verb == "POST" and raw.rstrip("/") in {"/api/logout", "/api/login"}:

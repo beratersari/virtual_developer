@@ -52,6 +52,24 @@ Aynı `Repository` + `Source branch` + `Target branch` + tür (`plan` / `build`)
         └──────────────────────────────────────────────────────┘
 ```
 
+### OpenCode serve ve SDK
+
+İşler, çalışan bir `opencode serve` sürecine HTTP ile konuşur. `@opencode-ai/sdk`, bu sunucunun OpenAPI belirtiminden üretilmiş bir TypeScript istemcisidir. `createOpencode()` sunucuyu başlatır ve bir istemci döndürür. `createOpencodeClient({ baseUrl })` zaten çalışan bir sunucuya bağlanır. Yaver’ın `http://127.0.0.1:4096` üzerinde yaptığı budur. `session.prompt()`, `/session/{id}/message` adresine POST atar ve sunucunun ürettiği asistan iletisini döndürür. `session.status()`, `/session/status` sonucunu okur. Bu sonuç yalnızca `idle`, `busy` veya `retry` olur. SDK, o sunucunun herhangi bir istemcisiyle aynı ajan döngüsünü çalıştırır.
+
+Yaver kendi son işlemeyi tutar, çünkü serve bazı turları bitmemiş bırakır. Bu durumlar sunucunun oturum döngüsündeki açık hatalardır. Serve’in her istemcisi, SDK dahil, aynı hatalarla karşılaşır:
+
+- Sıkıştırma özeti `summary=true` ve `finish` boş olarak dönebilir. Sunucu otomatik sürdürmeyi daha sonra yapar; HTTP çağrısı o sırada çoktan dönmüştür.
+- Otomatik sıkıştırma yeni bir Continue enjekte edip döngüye girebilir. Bkz. [anomalyco/opencode#27924](https://github.com/anomalyco/opencode/issues/27924). Aynı döngü boş bir depoda ve birkaç modelde de görülür.
+- `finish=unknown` ve 0 jetonlu boş bir sağlayıcı yanıtı ya sonsuza kadar yeniden denenir ya da normal duruş sayılır. Bkz. [anomalyco/opencode#41469](https://github.com/anomalyco/opencode/issues/41469).
+- Bir araç serve kipinde bitebilir ve sonraki asistan turu hiç üretilmeyebilir.
+- Açıklayıcı bir soru veya bekleyen bir `question` aracı oturumu `idle` bırakır. `idle`, sunucunun bir tur çalıştırmadığı anlamına gelir. İşin bir kişiyi beklediği anlamına gelmez ve işin başarılı olduğu anlamına da gelmez.
+
+HTTP çağrısı döndükten sonra Yaver otomatik sıkıştırmanın bitmesini bekler ve sıkıştırma sürerken sahte bir Continue göndermez. Son tur gerçek bir soruysa bu beklemeyi bırakır, gözetimsiz tek bir dürtme gönderir ve ardından yalnızca son asistan turunu değerlendirir. Daha önceki bir "Shall I…?" cümlesini alıntılayan sıkıştırma özeti işin ortasında sayılır. İkinci bir sıkıştırma döngüsü iptal edilir, aynı oturumda bir kez sürdürülür, sonra `compact_loop` olarak bildirilir. Bu denetim döngüsü `src/opencode_serve.py` içindedir.
+
+Bazı üçüncü taraf sarmalayıcılar yakın bir kural ekler; kural farklıdır. `opencode-agent-sdk` oturum `idle` olana kadar bekleyebilir. Yaver bu `idle` durumunu zaten eksik sayar. `ai-sdk-provider-opencode-sdk` çağrı takılmasın diye bir soruyu reddedebilir. Bu otomatik bir reddir. Yaver bir dürtme gönderir; son tur hâlâ gerçek bir soruysa `question` hatası kaydeder.
+
+Bir düzenleyici eklentisi veya web arayüzü gibi bir TypeScript uygulaması SDK’yı kullanmalıdır. Yaver `opencode serve` ve Python istemcisinde kalır. Yaver’ı SDK’ya taşımak aynı serve kusurlarını bırakır ve bu toparlamayı düşürür.
+
 ---
 
 ## İş nasıl başlar (tüm girişler)
@@ -366,7 +384,7 @@ Yaver ile OpenCode serve aynı kullanıcı olmalıdır. Daemon git klonunu oluş
 
 Daemon, `OPENCODE_SERVE_URL` ayakta değilse `opencode serve` sürecini her zaman aynı kullanıcı olarak başlatır ve bu çocuk süreç kapanırsa yeniden başlatır. Sağlık kontrolü geçen bir serve’e dokunmaz. Kaçırılan bir sağlık yoklaması, oturumu açılmış bir iş varken hâlâ dinleyen süreci durdurmaz. OpenCode’a henüz ulaşmamış bir iş, serve cevap vermezse birkaç saniyede biter ve executing durumundan çıkar; sessiz süreç bundan sonra değiştirilebilir. Bu açılış kontrolü ajan süre bütçesini kullanmaz. Serve yeniden yüklenirken gelen iş, o yüklemenin bitmesini bekler. Sync, kataloğu OpenCode ve Claude ev dizinlerine kopyalar ve çalışan iş yoksa serve’i yeniden yükler. Bir ajanı kaydetmek veya oluşturmak kataloğu yazar ve çalışan süreci olduğu gibi bırakır. Kuyrukta bekleyen işler, yeniden yükleme beklerken, sürerken veya hata verince kuyrukta kalır. Yeniden yükleme başarılı olduktan sonra başlarlar. Hata, kayıtlı ajanların henüz yüklenmediği anlamına gelir.
 
-`User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/.local/share/yaver/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
+`User=` satırı olmayan bir systemd birimi root olarak çalışır. `sudo nohup opencode serve` de root’tur ve `sudo` `HOME` değerini `/root` yapar. `~/yaver_data/t` altındaki klon o zaman root’a aittir. Oturum kullanıcısı olarak başlayan serve bu klasöre yazamaz; ajan commit’i `~/.tmp/opencode` içine atar. İş tamamlanmış görünebilir ve birleştirme isteği açılmaz. Root olarak çalışan pano sohbeti `/root/.local/share/opencode` altında arar. Kullanıcının serve süreci ise `~/.local/share/opencode` altına yazmıştır, bu yüzden Transcript boş kalır. Windows’ta bu ayrım olmaz: daemon, klon ve OpenCode aynı hesabın altındadır.
 
 Klonların sahibi olacak oturumu Yaver birimine yazın:
 
@@ -382,7 +400,7 @@ Root ile oluşmuş ağaçlar varsa bir kez o kullanıcıya verin, sonra iki sür
 
 ```bash
 sudo chown -R yaver:yaver \
-  /home/yaver/.local/share/yaver \
+  /home/yaver/yaver_data \
   /home/yaver/.local/share/opencode
 sudo systemctl restart yaver
 ```
@@ -458,6 +476,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 |----------|----------|
 | `JIRA_HOST` | Temel URL |
 | `JIRA_API_TOKEN` | Yerinde PAT veya Cloud API jetonu |
+| `JIRA_ENABLED` | `false` pano taramasını durdurur. Adres ve jeton kayıtlıysa yorumlar yine yazılır |
 | `JIRA_EMAIL` | Yalnız Cloud/dev → HTTP Basic. Boş = Bearer PAT |
 | `JIRA_PROJECTS` | Proje anahtarları; GitLab/Azure başlığından `KAN-12` okumak için de kullanılır |
 | `JIRA_BOARD_ID` | Taranacak Agile panoları, virgülle (**zorunlu**). Her Scrum panosu ilk aktif sprinti kullanır |
@@ -487,7 +506,7 @@ Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Ge
 | `POLL_INTERVAL_SECONDS` | `30` | Jira pano taraması |
 | `MAX_CONCURRENT_JOBS` | `6` | Paralel ajan işi |
 | `DEFAULT_MODEL` | (`.env.example`) | OpenCode ve Codex ortak |
-| `YAVER_BASE_DIR` | Windows `%LOCALAPPDATA%\Yaver`; Linux `~/.local/share/yaver` | Kullanıcının yazabildiği tek klasör. Veriler `{base}/yaver`. Klonlar `{base}/t`. |
+| `YAVER_BASE_DIR` | Windows `C:\yaver_data`; Linux `~/yaver_data` | Tek klasör. Veriler `{base}/yaver`. Klonlar `{base}/t`. Boş bırakılırsa bu varsayılan kullanılır. `.env` içindeki değer durur. |
 
 ---
 

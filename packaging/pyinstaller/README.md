@@ -28,8 +28,8 @@ OpenCode and Codex are **not** inside this binary. Install them separately.
 Operator config is still **`.env` next to the executable**. Secrets are
 never baked into the binary. Copy `.env.example` → `.env` and edit.
 
-Leave `YAVER_BASE_DIR` unset for the per-user default:
-`%LOCALAPPDATA%\Yaver` on Windows, `~/.local/share/yaver` on Linux.
+Leave `YAVER_BASE_DIR` unset for the default:
+`C:\yaver_data` on Windows, `~/yaver_data` on Linux.
 Data is `{base}/yaver` and clones are `{base}/t`. Plans are
 `{base}/yaver/plans/`.
 

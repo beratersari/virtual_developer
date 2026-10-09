@@ -86,6 +86,17 @@ def test_poll_board_skipped_when_jira_disabled(poller, monkeypatch):
     assert not (poll_snapshot_store.snapshot().get("error") or "").strip()
 
 
+def test_poll_board_stays_idle_when_disabled_even_if_jira_configured(poller, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_enabled", False)
+    monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "jira_api_token", "token")
+    poller.client = MagicMock()
+    assert poller.poll_board() == []
+    poller.client.get_active_sprint.assert_not_called()
+
+
 def test_poll_board_no_sprint(poller):
     poller.client = MagicMock()
     poller.client.get_active_sprint.return_value = None

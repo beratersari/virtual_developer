@@ -41,7 +41,7 @@ fi
 if vd_port_listening "$SERVE_PORT"; then
   echo "Port $SERVE_PORT is in use; waiting for OpenCode serve health..."
 else
-  LOG_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/yaver/yaver/logs"
+  LOG_DIR="${HOME}/yaver_data/yaver/logs"
   mkdir -p "$LOG_DIR"
   LOG="$LOG_DIR/opencode-serve.log"
   echo "Starting OpenCode serve in $ROOT (log $LOG)..."

@@ -1,3 +1,15 @@
+# Yaver 0.9.82
+
+A fresh install that leaves `YAVER_BASE_DIR` unset keeps data in `C:\yaver_data` on Windows and `~/yaver_data` on Linux. Data is `{base}/yaver` and clones are `{base}/t`. A path already written in `.env` stays, including `YAVER_DATA_DIR` and `TEMP_DIR_BASE`. Packages already published, through 0.9.81, keep the default they shipped with. The Linux release package leaves `YAVER_BASE_DIR` commented. It no longer writes `YAVER_BASE_DIR=/var/tmp/yaver`.
+
+`JIRA_ENABLED=false` stops the board poller. Plan, progress, error, and completion comments still post when `JIRA_HOST` and `JIRA_API_TOKEN` are set, including a scheduled issue and a newly created issue. With no host or token, those comments stay off.
+
+Stopping Yaver keeps in-flight jobs. The next start resumes them. Jobs an older stop already marked cancelled are queued again. Dashboard Stop still leaves a job cancelled.
+
+A scheduled run on a ticket that already has a ready plan posts why it did not start. The poller still stays quiet.
+
+Opening or reusing a merge request or pull request posts the agent's writeup on that review. This includes a Jira job and a run that still delivers commits after an agent error. A GitLab or Azure comment job already replies on that review, so it does not get a second note. A failed note does not fail delivery.
+
 # Yaver 0.9.81
 
 Opening a scheduled ticket shows the prompt, the repositories and branches, the mode, the model, and the scheduled time before any run exists. The jobs list says the run has not started yet.

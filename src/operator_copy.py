@@ -56,6 +56,16 @@ PLAN_NEXT_AZURE = (
     "* Gösterge panelinde Başlat düğmesi yok"
 )
 
+PLAN_READY_SCHEDULE_WAIT = (
+    "Bu zamanlanmış çalışma başlamadı. Kayıtta hazır bir plan var "
+    "(*plan_ready*). Sonuç bu kayda yazılmadı.\n\n"
+    "* *Uygulamak* için: kayıt *Devam Ediyor* iken *plan_ready* etiketini "
+    "*plan_execute* yapın.\n"
+    "* *Güncellemek* için: *plan_ready* etiketini kaldırın, *plan_refactor* "
+    "ekleyin ve beni etiketleyen bir yorum yazın.\n"
+    "* Veya *yeni* bir *Mode: build* kaydı açın (aynı depo ve dallar)."
+)
+
 PLAN_NEXT_JIRA = (
     "* Planı bu yorumda inceleyin\n"
     "* *Güncellemek* için: {{noformat}}plan_ready{{noformat}} etiketini kaldırın, "

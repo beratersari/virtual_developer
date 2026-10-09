@@ -1523,7 +1523,7 @@ def test_shutdown_and_recover(processor, state_manager):
     processor._contexts["SH-2"] = {"git": None, "runner": None}
     n = processor.shutdown_processing(reason="test stop")
     assert n >= 1
-    assert state_manager.get_state("SH-1").status == TaskStatus.CANCELLED
+    assert state_manager.get_state("SH-1").status == TaskStatus.EXECUTING
 
     state_manager.create_state("ORPH-1", "s", "d")
     state_manager.update_state("ORPH-1", status=TaskStatus.PLANNING)
