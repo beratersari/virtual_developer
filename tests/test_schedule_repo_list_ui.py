@@ -80,6 +80,12 @@ def test_saved_repo_search_stays_closed_until_click():
     assert "onClick" in field
     assert "onFocus" not in field
     assert "autoFocus" not in field
+    click = field.split("onClick=", 1)[1].split("onChange=", 1)[0]
+    assert "setQuery" not in click
+    assert "repoSearchValue" not in click
+    assert "repoSearchQuery" in search
+    assert "repoSearchClearsOnBlur" in search
+    assert "inputRef.current?.select()" in search
     dialog = LIST.read_text(encoding="utf-8").split("<SavedRepoSearch", 1)[1].split("/>", 1)[0]
     assert "autoFocus" not in dialog
 

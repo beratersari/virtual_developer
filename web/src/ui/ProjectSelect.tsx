@@ -49,6 +49,16 @@ export function directRepoUrl(
   return ''
 }
 
+/** Search needle for the open list. A click that has not typed yet matches every saved repo. */
+export function repoSearchQuery(typed: string, editing: boolean): string {
+  return editing ? typed : ''
+}
+
+/** A blur clears the chosen repository only after the field was edited empty. */
+export function repoSearchClearsOnBlur(typed: string, editing: boolean): boolean {
+  return editing && !(typed || '').trim()
+}
+
 /** One field: the typed text while open, the saved name when one is chosen, otherwise the URL. */
 export function repoSearchValue(
   query: string,
@@ -118,8 +128,18 @@ export function SavedRepoSearch({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const [query, setQuery] = useState('')
+  const [editing, setEditingState] = useState(false)
+  const editingRef = useRef(false)
+  const setEditing = (value: boolean) => {
+    editingRef.current = value
+    setEditingState(value)
+  }
   const [open, setOpen] = useState(false)
   const [box, setBox] = useState<RepoSearchListPlacement | null>(null)
+  useLayoutEffect(() => {
+    if (!open || editing) return
+    inputRef.current?.select()
+  }, [open, editing])
   useLayoutEffect(() => {
     if (!open) return
     const place = () => {
@@ -142,18 +162,21 @@ export function SavedRepoSearch({
     }
   }, [open])
   const selected = projects.find((project) => project.url === selectedUrl)
-  const { pickable, taken } = searchSavedRepos(projects, query, exclude)
+  const filterQuery = repoSearchQuery(query, editing)
+  const { pickable, taken } = searchSavedRepos(projects, filterQuery, exclude)
   const pick = (url: string) => {
     onPick(url)
     setQuery('')
+    setEditing(false)
     setOpen(false)
   }
   const chooseAll = () => {
     if (!onSelectAll) return
-    const urls = selectAllMatching(projects, query, exclude)
+    const urls = selectAllMatching(projects, filterQuery, exclude)
     if (urls.length === 0) return
     onSelectAll(urls)
     setQuery('')
+    setEditing(false)
     setOpen(false)
   }
   const commitTypedUrl = (text: string) => {
@@ -162,6 +185,7 @@ export function SavedRepoSearch({
     if (!direct) return false
     onDirectUrl(direct)
     setQuery('')
+    setEditing(false)
     setOpen(false)
     return true
   }
@@ -179,12 +203,10 @@ export function SavedRepoSearch({
           aria-autocomplete="list"
           placeholder="Name or URL"
           autoComplete="off"
-          value={repoSearchValue(query, open, selected, selectedUrl)}
-          onClick={() => {
-            if (!open) setQuery(repoSearchValue('', false, selected, selectedUrl))
-            setOpen(true)
-          }}
+          value={editing ? query : repoSearchValue('', false, selected, selectedUrl)}
+          onClick={() => setOpen(true)}
           onChange={(event) => {
+            setEditing(true)
             setQuery(event.target.value)
             setOpen(true)
           }}
@@ -201,19 +223,27 @@ export function SavedRepoSearch({
             ) {
               return
             }
-            if (commitTypedUrl(query)) return
+            const typed = event.currentTarget.value
+            if (editingRef.current && commitTypedUrl(typed)) return
+            if (repoSearchClearsOnBlur(typed, editingRef.current)) {
+              if (onDirectUrl) onDirectUrl('')
+              else onPick('')
+            }
             setQuery('')
+            setEditing(false)
             setOpen(false)
           }}
           onKeyDown={(event) => {
             if (event.key === 'Escape') {
               setQuery('')
+              setEditing(false)
               setOpen(false)
               return
             }
             if (event.key !== 'Enter') return
             event.preventDefault()
-            if (commitTypedUrl(query)) return
+            const typed = event.currentTarget.value
+            if (editingRef.current && commitTypedUrl(typed)) return
             if (pickable.length === 1) pick(pickable[0].url)
           }}
         />

@@ -12,7 +12,9 @@ import {
 import {
   directRepoUrl,
   projectMatchesQuery,
+  repoSearchClearsOnBlur,
   repoSearchListPlacement,
+  repoSearchQuery,
   repoSearchValue,
   searchSavedRepos,
   selectAllMatching,
@@ -211,6 +213,25 @@ if (repoSearchValue('', false, projects[0], projects[0].url) !== 'orders-api') {
 }
 if (repoSearchValue('', false, undefined, pasted) !== pasted) {
   throw new Error('a pasted url that is not saved disappeared')
+}
+if (repoSearchQuery('orders-api', false) !== '') {
+  throw new Error('opening a filled repository field searched for its name')
+}
+if (repoSearchQuery('orders', true) !== 'orders') {
+  throw new Error('typing did not search')
+}
+const opened = searchSavedRepos(projects, repoSearchQuery('orders-api', false), [])
+if (opened.pickable.length !== projects.length) {
+  throw new Error('a filled field hid the other repositories')
+}
+if (!repoSearchClearsOnBlur('', true)) {
+  throw new Error('clearing the field kept the repository')
+}
+if (repoSearchClearsOnBlur('', false)) {
+  throw new Error('opening the field without typing cleared the repository')
+}
+if (repoSearchClearsOnBlur('orders-web', true)) {
+  throw new Error('a typed name cleared the previous repository')
 }
 if (directRepoUrl('  git@gitlab.com:acme/new.git ', projects) !== 'git@gitlab.com:acme/new.git') {
   throw new Error('a pasted git@ url was dropped')
