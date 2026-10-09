@@ -894,7 +894,6 @@ export function SettingsPage() {
     setSaving(true)
     setError(null)
     try {
-      if (!draft.jira_board_id.trim()) throw new Error('Board ID is required')
       for (const r of draft.gitlab_cred_rows) {
         if (r.host.trim() && !r.pat_configured && !r.pat.trim()) {
           throw new Error(`GitLab host "${r.host}" needs a PAT`)

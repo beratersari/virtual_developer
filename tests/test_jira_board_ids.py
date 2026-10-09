@@ -223,3 +223,13 @@ def test_settings_board_field_allows_a_comma():
     assert 'inputMode="numeric"' not in text
     assert "separated by commas" in text
     assert "first active sprint" in text
+
+
+def test_settings_save_does_not_require_a_board_id():
+    text = Path("web/src/pages/settings/SettingsPage.tsx").read_text(encoding="utf-8")
+    save = text.split("const onSave = async () => {", 1)[1].split(
+        "const body: Parameters<typeof patchSettings>[0] = {}", 1
+    )[0]
+    assert "Board ID is required" not in save
+    assert 'needs a PAT' in save
+    assert "Azure DevOps host" in save
