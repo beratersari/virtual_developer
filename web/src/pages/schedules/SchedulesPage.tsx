@@ -36,9 +36,11 @@ import { StatusBadge } from '../../ui/StatusBadge'
 import {
   datetimeLocalToNaiveIso,
   formatScheduleWhen,
-  joinDatetimeLocal,
   localNaiveNowIso,
+  nextScheduleWhen,
+  scheduleClockDraft,
   splitDatetimeLocal,
+  TIME_24H_HTML_PATTERN,
 } from '../../util/time'
 import { withListPage } from '../../util/listPageUrl'
 import {
@@ -1489,7 +1491,11 @@ function ScheduleWhenField({
   onChange: (v: string) => void
 }) {
   const { date, time } = splitDatetimeLocal(value)
+  const [dateDraft, setDateDraft] = useState(date)
   const [timeDraft, setTimeDraft] = useState(time)
+  useEffect(() => {
+    if (date) setDateDraft(date)
+  }, [date])
   useEffect(() => {
     if (time) setTimeDraft(time)
   }, [time])
@@ -1499,10 +1505,18 @@ function ScheduleWhenField({
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="date"
-          value={date}
-          onChange={(e) =>
-            onChange(joinDatetimeLocal(e.target.value, timeDraft || time || '00:00'))
-          }
+          value={dateDraft}
+          required
+          onChange={(e) => {
+            const picked = e.target.value
+            setDateDraft(picked)
+            if (!picked.trim()) {
+              onChange('')
+              return
+            }
+            const next = nextScheduleWhen(picked, timeDraft)
+            if (next !== undefined) onChange(next)
+          }}
         />
         <input
           type="text"
@@ -1510,15 +1524,15 @@ function ScheduleWhenField({
           autoComplete="off"
           spellCheck={false}
           placeholder="14:30"
-          pattern="(?:[01]\d|2[0-3]):[0-5]\d"
+          pattern={TIME_24H_HTML_PATTERN}
           title="24-hour time, HH:mm"
+          required
           value={timeDraft}
           onChange={(e) => {
-            const next = e.target.value.replace(/[^\d:]/g, '').slice(0, 5)
-            setTimeDraft(next)
-            if (date && joinDatetimeLocal(date, next)) {
-              onChange(joinDatetimeLocal(date, next))
-            }
+            const draft = scheduleClockDraft(e.target.value)
+            setTimeDraft(draft)
+            const next = nextScheduleWhen(dateDraft, e.target.value)
+            if (next !== undefined) onChange(next)
           }}
         />
       </div>

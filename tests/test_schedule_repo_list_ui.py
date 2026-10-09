@@ -96,6 +96,27 @@ def test_repository_list_opens_saved_projects():
     assert 'to="/settings/jira"' not in text
 
 
+def test_schedule_clock_accepts_a_single_digit_hour():
+    page = (ROOT / "web" / "src" / "pages" / "schedules" / "SchedulesPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    field = page.split("function ScheduleWhenField", 1)[1].split("function WorkerBlock", 1)[0]
+    assert "TIME_24H_HTML_PATTERN" in field
+    assert "required" in field
+    assert "noValidate" not in field
+    assert "timeDraft || time || '00:00'" not in field
+    assert "(?:[01]\\d|2[0-3])" not in field
+    completed = subprocess.run(
+        ["npx", "tsx", "src/util/time.test.ts"],
+        cwd=ROOT / "web",
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=sys.platform == "win32",
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_select_all_adds_the_matching_repositories():
     search = (ROOT / "web" / "src" / "ui" / "ProjectSelect.tsx").read_text(encoding="utf-8")
     assert "Select all" in search

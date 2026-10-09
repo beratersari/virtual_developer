@@ -11,9 +11,12 @@ import {
   formatDashboardClock,
   formatElapsedBetween,
   formatElapsedSeconds,
+  nextScheduleWhen,
   normalizeTime24h,
   parseTimeMs,
+  scheduleClockDraft,
   splitDatetimeLocal,
+  timeMatchesSchedulePattern,
 } from './time'
 
 function assert(cond: unknown, msg: string) {
@@ -52,6 +55,20 @@ assert(normalizeTime24h('23:59') === '23:59', 'late evening')
 assert(normalizeTime24h('24:00') === '', 'reject 24:00')
 assert(normalizeTime24h('2:30 PM') === '', 'reject am/pm')
 assert(joinDatetimeLocal('2026-08-28', '14:30') === '2026-08-28T14:30', 'join')
+assert(timeMatchesSchedulePattern('9:30'), 'one digit hour matches the clock pattern')
+assert(timeMatchesSchedulePattern('09:30'), 'padded hour matches the clock pattern')
+assert(timeMatchesSchedulePattern('14:30'), 'afternoon matches the clock pattern')
+assert(!timeMatchesSchedulePattern('9'), 'a partial hour does not match')
+assert(!timeMatchesSchedulePattern('14:3'), 'a partial minute does not match')
+assert(!timeMatchesSchedulePattern(''), 'an empty clock does not match')
+assert(!timeMatchesSchedulePattern('24:00'), '24:00 does not match')
+assert(scheduleClockDraft('9:30') === '09:30', 'a one digit hour is shown padded')
+assert(scheduleClockDraft('14:30') === '14:30', 'a padded hour stays')
+assert(scheduleClockDraft('9') === '9', 'a partial hour stays as typed')
+assert(scheduleClockDraft('') === '', 'an empty clock stays empty')
+assert(nextScheduleWhen('2026-08-28', '9:30') === '2026-08-28T09:30', '9:30 can be scheduled')
+assert(nextScheduleWhen('2026-08-28', '') === '', 'a cleared clock clears the schedule')
+assert(nextScheduleWhen('2026-08-28', '9') === undefined, 'a partial clock keeps the previous time')
 assert(formatScheduleWhen('2026-08-28T14:30:00') === '2026-08-28 14:30', 'list 24h')
 assert(!formatScheduleWhen('2026-08-28T14:30:00').toLowerCase().includes('pm'), 'no pm')
 assert(!formatScheduleWhen('2026-08-28T14:30:00').toLowerCase().includes('am'), 'no am')

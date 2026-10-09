@@ -126,6 +126,31 @@ export function joinDatetimeLocal(date: string, time: string): string {
   return `${d}T${t}`
 }
 
+/** HTML pattern for the schedule clock. The browser anchors it, so this has no ^ or $. */
+export const TIME_24H_HTML_PATTERN = '(?:[01]?\\d|2[0-3]):[0-5]\\d'
+
+export function timeMatchesSchedulePattern(value: string): boolean {
+  return new RegExp(`^${TIME_24H_HTML_PATTERN}$`).test(value)
+}
+
+/** Digits and colon only. A complete clock is shown as zero-padded HH:mm. */
+export function scheduleClockDraft(raw: string): string {
+  const next = (raw || '').replace(/[^\d:]/g, '').slice(0, 5)
+  return normalizeTime24h(next) || next
+}
+
+/**
+ * Next datetime-local value after a clock keystroke.
+ * An empty clock clears it. A partial clock returns undefined so the previous time stays.
+ */
+export function nextScheduleWhen(date: string, typed: string): string | undefined {
+  const draft = scheduleClockDraft(typed)
+  if (!draft.trim()) return ''
+  const joined = joinDatetimeLocal(date, draft)
+  if (!joined) return undefined
+  return joined
+}
+
 /** Schedule list label: ``2026-08-28 14:30`` (24-hour, no am/pm). */
 export function formatScheduleWhen(iso: string | null | undefined): string {
   const raw = (iso || '').trim()
