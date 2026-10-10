@@ -1,5 +1,15 @@
 import type { JobItem } from '../api/types'
 
+const ISSUE_KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/
+
+/** Count label. An issue key is shown in uppercase. Other text stays as typed. */
+export function jobsFilterEcho(filter: string): string {
+  const text = filter.trim()
+  if (!text) return ''
+  if (ISSUE_KEY.test(text)) return text.toUpperCase()
+  return text
+}
+
 /** Created/started stamp for list order. Jobs are not grouped by issue key. */
 export function jobCreatedStamp(job: Pick<JobItem, 'started_at' | 'updated_at'>): string {
   return String(job.started_at || job.updated_at || '')

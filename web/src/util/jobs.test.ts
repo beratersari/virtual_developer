@@ -1,7 +1,7 @@
 /**
  * Run: npx tsx src/util/jobs.test.ts
  */
-import { sortJobsByCreatedAt } from './jobs'
+import { jobsFilterEcho, sortJobsByCreatedAt } from './jobs'
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg)
@@ -18,5 +18,8 @@ assert(ordered[0].job_id === 'live-kan-2', 'live job first regardless of issue k
 assert(ordered[1].job_id === 'new-kan-9', 'newest created after live')
 assert(ordered[2].job_id === 'mid-kan-1', 'middle created next')
 assert(ordered[3].job_id === 'old-kan-1', 'oldest last — not grouped by KAN-1')
+assert(jobsFilterEcho('kan-12') === 'KAN-12', 'an issue key is uppercased')
+assert(jobsFilterEcho('rate limit') === 'rate limit', 'free text stays as typed')
+assert(jobsFilterEcho('  ') === '', 'a blank filter adds nothing')
 
 console.log('jobs.test.ts: ok')

@@ -220,8 +220,8 @@ export function JobOverview({
                     <td className="px-3 py-2 font-mono">_{r.label || `retry${r.attempt_number}`}</td>
                     <td className="px-3 py-2">{r.reason || '—'}</td>
                     <td className="px-3 py-2 font-mono">{r.return_code ?? '—'}</td>
-                    <td className="max-w-xs truncate px-3 py-2 font-mono">
-                      {r.error_message ? r.error_message.slice(0, 160) : '—'}
+                    <td className="px-3 py-2 font-mono whitespace-pre-wrap break-words">
+                      {r.error_message || '—'}
                     </td>
                     <td className="px-3 py-2 font-mono text-text-muted">
                       {r.failed_session_log_path ? pathBasename(r.failed_session_log_path) : '—'}

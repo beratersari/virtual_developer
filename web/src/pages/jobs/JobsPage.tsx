@@ -10,7 +10,7 @@ import {
 } from './queueRefresh'
 import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
-import { sortJobsByCreatedAt } from '../../util/jobs'
+import { jobsFilterEcho, sortJobsByCreatedAt } from '../../util/jobs'
 import {
   jobIsDeletable,
   jobMatchesFilter,
@@ -68,6 +68,7 @@ export function JobsPage() {
     () => peekQueuePayload()?.queued_count ?? 0,
   )
   const [queueReady, setQueueReady] = useState(() => peekQueuePayload() != null)
+  const [queueError, setQueueError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -109,10 +110,14 @@ export function JobsPage() {
       setQueueItems(rows)
       setQueueQueued(count)
       setQueueReady(true)
+      setQueueError(null)
     } catch (e) {
       if (signal.aborted || isAbortError(e)) return
       // A failed refresh must not wipe rows that are already on screen.
-      if (req === queueReq.current) setQueueReady(true)
+      // The first failure has no rows, so it must not look like an empty queue.
+      if (req === queueReq.current) {
+        setQueueError(e instanceof Error ? e.message : 'Could not load the queue')
+      }
     } finally {
       if (queueFlight.settle(signal)) void loadQueue('tick')
     }
@@ -345,7 +350,7 @@ export function JobsPage() {
           <div className="flex items-center gap-2 text-xs text-text-muted">
             <span>
               {from}–{to} of {total}
-              {debouncedFilter ? ` · ${debouncedFilter.toUpperCase()}` : ''}
+              {debouncedFilter ? ` · ${jobsFilterEcho(debouncedFilter)}` : ''}
             </span>
             <button
               type="button"
@@ -368,7 +373,7 @@ export function JobsPage() {
         {showQueue && (
           <span className="text-xs text-text-muted">
             {visibleQueue.length} waiting
-            {debouncedFilter ? ` · ${debouncedFilter.toUpperCase()}` : ''}
+            {debouncedFilter ? ` · ${jobsFilterEcho(debouncedFilter)}` : ''}
           </span>
         )}
       </div>
@@ -392,8 +397,16 @@ export function JobsPage() {
         </Alert>
       )}
 
+      {showQueue && queueError && visibleQueue.length > 0 && (
+        <Alert>{queueError}</Alert>
+      )}
+
       {showQueue ? (
-        queuePlaceholder(queueReady, visibleQueue.length) === 'loading' ? (
+        visibleQueue.length === 0 && queueError ? (
+          <div className="vd-panel px-5 py-10 text-center text-sm text-text-muted">
+            {queueError}
+          </div>
+        ) : queuePlaceholder(queueReady, visibleQueue.length) === 'loading' ? (
           <div
             className="vd-panel px-5 py-10 text-center text-sm text-text-muted"
             aria-busy="true"

@@ -341,17 +341,15 @@ export function SchedulesPage() {
             </div>
           </li>
         ))}
-        {(listPending || rows.length === 0) && (
-          <li className="py-6 text-text-muted" aria-busy={listPending && !error}>
-            {listPending && !error ? (
-              <span className="inline-flex items-center gap-2">
-                <Spinner /> Loading schedules…
-              </span>
-            ) : (
-              'Nothing scheduled.'
-            )}
+        {listPending && !error ? (
+          <li className="py-6 text-text-muted" aria-busy="true">
+            <span className="inline-flex items-center gap-2">
+              <Spinner /> Loading schedules…
+            </span>
           </li>
-        )}
+        ) : rows.length === 0 && !error ? (
+          <li className="py-6 text-text-muted">Nothing scheduled.</li>
+        ) : null}
       </ul>
       <ConfirmDialog
         open={Boolean(runId)}
@@ -366,6 +364,9 @@ export function SchedulesPage() {
             await dispatchSchedule(runId)
             setRunId(null)
             await reload()
+          } catch (e) {
+            setRunId(null)
+            setError(e instanceof Error ? e.message : 'Could not run this schedule')
           } finally {
             setBusy(false)
           }
@@ -397,6 +398,9 @@ export function SchedulesPage() {
             await cancelSchedule(cancelId)
             setCancelId(null)
             await reload()
+          } catch (e) {
+            setCancelId(null)
+            setError(e instanceof Error ? e.message : 'Could not cancel this schedule')
           } finally {
             setBusy(false)
           }

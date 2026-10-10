@@ -19,6 +19,10 @@ import type {
 } from '../../api/types'
 import { useLive } from '../../app/live'
 import { azureCollectionProblem } from './azureCollection'
+import {
+  parseSettingsNumber,
+  requireSettingsNumber,
+} from './settingsNumbers'
 import { ModesPanel } from './ModesPanel'
 import {
   editorIndexAfterRemoval,
@@ -47,7 +51,7 @@ type Draft = {
   jira_api_token: string
   jira_board_id: string
   jira_projects: string
-  poll_interval_seconds: number
+  poll_interval_seconds: number | null
   jira_trigger_user: string
   jira_trigger_label: string
   gitlab_trigger_user: string
@@ -55,11 +59,11 @@ type Draft = {
   gitlab_webhook_enabled: boolean
   gitlab_webhook_secret: string
   azure_webhook_enabled: boolean
-  max_concurrent_jobs: number
-  temp_clone_max_age_days: number
-  agent_task_timeout_seconds: number
-  agent_task_max_retries: number
-  agent_task_max_incomplete_retries: number
+  max_concurrent_jobs: number | null
+  temp_clone_max_age_days: number | null
+  agent_task_timeout_seconds: number | null
+  agent_task_max_retries: number | null
+  agent_task_max_incomplete_retries: number | null
   default_model: string
   default_review_model: string
   agent_backend: string
@@ -146,7 +150,7 @@ function savedShape(d: Draft) {
     jira_api_token: d.jira_api_token.trim(),
     jira_board_id: d.jira_board_id.trim(),
     jira_projects: d.jira_projects.trim(),
-    poll_interval_seconds: Number(d.poll_interval_seconds),
+    poll_interval_seconds: d.poll_interval_seconds,
     jira_trigger_user: d.jira_trigger_user,
     jira_trigger_label: d.jira_trigger_label,
     gitlab_trigger_user: d.gitlab_trigger_user,
@@ -154,11 +158,11 @@ function savedShape(d: Draft) {
     gitlab_webhook_enabled: d.gitlab_webhook_enabled,
     gitlab_webhook_secret: d.gitlab_webhook_secret.trim(),
     azure_webhook_enabled: d.azure_webhook_enabled,
-    max_concurrent_jobs: Number(d.max_concurrent_jobs),
-    temp_clone_max_age_days: Number(d.temp_clone_max_age_days),
-    agent_task_timeout_seconds: Number(d.agent_task_timeout_seconds),
-    agent_task_max_retries: Number(d.agent_task_max_retries),
-    agent_task_max_incomplete_retries: Number(d.agent_task_max_incomplete_retries),
+    max_concurrent_jobs: d.max_concurrent_jobs,
+    temp_clone_max_age_days: d.temp_clone_max_age_days,
+    agent_task_timeout_seconds: d.agent_task_timeout_seconds,
+    agent_task_max_retries: d.agent_task_max_retries,
+    agent_task_max_incomplete_retries: d.agent_task_max_incomplete_retries,
     default_model: d.default_model.trim(),
     default_review_model: d.default_review_model.trim(),
     agent_backend: d.agent_backend,
@@ -781,6 +785,7 @@ export function SettingsPage() {
   >({ state: 'idle' })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
@@ -848,7 +853,7 @@ export function SettingsPage() {
       })
       .catch((e: unknown) => {
         if (ac.signal.aborted) return
-        setError(e instanceof Error ? e.message : 'Could not load settings')
+        setLoadError(e instanceof Error ? e.message : 'Could not load settings')
       })
     return () => ac.abort()
   }, [])
@@ -914,7 +919,10 @@ export function SettingsPage() {
       if (dirtyKeys.has('jira_board_id')) body.jira_board_id = draft.jira_board_id.trim()
       if (dirtyKeys.has('jira_projects')) body.jira_projects = draft.jira_projects.trim()
       if (dirtyKeys.has('poll_interval_seconds')) {
-        body.poll_interval_seconds = Number(draft.poll_interval_seconds)
+        body.poll_interval_seconds = requireSettingsNumber(
+          'poll_interval_seconds',
+          draft.poll_interval_seconds,
+        )
       }
       if (dirtyKeys.has('jira_trigger_user')) {
         body.jira_trigger_user = draft.jira_trigger_user
@@ -939,19 +947,32 @@ export function SettingsPage() {
       }
 
       if (dirtyKeys.has('max_concurrent_jobs')) {
-        body.max_concurrent_jobs = Number(draft.max_concurrent_jobs)
+        body.max_concurrent_jobs = requireSettingsNumber(
+          'max_concurrent_jobs',
+          draft.max_concurrent_jobs,
+        )
       }
       if (dirtyKeys.has('temp_clone_max_age_days')) {
-        body.temp_clone_max_age_days = Number(draft.temp_clone_max_age_days)
+        body.temp_clone_max_age_days = requireSettingsNumber(
+          'temp_clone_max_age_days',
+          draft.temp_clone_max_age_days,
+        )
       }
       if (dirtyKeys.has('agent_task_timeout_seconds')) {
-        body.agent_task_timeout_seconds = Number(draft.agent_task_timeout_seconds)
+        body.agent_task_timeout_seconds = requireSettingsNumber(
+          'agent_task_timeout_seconds',
+          draft.agent_task_timeout_seconds,
+        )
       }
       if (dirtyKeys.has('agent_task_max_retries')) {
-        body.agent_task_max_retries = Number(draft.agent_task_max_retries)
+        body.agent_task_max_retries = requireSettingsNumber(
+          'agent_task_max_retries',
+          draft.agent_task_max_retries,
+        )
       }
       if (dirtyKeys.has('agent_task_max_incomplete_retries')) {
-        body.agent_task_max_incomplete_retries = Number(
+        body.agent_task_max_incomplete_retries = requireSettingsNumber(
+          'agent_task_max_incomplete_retries',
           draft.agent_task_max_incomplete_retries,
         )
       }
@@ -1055,7 +1076,9 @@ export function SettingsPage() {
   dirtyRef.current = dirty
 
   if (!settings || !draft) {
-    return <p className="text-sm text-text-muted">{error || 'Loading settings…'}</p>
+    return (
+      <p className="text-sm text-text-muted">{loadError || 'Loading settings…'}</p>
+    )
   }
 
   const saveButton = (
@@ -1220,8 +1243,10 @@ export function SettingsPage() {
         <span>Poll interval (seconds)</span>
         <input
           type="number"
-          value={draft.poll_interval_seconds}
-          onChange={(e) => mark('poll_interval_seconds', Number(e.target.value))}
+          value={draft.poll_interval_seconds ?? ''}
+          onChange={(e) =>
+            mark('poll_interval_seconds', parseSettingsNumber(e.target.value))
+          }
         />
         <span className="text-xs text-text-muted">
           How often the poller reads the board.
@@ -1410,8 +1435,8 @@ export function SettingsPage() {
           GitLab username, no @. Start a job with @name /yaver on a
           merge-request comment. Mention without /yaver gets a usage note
           in the thread. Comments from this user are ignored. Comma-separated
-          if there is more than one. /review and /ask stay silent unless
-          Code review (below) is on.
+          if there is more than one. @name /review and @name /ask start a
+          code review.
         </span>
       </label>
       </SettingsGroup>
@@ -1873,8 +1898,10 @@ export function SettingsPage() {
         <span>Max concurrent jobs</span>
         <input
           type="number"
-          value={draft.max_concurrent_jobs}
-          onChange={(e) => mark('max_concurrent_jobs', Number(e.target.value))}
+          value={draft.max_concurrent_jobs ?? ''}
+          onChange={(e) =>
+            mark('max_concurrent_jobs', parseSettingsNumber(e.target.value))
+          }
         />
       </label>
       <label className="field">
@@ -1883,9 +1910,9 @@ export function SettingsPage() {
           type="number"
           min={0}
           max={3650}
-          value={draft.temp_clone_max_age_days}
+          value={draft.temp_clone_max_age_days ?? ''}
           onChange={(e) =>
-            mark('temp_clone_max_age_days', Number(e.target.value))
+            mark('temp_clone_max_age_days', parseSettingsNumber(e.target.value))
           }
         />
         <span className="text-xs text-text-muted">
@@ -1900,8 +1927,10 @@ export function SettingsPage() {
           type="number"
           min={30}
           max={86400}
-          value={draft.agent_task_timeout_seconds}
-          onChange={(e) => mark('agent_task_timeout_seconds', Number(e.target.value))}
+          value={draft.agent_task_timeout_seconds ?? ''}
+          onChange={(e) =>
+            mark('agent_task_timeout_seconds', parseSettingsNumber(e.target.value))
+          }
         />
         <span className="text-xs text-text-muted">
           Seconds allowed for one agent attempt. A saved change applies
@@ -1918,8 +1947,10 @@ export function SettingsPage() {
           type="number"
           min={0}
           max={64}
-          value={draft.agent_task_max_retries}
-          onChange={(e) => mark('agent_task_max_retries', Number(e.target.value))}
+          value={draft.agent_task_max_retries ?? ''}
+          onChange={(e) =>
+            mark('agent_task_max_retries', parseSettingsNumber(e.target.value))
+          }
         />
         <span className="text-xs text-text-muted">
           Maximum extra attempts after a timeout or error. 0 means no retry.
@@ -1931,9 +1962,12 @@ export function SettingsPage() {
           type="number"
           min={0}
           max={256}
-          value={draft.agent_task_max_incomplete_retries}
+          value={draft.agent_task_max_incomplete_retries ?? ''}
           onChange={(e) =>
-            mark('agent_task_max_incomplete_retries', Number(e.target.value))
+            mark(
+              'agent_task_max_incomplete_retries',
+              parseSettingsNumber(e.target.value),
+            )
           }
         />
         <span className="text-xs text-text-muted">
@@ -1964,6 +1998,14 @@ export function SettingsPage() {
         confirmLabel="OK"
         onConfirm={() => setError(null)}
         onCancel={() => setError(null)}
+      />
+      <ConfirmDialog
+        open={loadError != null && error == null}
+        title="Could not load settings"
+        body={loadError || ''}
+        confirmLabel="OK"
+        onConfirm={() => setLoadError(null)}
+        onCancel={() => setLoadError(null)}
       />
     </section>
   )
