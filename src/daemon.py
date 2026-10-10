@@ -318,6 +318,7 @@ class JiraAgentDaemon:
         from src.opencode_serve_supervisor import blocking_issue_keys, supervisor
 
         supervisor.bind(live_jobs=lambda: blocking_issue_keys(self.processor))
+        supervisor.set_after_idle_reload(self._wake_queue_after_idle_reload)
         self._opencode_serve = supervisor
         try:
             result = supervisor.ensure_started()
@@ -327,6 +328,30 @@ class JiraAgentDaemon:
         logger.info(
             f"OpenCode serve {result.get('status')}: {result.get('message')}"
         )
+
+    def _wake_queue_after_idle_reload(self) -> None:
+        """Start queued work after serve reloaded with nobody in flight.
+
+        A row left queued is never started by the poller. This runs on the
+        serve watch task, which is already on the daemon loop.
+        """
+        proc = getattr(self, "processor", None)
+        dispatch = getattr(proc, "dispatch_queue", None)
+        if not callable(dispatch):
+            return
+
+        async def _dispatch() -> None:
+            try:
+                await dispatch()
+            except Exception as exc:
+                logger.exception(
+                    f"Queue dispatch after OpenCode reload failed: {exc}", exc
+                )
+
+        try:
+            asyncio.get_running_loop().create_task(_dispatch())
+        except RuntimeError:
+            logger.warning("Queue was not started after OpenCode reload")
 
     async def _watch_opencode_serve(self) -> None:
         sup = getattr(self, "_opencode_serve", None)

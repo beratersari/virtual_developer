@@ -229,6 +229,52 @@ async def test_watch_reloads_after_the_job_finishes():
 
 
 @pytest.mark.asyncio
+async def test_watch_wakes_the_queue_after_an_idle_reload():
+    sup, _killed, spawned, _healthy, jobs, _listeners = _supervisor(
+        interval=0.01, jobs=["KAN-1"]
+    )
+    assert sup.request_reload()["status"] == "deferred"
+    jobs["keys"] = []
+    kicked: list[str] = []
+    sup.set_after_idle_reload(lambda: kicked.append("go"))
+    running = {"on": True}
+
+    async def stop() -> None:
+        await asyncio.sleep(0.08)
+        running["on"] = False
+
+    await asyncio.gather(sup.watch(lambda: running["on"]), stop())
+    assert spawned == [7]
+    assert sup.status()["status"] == "reloaded"
+    assert kicked == ["go"]
+
+
+@pytest.mark.asyncio
+async def test_watch_does_not_wake_the_queue_when_reload_fails():
+    def explode():
+        raise FileNotFoundError("opencode")
+
+    sup, _killed, _spawned, _healthy, _jobs, _listeners = _supervisor(
+        healthy=False,
+        listeners=[],
+        spawn=explode,
+        interval=0.01,
+    )
+    assert sup.request_reload()["status"] == "failed"
+    kicked: list[str] = []
+    sup.set_after_idle_reload(lambda: kicked.append("go"))
+    running = {"on": True}
+
+    async def stop() -> None:
+        await asyncio.sleep(0.08)
+        running["on"] = False
+
+    await asyncio.gather(sup.watch(lambda: running["on"]), stop())
+    assert kicked == []
+    assert sup.status()["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_watch_starts_serve_when_it_is_down():
     sup, _killed, spawned, _healthy, _jobs, _listeners = _supervisor(
         healthy=False,
@@ -802,6 +848,9 @@ def test_daemon_always_starts_serve(monkeypatch):
         def bind(self, **kwargs):
             calls["kwargs"] = kwargs
 
+        def set_after_idle_reload(self, callback):
+            calls["after_idle"] = callback
+
         def ensure_started(self):
             calls["started"] = True
             return {"status": "started", "message": "OpenCode serve started."}
@@ -814,6 +863,7 @@ def test_daemon_always_starts_serve(monkeypatch):
     assert isinstance(kwargs, dict)
     assert set(kwargs) == {"live_jobs"}
     assert callable(kwargs["live_jobs"])
+    assert callable(calls["after_idle"])
     assert calls["started"] is True
     assert daemon._opencode_serve is not None
 

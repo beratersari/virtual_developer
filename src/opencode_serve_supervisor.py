@@ -345,10 +345,34 @@ class OpenCodeServeSupervisor:
         self._reload_marker = (
             Path(reload_marker) if reload_marker is not None else _reload_marker_path()
         )
+        self._after_idle_reload: Optional[Callable[[], None]] = None
 
     def bind(self, *, live_jobs: Callable[[], List[str]]) -> None:
         """Record who is in flight so a reload can wait."""
         self._jobs_fn = live_jobs
+
+    def set_after_idle_reload(self, callback: Optional[Callable[[], None]]) -> None:
+        """Call ``callback`` after an idle agent reload actually finished.
+
+        Queued rows are not started by the poller. The watch used to reload
+        and then go back to sleep, so those rows waited forever.
+        """
+        self._after_idle_reload = callback
+
+    def _kick_queue_after_idle_reload(self) -> None:
+        """Wake the queue only when the saved agents are on the new process."""
+        callback = self._after_idle_reload
+        if not callable(callback):
+            return
+        status = str(self.status().get("status") or "")
+        if status in {"deferred", "reloading", "failed"}:
+            return
+        if self.reload_outstanding():
+            return
+        try:
+            callback()
+        except Exception as exc:
+            logger.warning(f"Queue was not started after OpenCode reload: {exc}")
 
     def _marker_present(self) -> bool:
         """True when a save still needs a restart after this process is gone.
@@ -1086,6 +1110,7 @@ class OpenCodeServeSupervisor:
                     # serve is still started below.
                     if not (jobs is None or jobs):
                         await asyncio.to_thread(self.apply_pending_reload)
+                        self._kick_queue_after_idle_reload()
                         continue
                 healthy = await asyncio.to_thread(self._healthy)
             except asyncio.CancelledError:
