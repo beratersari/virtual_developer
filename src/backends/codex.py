@@ -1329,6 +1329,21 @@ class CodexBackend:
             f"[codex] exit ok returncode={code} duration={elapsed:.1f}s "
             f"thread={handle.get('session_id') or '-'}"
         )
+        from src.opencode_sessions import assistant_asked_question
+
+        answer = extract_codex_answer(blob)
+        if assistant_asked_question(answer):
+            return AgentRunResult(
+                returncode=2,
+                stdout=blob,
+                stderr="",
+                session_id=handle.get("session_id"),
+                incomplete=True,
+                incomplete_reasons=["assistant asked a clarifying question"],
+                progress=50,
+                backend=self.name,
+                extra={"assistant_asked_question": True},
+            )
         return AgentRunResult(
             returncode=code,
             stdout=blob,

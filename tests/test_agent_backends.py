@@ -522,6 +522,102 @@ async def test_codex_run_classifies_writer_lock_not_incomplete(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_codex_exit_zero_with_a_question_is_incomplete(tmp_path, monkeypatch):
+    from src.backends.base import AgentRunRequest
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    line = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Which database should I use?",
+            },
+        }
+    )
+
+    class _FakeProc:
+        pid = 4243
+        returncode = 0
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+
+        def __init__(self):
+            self.stdout.feed_data((line + "\n").encode())
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            return 0
+
+    async def _fake_exec(*_a, **_k):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    result = await CodexBackend().run(
+        AgentRunRequest(
+            prompt="implement",
+            working_directory=tmp_path,
+            timeout_seconds=5,
+        )
+    )
+    assert result.returncode == 2
+    assert result.incomplete is True
+    assert result.incomplete_reasons == ["assistant asked a clarifying question"]
+    assert result.extra.get("assistant_asked_question") is True
+    assert result.progress == 50
+
+
+@pytest.mark.asyncio
+async def test_codex_exit_zero_without_a_question_stays_success(tmp_path, monkeypatch):
+    from src.backends.base import AgentRunRequest
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    line = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Implemented the login form.",
+            },
+        }
+    )
+
+    class _FakeProc:
+        pid = 4244
+        returncode = 0
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+
+        def __init__(self):
+            self.stdout.feed_data((line + "\n").encode())
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            return 0
+
+    async def _fake_exec(*_a, **_k):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    result = await CodexBackend().run(
+        AgentRunRequest(
+            prompt="implement",
+            working_directory=tmp_path,
+            timeout_seconds=5,
+        )
+    )
+    assert result.returncode == 0
+    assert result.incomplete is False
+    assert result.progress == 100
+
+
+@pytest.mark.asyncio
 async def test_read_codex_exec_line_consumes_oversize_jsonl():
     """KAN-12375: huge git-diff JSONL must not abort the pump."""
     reader = asyncio.StreamReader(limit=64)
