@@ -637,7 +637,12 @@ class JobProcessor:
         try:
             from src.jira.client import assign_to_pat_user
 
-            if not getattr(settings, "jira_enabled", True):
+            # JIRA_ENABLED only stops the board poller. A saved host and
+            # token still assign the trigger user when a job starts.
+            if (
+                not getattr(settings, "jira_enabled", True)
+                and not settings.is_configured()
+            ):
                 return False
             return bool(assign_to_pat_user(self.jira_client, issue_key))
         except Exception as e:
