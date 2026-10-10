@@ -340,6 +340,14 @@ def test_parse_issue_mode_helper():
         )
         == "build"
     )
+    assert (
+        parse_issue_mode(
+            "",
+            "{params}\nRepository: https://g.com/a/b.git\n"
+            "*Mode:* plan\n{params}",
+        )
+        == "plan"
+    )
 
 
 def test_template_help_has_no_dot_git_suffix():

@@ -421,6 +421,9 @@ def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     block = _params_block_text(summary, description)
     if not block:
         return None
+    # Jira wiki writes ``*Mode:* plan``. The git-spec parser already strips
+    # that bold. The router uses this helper, so it has to strip too.
+    block = _strip_wiki_field_bold(block)
     m = _MODE_FIELD.search(block)
     if not m:
         return "build"
