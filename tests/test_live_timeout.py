@@ -32,6 +32,23 @@ def test_live_timeout_ignores_frozen_1800(monkeypatch):
     assert frozen.timeout_seconds == 7200
 
 
+def test_stored_timeout_zero_uses_the_default_budget(monkeypatch):
+    from src import config as config_mod
+    from src.config import compute_stuck_limit_seconds, live_agent_timeout_seconds
+
+    monkeypatch.setattr(config_mod.settings, "agent_task_timeout_seconds", 0)
+    assert live_agent_timeout_seconds() == 1800
+    assert compute_stuck_limit_seconds(live_agent_timeout_seconds(), 3) == 1800 * 4 * 1.5
+
+
+def test_stored_timeout_under_thirty_seconds_stays(monkeypatch):
+    from src import config as config_mod
+    from src.config import live_agent_timeout_seconds
+
+    monkeypatch.setattr(config_mod.settings, "agent_task_timeout_seconds", 15)
+    assert live_agent_timeout_seconds() == 15
+
+
 def test_timeout_save_writes_dotenv(tmp_path, monkeypatch):
     from src import config as config_mod
 

@@ -1698,7 +1698,14 @@ def live_agent_timeout_seconds(*, default: int = 1800) -> int:
     try:
         if raw is None or isinstance(raw, bool):
             return int(default)
-        return int(raw)
+        value = int(raw)
+        # A stored 0 is not a budget. The settings form shows 1800 for it
+        # (``or 1800``), and the watchdog used the 0 and failed the job
+        # immediately. A positive value under the form minimum stays, so an
+        # older runtime file of 15s is still 15s.
+        if value <= 0:
+            return int(default)
+        return value
     except (TypeError, ValueError):
         return int(default)
 
