@@ -786,6 +786,7 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadDialogOpen, setLoadDialogOpen] = useState(false)
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
@@ -828,11 +829,12 @@ export function SettingsPage() {
     setDraft(fromSettings(live.settings))
   }, [live.settings, settings])
 
-  useEffect(() => {
-    const ac = new AbortController()
-    void fetchSettings(ac.signal)
+  const loadSettings = useCallback((signal?: AbortSignal) => {
+    void fetchSettings(signal)
       .then((s) => {
-        if (ac.signal.aborted) return
+        if (signal?.aborted) return
+        setLoadError(null)
+        setLoadDialogOpen(false)
         const serverHasList = Array.isArray(s.project_repositories)
         if (serverHasList) projectsLoaded.current = true
         setSettings((cur) => {
@@ -852,11 +854,17 @@ export function SettingsPage() {
         }
       })
       .catch((e: unknown) => {
-        if (ac.signal.aborted) return
+        if (signal?.aborted) return
         setLoadError(e instanceof Error ? e.message : 'Could not load settings')
+        setLoadDialogOpen(true)
       })
-    return () => ac.abort()
   }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadSettings(ac.signal)
+    return () => ac.abort()
+  }, [loadSettings])
 
   const loadProjects = useCallback(async () => {
     const editor = projectsLoaded.current
@@ -1077,7 +1085,17 @@ export function SettingsPage() {
 
   if (!settings || !draft) {
     return (
-      <p className="text-sm text-text-muted">{loadError || 'Loading settings…'}</p>
+      <>
+        <p className="text-sm text-text-muted">{loadError || 'Loading settings…'}</p>
+        <ConfirmDialog
+          open={loadDialogOpen}
+          title="Could not load settings"
+          body={loadError || ''}
+          confirmLabel="Retry"
+          onConfirm={() => loadSettings()}
+          onCancel={() => setLoadDialogOpen(false)}
+        />
+      </>
     )
   }
 
@@ -1998,14 +2016,6 @@ export function SettingsPage() {
         confirmLabel="OK"
         onConfirm={() => setError(null)}
         onCancel={() => setError(null)}
-      />
-      <ConfirmDialog
-        open={loadError != null && error == null}
-        title="Could not load settings"
-        body={loadError || ''}
-        confirmLabel="OK"
-        onConfirm={() => setLoadError(null)}
-        onCancel={() => setLoadError(null)}
       />
     </section>
   )

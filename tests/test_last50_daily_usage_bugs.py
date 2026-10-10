@@ -6,6 +6,11 @@ running queue row. That pair is intentional and is not asserted here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SETTINGS = ROOT / "web" / "src" / "pages" / "settings" / "SettingsPage.tsx"
+
 _BUILD = (
     "{params}\n"
     "Repository: https://gitlab.example.com/acme/app.git\n"
@@ -30,3 +35,12 @@ def test_wiki_bold_mode_value_is_still_that_mode():
         WorkflowRouter.route_issue("KAN-1", "Fix login", _BUILD)
         == WorkflowType.EXECUTION
     )
+
+
+def test_settings_load_failure_dialog_is_on_screen():
+    """A failed settings load mounts the load dialog before the form."""
+    text = SETTINGS.read_text(encoding="utf-8")
+    early = text.split("if (!settings || !draft)", 1)[1].split(
+        "const saveButton", 1
+    )[0]
+    assert 'title="Could not load settings"' in early
