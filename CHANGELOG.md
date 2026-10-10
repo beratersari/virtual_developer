@@ -20,6 +20,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 - A Jira description that bolds the Mode value (`*Mode:* *build*`, and the same for plan and test) is accepted as that mode.
 - Settings opens the "Could not load settings" dialog when the settings request fails.
+- A failed Jobs list request stays an error. It does not say the filter is empty.
 
 ## [0.9.82] — 2026-10-09
 

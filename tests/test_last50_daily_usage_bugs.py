@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / "web" / "src" / "pages" / "settings" / "SettingsPage.tsx"
+JOBS = ROOT / "web" / "src" / "pages" / "jobs" / "JobsPage.tsx"
 
 _BUILD = (
     "{params}\n"
@@ -44,3 +45,15 @@ def test_settings_load_failure_dialog_is_on_screen():
         "const saveButton", 1
     )[0]
     assert 'title="Could not load settings"' in early
+
+
+def test_jobs_fetch_failure_does_not_say_the_filter_is_empty():
+    """A failed jobs request must not replace the page with an empty list."""
+    text = JOBS.read_text(encoding="utf-8")
+    load = text.split("const load = useCallback", 1)[1]
+    catch = load.split("} catch (e) {", 1)[1].split("} finally", 1)[0]
+    assert "jobs: []" not in catch
+    before_table = text.split("shownFor !== viewKey && !error", 1)[1].split(
+        "<JobsTable", 1
+    )[0]
+    assert "error && filteredJobs.length === 0" in before_table

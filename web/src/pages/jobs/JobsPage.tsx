@@ -154,15 +154,9 @@ export function JobsPage() {
         }
       } catch (e) {
         if (signal.aborted || isAbortError(e) || req !== reqId.current) return
-        if (!opts?.tick) {
-          setPayload({
-            jobs: [],
-            total: 0,
-            page: nextPage,
-            page_size: PAGE_SIZE,
-            server_time: '',
-          })
-        }
+        // A failed load must not replace the list with an empty filter.
+        // Rows already on screen stay. The first failure has no rows, so
+        // the alert is the result.
         setShownFor(key)
         setError(e instanceof Error ? e.message : 'Failed to load jobs')
       } finally {
@@ -494,7 +488,7 @@ export function JobsPage() {
             <Spinner /> Loading jobs…
           </span>
         </div>
-      ) : (
+      ) : error && filteredJobs.length === 0 ? null : (
         <JobsTable
           jobs={filteredJobs}
           selectable
