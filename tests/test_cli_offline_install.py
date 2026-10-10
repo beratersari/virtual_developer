@@ -12,10 +12,33 @@ BATS = {
 
 
 def test_each_worker_has_its_own_bat_and_host_config():
-    assert (CLI / "opencode.json").read_text(encoding="utf-8").count("YOUR_HOST") == 1
-    assert "YOUR_HOST" in (CLI / "config.toml").read_text(encoding="utf-8")
-    assert "ANTHROPIC_BASE_URL" in (CLI / "settings.json").read_text(encoding="utf-8")
-    assert "YOUR_HOST" in (CLI / "settings.json").read_text(encoding="utf-8")
+    opencode = (CLI / "opencode.json").read_text(encoding="utf-8")
+    codex = (CLI / "config.toml").read_text(encoding="utf-8")
+    claude = (CLI / "settings.json").read_text(encoding="utf-8")
+    assert opencode.count("YOUR_HOST") == 1
+    assert '"apiKey": "{env:AI_API_KEY}"' in opencode
+    assert "YOUR_TOKEN" not in opencode
+    assert "YOUR_HOST" in codex
+    assert 'env_key = "AI_API_KEY"' in codex
+    assert "CUSTOM_HOST_TOKEN" not in codex
+    assert "ANTHROPIC_BASE_URL" in claude
+    assert "YOUR_HOST" in claude
+    assert "apiKeyHelper" not in claude
+    assert "AI_API_KEY" not in claude
+    assert "ANTHROPIC_AUTH_TOKEN" not in claude
+    assert "YOUR_TOKEN" not in claude
+    assert not (CLI / "ai-api-key.cmd").exists()
+    assert not (ROOT / "packaging" / "linux" / "cli-offline" / "ai-api-key").exists()
+    claude_bat = (CLI / "install-claude.bat").read_text(encoding="utf-8")
+    assert "ai-api-key" not in claude_bat
+    assert "AI_API_KEY" not in claude_bat
+    claude_sh = (
+        ROOT / "packaging" / "linux" / "cli-offline" / "install-claude.sh"
+    ).read_text(encoding="utf-8")
+    assert "AI_API_KEY" not in claude_sh
+    codex_bat = (CLI / "install-codex.bat").read_text(encoding="utf-8")
+    assert "AI_API_KEY" in codex_bat
+    assert "CUSTOM_HOST_TOKEN" not in codex_bat
     for name, bat in BATS.items():
         text = bat.read_text(encoding="utf-8")
         assert f"{name}\\" in text
@@ -68,6 +91,8 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     assert "write_cli_zip opencode" in linux
     assert "write_cli_zip claude" in linux
     assert "write_cli_zip codex" in linux
+    assert "ai-api-key" not in text
+    assert "ai-api-key" not in linux
     assert 'base="yaver-${tool}-linux-x64-${version}"' in linux
     assert '>"$stage/VERSION"' in linux
     assert "linux-x64/claude" in linux

@@ -114,6 +114,21 @@ def test_serve_target_probes_loopback_when_the_bind_is_all_interfaces(monkeypatc
     assert serve_env({})["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
 
 
+def test_serve_env_reads_ai_api_key_from_the_pc(monkeypatch):
+    monkeypatch.setattr(
+        "src.orchestrator.agent_runner.read_host_system_environ",
+        lambda: {
+            "AI_API_KEY": "sk-from-machine",
+            "OPENCODE_DISABLE_MODELS_FETCH": "0",
+        },
+    )
+    env = serve_env({})
+    assert env["AI_API_KEY"] == "sk-from-machine"
+    assert env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
+    kept = serve_env({"AI_API_KEY": "already-set"})
+    assert kept["AI_API_KEY"] == "already-set"
+
+
 def test_blocking_keys_include_live_slots_and_planning_state():
     class _State:
         def __init__(self, key: str, status: str) -> None:

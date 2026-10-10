@@ -22,6 +22,7 @@ from src.state.job_store import JobStore
 _ANTHROPIC = "sk-ant-a104286-UNIQUE"
 _ANTHROPIC_AUTH = "anth-auth-a104286-UNIQUE"
 _CODEX = "codex-key-a104286-UNIQUE"
+_AI_KEY = "ai-key-a104286-UNIQUE"
 _DASH_PASS = "dash-pass-a104286-UNIQUE"
 _BASIC = "basic-a104286-UNIQUE"
 _HOST = "https://jira.a104286.example"
@@ -52,6 +53,7 @@ def _fast_serve_probes(monkeypatch):
 def test_issue_report_log_still_has_sibling_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", _ANTHROPIC)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", _ANTHROPIC_AUTH)
+    monkeypatch.setenv("AI_API_KEY", _AI_KEY)
     monkeypatch.setenv("CODEX_API_KEY", _CODEX)
     monkeypatch.setenv("DASHBOARD_PASSWORD", _DASH_PASS)
     monkeypatch.setenv("JIRA_HOST", _HOST)
@@ -69,6 +71,7 @@ def test_issue_report_log_still_has_sibling_secrets(tmp_path, monkeypatch):
             [
                 f"ANTHROPIC_API_KEY={_ANTHROPIC}",
                 f"ANTHROPIC_AUTH_TOKEN={_ANTHROPIC_AUTH}",
+                f"AI_API_KEY={_AI_KEY}",
                 f"CODEX_API_KEY={_CODEX}",
                 f"DASHBOARD_PASSWORD={_DASH_PASS}",
                 f"Authorization: Basic {_BASIC}",
@@ -100,6 +103,7 @@ def test_issue_report_log_still_has_sibling_secrets(tmp_path, monkeypatch):
         for label, secret in (
             ("ANTHROPIC_API_KEY", _ANTHROPIC),
             ("ANTHROPIC_AUTH_TOKEN", _ANTHROPIC_AUTH),
+            ("AI_API_KEY", _AI_KEY),
             ("CODEX_API_KEY", _CODEX),
             ("DASHBOARD_PASSWORD", _DASH_PASS),
             ("Authorization", _BASIC),

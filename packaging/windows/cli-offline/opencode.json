@@ -9,7 +9,7 @@
       "name": "Custom host",
       "options": {
         "baseURL": "https://YOUR_HOST/v1",
-        "apiKey": "YOUR_TOKEN"
+        "apiKey": "{env:AI_API_KEY}"
       },
       "models": {
         "YOUR_MODEL": {

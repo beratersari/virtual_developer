@@ -1300,6 +1300,7 @@ def _redact_report_text(text: str) -> str:
     for env_name in (
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "AI_API_KEY",
         "CODEX_API_KEY",
         "DASHBOARD_PASSWORD",
     ):

@@ -84,7 +84,23 @@ def serve_command(binary: str, host: str, port: int) -> List[str]:
 
 
 def serve_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Env for ``opencode serve``. Missing keys are filled from the PC.
+
+    ``AI_API_KEY`` is a Machine or User variable. OpenCode expands
+    ``{env:AI_API_KEY}`` in ``opencode.json`` from this process.
+    """
     env = dict(base if base is not None else os.environ)
+    from src.orchestrator.agent_runner import read_host_system_environ
+
+    for key, value in read_host_system_environ().items():
+        if not key or value is None:
+            continue
+        host_val = str(value)
+        if not host_val.strip():
+            continue
+        current = env.get(key)
+        if current is None or not str(current).strip():
+            env[key] = host_val
     env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"

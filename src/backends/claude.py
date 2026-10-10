@@ -263,9 +263,7 @@ def list_claude_server_models() -> tuple[List[tuple[str, str]], Optional[str], O
         err = None if found else "ANTHROPIC_BASE_URL is not set, so Claude models cannot be listed."
         return found, str(settings_path), err
 
-    token = (getattr(settings, "anthropic_auth_token", None) or "").strip()
-    if not token:
-        token = (os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    token = claude_api_token()
     headers = {"accept": "application/json", "anthropic-version": "2023-06-01"}
     if token:
         headers["x-api-key"] = token
@@ -291,8 +289,38 @@ def list_claude_server_models() -> tuple[List[tuple[str, str]], Optional[str], O
     return found, url, None
 
 
+def claude_api_token() -> str:
+    """Token for Claude HTTP calls.
+
+    A saved Yaver setting wins, then ``ANTHROPIC_AUTH_TOKEN`` or
+    ``ANTHROPIC_API_KEY``, then the shared ``AI_API_KEY`` system variable.
+    This function is for Yaver's own model list.
+    """
+    token = (getattr(settings, "anthropic_auth_token", None) or "").strip()
+    if token:
+        return token
+    names = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "AI_API_KEY")
+    for name in names:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    from src.orchestrator.agent_runner import read_host_system_environ
+
+    host = read_host_system_environ()
+    for name in names:
+        value = str(host.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def claude_child_env() -> Dict[str, str]:
-    """Process env for ``claude``. URL and token come from settings when set."""
+    """Process env for ``claude``. URL and token come from settings when set.
+
+    Claude reads ``ANTHROPIC_AUTH_TOKEN``. When that is not already set,
+    ``AI_API_KEY`` is copied into it. The shipped settings file must not
+    set ``ANTHROPIC_AUTH_TOKEN``, because that literal replaces this value.
+    """
     env = dict(os.environ)
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     base = (getattr(settings, "anthropic_base_url", None) or "").strip()
@@ -302,6 +330,17 @@ def claude_child_env() -> Dict[str, str]:
     if token:
         env["ANTHROPIC_AUTH_TOKEN"] = token
         env.setdefault("ANTHROPIC_API_KEY", token)
+        return env
+    if (env.get("ANTHROPIC_AUTH_TOKEN") or "").strip() or (env.get("ANTHROPIC_API_KEY") or "").strip():
+        return env
+    shared = (env.get("AI_API_KEY") or "").strip()
+    if not shared:
+        from src.orchestrator.agent_runner import read_host_system_environ
+
+        shared = str(read_host_system_environ().get("AI_API_KEY") or "").strip()
+    if shared:
+        env["ANTHROPIC_AUTH_TOKEN"] = shared
+        env.setdefault("ANTHROPIC_API_KEY", shared)
     return env
 
 

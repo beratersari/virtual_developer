@@ -50,7 +50,7 @@ if errorlevel 1 (
 
 echo [OK] Codex CLI copied to %DEST_EXE%
 echo [OK] Config copied to %DEST_CFG%
-echo Set CUSTOM_HOST_TOKEN to the token for YOUR_HOST, then open a new terminal.
+echo The API key is the AI_API_KEY system variable. Open a new terminal.
 call :maybe_pause
 exit /b 0
 

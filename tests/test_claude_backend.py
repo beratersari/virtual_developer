@@ -50,6 +50,52 @@ def test_normalize_claude_backend_name():
     assert get_agent_backend("claude").name == BACKEND_CLAUDE
 
 
+def test_claude_api_token_reads_ai_api_key(monkeypatch):
+    from src.backends.claude import claude_api_token
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_auth_token", "")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AI_API_KEY", "sk-shared")
+    assert claude_api_token() == "sk-shared"
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-direct")
+    assert claude_api_token() == "sk-direct"
+    monkeypatch.setattr(settings, "anthropic_auth_token", "sk-saved")
+    assert claude_api_token() == "sk-saved"
+    monkeypatch.setattr(settings, "anthropic_auth_token", "")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "src.orchestrator.agent_runner.read_host_system_environ",
+        lambda: {"AI_API_KEY": "sk-from-pc"},
+    )
+    assert claude_api_token() == "sk-from-pc"
+
+
+def test_claude_child_passes_ai_api_key_as_the_auth_token(monkeypatch):
+    from src.backends.claude import claude_child_env
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_auth_token", "")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AI_API_KEY", "sk-shared")
+    env = claude_child_env()
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-shared"
+    assert env["ANTHROPIC_API_KEY"] == "sk-shared"
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-already")
+    kept = claude_child_env()
+    assert kept["ANTHROPIC_AUTH_TOKEN"] == "sk-already"
+
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "anthropic_auth_token", "sk-saved")
+    saved = claude_child_env()
+    assert saved["ANTHROPIC_AUTH_TOKEN"] == "sk-saved"
+
+
 def test_build_claude_argv_is_unattended_and_has_no_secret():
     argv = build_claude_argv(
         cli="claude",
