@@ -21,20 +21,6 @@ from src.backends.base import (
 from src.config import settings
 from src.logger import logger
 
-DEFAULT_CLAUDE_NUDGE_PROMPT = (
-    "You are running unattended inside a daemon. There is no human in this "
-    "session and no one will answer questions. Do not ask clarifying "
-    "questions, confirmation, or multiple-choice options. Choose the safest "
-    "defaults consistent with AGENTS.md, the repository, and the original "
-    "issue. Finish the remaining work without waiting. Do not git push or "
-    "open a merge request — the orchestrator delivers the branch after you stop."
-)
-DEFAULT_CLAUDE_PLAN_NUDGE_PROMPT = (
-    "You are running unattended inside a daemon. There is no human in this "
-    "session and no one will answer questions. Choose the safest defaults "
-    "and finish the plan file only. Do not implement product code, install "
-    "tools, compile, or commit. Do not git push or open a merge request."
-)
 DEFAULT_CLAUDE_RESUME_PROMPT = (
     "UNATTENDED JOB: continue the work already started in this repository. "
     "Do not restart from scratch. Do not ask clarifying questions. "
@@ -74,10 +60,6 @@ def resolve_claude_agent_name(agent: str) -> str:
     if name in {"build", "plan"}:
         return f"derman-{name}"
     return name
-
-
-def _is_plan_agent(agent: str) -> bool:
-    return "plan" in (agent or "").lower()
 
 
 def prepare_claude_prompt(prompt: str) -> str:
@@ -839,11 +821,12 @@ class ClaudeBackend:
                         "[claude] assistant asked a clarifying question "
                         "— sending one unattended nudge"
                     )
-                    nudge = (
-                        DEFAULT_CLAUDE_PLAN_NUDGE_PROMPT
-                        if _is_plan_agent(agent)
-                        else DEFAULT_CLAUDE_NUDGE_PROMPT
-                    )
+                    from src.opencode_serve import unattended_nudge_prompt
+
+                    # The build nudge told derman-reviewer to implement and
+                    # derman-test to resume product work. Plan, review, and
+                    # test each have their own unattended text.
+                    nudge = unattended_nudge_prompt(agent)
                     await _send(nudge)
                     status = await _read_until_result()
                     if status in {"stall", "timeout"}:

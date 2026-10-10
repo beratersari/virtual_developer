@@ -449,6 +449,58 @@ async def test_claude_backend_nudges_once_then_finishes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_claude_review_nudge_does_not_tell_the_agent_to_implement(
+    tmp_path, monkeypatch
+):
+    from src.backends.base import AgentRunRequest
+    from src.backends.claude import ClaudeBackend
+
+    cli = _write_fake_claude(tmp_path)
+    seen = tmp_path / "prompts.txt"
+    (tmp_path / "fake_claude.py").write_text(
+        "\n".join(
+            [
+                "import json, sys",
+                f"SESSION = '{SESSION}'",
+                f"seen = open(r'{seen}', 'w', encoding='utf-8')",
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': SESSION}), flush=True)",
+                "turn = 0",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    turn += 1",
+                "    seen.write(line + '\\n')",
+                "    seen.flush()",
+                "    reply = 'Which database should I use?' if turn == 1 else 'Review written.'",
+                "    print(json.dumps({",
+                "        'type': 'result', 'subtype': 'success', 'is_error': False,",
+                "        'session_id': SESSION, 'result': reply,",
+                "    }), flush=True)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.backends.claude.resolve_claude_cli", lambda *_a, **_k: str(cli)
+    )
+    result = await ClaudeBackend().run(
+        AgentRunRequest(
+            prompt="review the merge request",
+            agent="derman-reviewer",
+            working_directory=tmp_path,
+            timeout_seconds=30,
+        )
+    )
+    assert result.extra.get("unattended_nudge") is True
+    text = seen.read_text(encoding="utf-8")
+    assert "Finish the review only" in text
+    assert "Finish all remaining work" not in text
+    assert "Do **not** implement" in text
+
+
+@pytest.mark.asyncio
 async def test_claude_backend_kills_a_silent_stream(tmp_path, monkeypatch):
     from src.backends.base import AgentRunRequest
     from src.backends.claude import ClaudeBackend
