@@ -64,7 +64,11 @@ def _running_jira(processor, key: str, *, summary: str, description: str) -> str
 
 
 def test_sigterm_leaves_inflight_work_for_the_next_start(processor, state_manager):
-    """Graceful stop keeps the issue and the queue row resumable."""
+    """Graceful stop keeps the issue and the queue row resumable.
+
+    The next start marks the leftover ERROR, posts the re-queue comment,
+    and queues the running row again. Both steps are intentional.
+    """
     qid = _running_jira(
         processor,
         "KAN-9",

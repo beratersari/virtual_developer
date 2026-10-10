@@ -4474,6 +4474,10 @@ class JobProcessor:
         accept-window or in-flight status is orphaned (no child process).
         Mark ERROR so poller can re-queue from To Do. Job rows whose issue
         state was already deleted are closed the same way.
+
+        INTENTIONAL: a process stop leaves a running queue row. This pass
+        still posts the re-queue comment (move the issue back to To Do),
+        and startup then resumes that row. Keep both steps.
         """
         recovered = 0
         for state in self.state_manager.get_active_issues():

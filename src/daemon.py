@@ -97,7 +97,11 @@ class JiraAgentDaemon:
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
 
-        # Disk PENDING/PLANNING/EXECUTING after crash is not a live job — finalise first
+        # INTENTIONAL: finalise a leftover in-flight row, then resume a
+        # queue row that process stop left running. Orphan recovery marks
+        # ERROR and posts the re-queue comment (move the issue back to To
+        # Do). recover_stuck_running below queues that same row, and
+        # dispatch starts it. Do not drop the comment because the job starts.
         try:
             n = self.processor.recover_orphaned_in_flight()
             if n:
