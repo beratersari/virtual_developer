@@ -108,13 +108,23 @@ _MODE_ALIASES = {
 }
 
 
+def _clean_mode_token(mode_raw: str) -> str:
+    """Drop wiki bold and punctuation around a Mode value.
+
+    Label bold (``*Mode:* plan``) is removed earlier. Jira also bolds the
+    value (``*Mode:* *build*``), which leaves ``*build*`` on the token.
+    """
+    token = (mode_raw or "").strip().lower().strip("`").strip()
+    return token.strip("*").rstrip(".,;:").strip("*")
+
+
 def _accepted_mode(mode_raw: str) -> str:
     """Alias (``implement`` → ``build``) or a mode saved in Settings.
 
     Empty when the token is unknown. Callers that omit Mode still default
     to build themselves.
     """
-    token = (mode_raw or "").strip().lower().strip("`").strip().rstrip(".,;:")
+    token = _clean_mode_token(mode_raw)
     if not token:
         return ""
     from src.work_modes import lookup
@@ -397,9 +407,7 @@ def peek_issue_git_fields(summary: str = "", description: str = "") -> Dict[str,
     backend_m = _BACKEND_FIELD.search(text)
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
-    mode_raw = (
-        (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
-    )
+    mode_raw = _clean_mode_token(mode_m.group(1) if mode_m else "")
     mode = _accepted_mode(mode_raw)
     return {
         "repository_url": repo if _looks_like_git_url(repo) else "",
@@ -421,16 +429,14 @@ def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     block = _params_block_text(summary, description)
     if not block:
         return None
-    # Jira wiki writes ``*Mode:* plan``. The git-spec parser already strips
-    # that bold. The router uses this helper, so it has to strip too.
+    # Jira wiki writes ``*Mode:* plan`` and ``*Mode:* *build*``. The
+    # git-spec parser already strips label bold. This helper strips it
+    # too, and ``_accepted_mode`` strips a bold value.
     block = _strip_wiki_field_bold(block)
     m = _MODE_FIELD.search(block)
     if not m:
         return "build"
-    token = (m.group(1) or "").strip().lower().strip("`").strip()
-    # Drop trailing punctuation
-    token = token.rstrip(".,;:")
-    return _accepted_mode(token) or None
+    return _accepted_mode(m.group(1) or "") or None
 
 
 def _extract_repo(text: str) -> str:
@@ -532,7 +538,7 @@ def parse_issue_git_spec(
 
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
-    mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
+    mode_raw = _clean_mode_token(mode_m.group(1) if mode_m else "")
     # Mode is optional — default build (Model / Backend already optional).
     # A name saved in Settings is accepted and kept as itself.
     mode = _accepted_mode(mode_raw) if mode_raw else "build"
