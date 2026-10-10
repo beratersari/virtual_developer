@@ -248,6 +248,52 @@ def test_deliver_review_ask_does_not_post_findings():
     assert "opencoderman-findings" not in body
 
 
+def test_deliver_review_inline_uses_the_matching_clone():
+    from src.processor import JobProcessor
+
+    proc = object.__new__(JobProcessor)
+    state = MagicMock()
+    state.issue_key = "KAN-1"
+    state.metadata = {}
+    live = MagicMock()
+    live.metadata = {
+        "target_branch": "develop",
+        "merge_request_url": "https://gitlab.example.com/acme/api/-/merge_requests/4",
+        "repository_url": "https://gitlab.example.com/acme/api.git",
+    }
+    parent = MagicMock()
+    parent.get_working_directory.return_value = "/workspace"
+    api = MagicMock()
+    api.remote_url = "https://gitlab.example.com/acme/api.git"
+    api.get_working_directory.return_value = "/workspace/api"
+    web = MagicMock()
+    web.remote_url = "https://gitlab.example.com/acme/web.git"
+    web.get_working_directory.return_value = "/workspace/web"
+    parent.repo_checkouts = [web, api]
+    proc._contexts = {"KAN-1": {"git": parent}}
+    proc.state_manager = MagicMock()
+    proc.state_manager.get_state.return_value = live
+    proc._post_gitlab_mr_reply = MagicMock()
+    proc._comment_command = MagicMock(return_value="review")
+    proc._finish_gitlab_reviewer = MagicMock()
+    event = MagicMock(
+        command="review",
+        target_branch="develop",
+        mr_url="https://gitlab.example.com/acme/api/-/merge_requests/4",
+        repository_url="https://gitlab.example.com/acme/api.git",
+    )
+    with patch("src.review.post.post_inline_findings", return_value=0) as post:
+        JobProcessor._deliver_review_comment(
+            proc,
+            state,
+            event,
+            "overview\n```opencoderman-findings\n"
+            '{"findings":[{"path":"a.py","start_line":1,"title":"t","body":"b"}]}\n```',
+            azure=False,
+        )
+    assert post.call_args.kwargs["workdir"] == "/workspace/api"
+
+
 def test_deliver_review_survives_findings_post_error():
     from src.processor import JobProcessor
 

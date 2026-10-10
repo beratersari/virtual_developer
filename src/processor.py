@@ -6944,6 +6944,48 @@ class JobProcessor:
             return None
         return None
 
+    def _review_workdir(self, issue_key: str, event: Any, meta: Dict[str, Any]):
+        """Clone ``merge-base`` should run in for this review.
+
+        A multi-repo workspace root is a folder of clones, not a git repo.
+        The diff belongs to the child whose remote is this review.
+        """
+        contexts = getattr(self, "_contexts", None)
+        git = None
+        if isinstance(contexts, dict):
+            git = (contexts.get(issue_key) or {}).get("git")
+        children = (
+            list(getattr(git, "repo_checkouts", None) or [])
+            if git is not None
+            else []
+        )
+        if len(children) > 1:
+            from src.dashboard.temp_storage import _remote_matches_review
+
+            needles: List[str] = []
+            for source in (
+                (meta or {}).get("merge_request_url"),
+                (meta or {}).get("pull_request_url"),
+                (meta or {}).get("repository_url"),
+                getattr(event, "mr_url", ""),
+                getattr(event, "pr_url", ""),
+                getattr(event, "repository_url", ""),
+            ):
+                text = str(source or "").strip()
+                if text and text not in needles:
+                    needles.append(text)
+            for child in children:
+                remote = str(getattr(child, "remote_url", "") or "")
+                if not needles or not any(
+                    _remote_matches_review(remote, needle) for needle in needles
+                ):
+                    continue
+                if hasattr(child, "get_working_directory"):
+                    return child.get_working_directory()
+                return getattr(child, "temp_dir", None)
+            return None
+        return self._workdir_for_issue(issue_key)
+
     def _deliver_review_comment(
         self,
         state: JiraAgentState,
@@ -6984,7 +7026,7 @@ class JobProcessor:
         try:
             posted = post_inline_findings(
                 findings=findings,
-                workdir=self._workdir_for_issue(state.issue_key),
+                workdir=self._review_workdir(state.issue_key, event, meta),
                 target_branch=target,
                 azure=azure,
                 meta=meta,
